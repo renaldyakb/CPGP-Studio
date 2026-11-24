@@ -1,0 +1,50 @@
+# Changelog: CPGP (Content Planer Gam Puko)
+
+Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunakan format Semantic Versioning (`MAJOR.MINOR.PATCH`).
+
+---
+
+## [v2.0.0] - 2026-11-25 (Multi-Workspace & Luxury Burgundy Release)
+
+### Highlight Rilis
+**CPGP v2.0.0** mentransformasi aplikasi dari *single-channel planner* menjadi **Multi-Workspace Local Content Studio** dengan identitas visual **Luxury Burgundy Minimalist**. Setiap kreator kini dapat mengelola banyak channel/workspace sekaligus di satu komputer lokal, memilih aturan file yang fleksibel (`wm_final.mp4` wajib, video langsung, atau timpa file asli), serta membuat struktur folder konten langsung dari antarmuka web.
+
+### Fitur Baru (Added)
+- **Identitas Brand CPGP & Tema Luxury Burgundy Minimalist**:
+  - Highlight utama pada brand **CPGP** (*Content Planer Gam Puko*) dengan palet merah burgundy (`#651220` / `#7F1D1D` pada Light Mode, `#881337` / `#FDA4AF` pada Dark Mode) dan gradasi burgundy khas (`--gradient-burgundy`) yang telah terverifikasi kontras WCAG AAA (`9.57:1` hingga `12.65:1`).
+- **Arsitektur Multi-Workspace Berbasis JSON Lokal (`data/workspaces.json`)**:
+  - Setiap workspace memiliki konfigurasi aturan file, database planner (`planner.json`), preset watermark (`watermark-presets.json`), dan konfigurasi auto-post yang terisolasi di `data/workspaces/<workspaceId>/`.
+  - **Migrasi Otomatis 0% Kehilangan Data**: Data `v1.0.0` (`D:\RENAL\JURNAL DUNIA\KONTEN`) otomatis dimigrasikan menjadi workspace default **`Jurnal Dunia`** saat pertama kali dijalankan.
+- **Workspace Switcher & Onboarding Wizard 3 Langkah (`WorkspaceModal.tsx`)**:
+  - Dropdown pemilih workspace di puncak sidebar kiri untuk berpindah antar-channel secara instan tanpa reload halaman.
+  - **Native Windows Folder Picker (`POST /api/system/pick-folder`)**: Tombol untuk membuka dialog *Browse Folder* asli Windows langsung dari browser beserta validator isi folder (`POST /api/system/validate-path`).
+  - **Salin Preset Watermark Antar-Workspace**: Menyalin gaya watermark dari workspace lama ke workspace baru dan otomatis mengganti teks `@handle`.
+- **3 Mode Aturan Video & Watermark (`watermarkPolicy`)**:
+  1. `separate_wm_file` (*Standar Jurnal Dunia*): Wajib memiliki `wm_final.mp4` terpisah dari video mentah (`motionprovit-*`) untuk berstatus `Siap Upload`.
+  2. `direct_or_wm` (*Kreator Standar*): File video `.mp4` apa pun di dalam folder langsung terbaca `Siap Upload` tanpa wajib `wm_final.mp4`.
+  3. `overwrite_source` (*Hemat Disk / Timpa File*): Hasil render di Watermark Studio langsung menimpa (*overwrite*) file video sumber secara atomik dan menandainya siap upload.
+- **Generator Konten ke Hardisk (`CreateContentModal.tsx`)**:
+  - **Smart Slot Finder (`GET /api/items/suggest-slot`)**: Otomatis mendeteksi dan menyarankan tanggal serta slot jam kosong berikutnya (misal setelah `29.02` otomatis menyarankan `30.01`).
+  - **Buat 1 Konten Baru (`POST /api/items/create`)**: Membuat folder fisik `<Root>\<Bulan>\<DD.SLOT>\` beserta file `caption.txt` terstruktur langsung dari Web UI.
+  - **Batch Slot Generator (`POST /api/items/batch-generate`)**: Men-generate kerangka folder konten dan template `caption.txt` untuk rentang tanggal (misal 1 minggu atau 1 bulan penuh) dalam sekali klik.
+- **Panduan Visual Ringkas & Kontekstual (`QuickGuideModal.tsx`)**:
+  - Diagram pohon folder dinamis dan panduan singkat anti-bertele-tele yang otomatis menyesuaikan dengan lokasi folder, `@handle`, dan aturan file dari workspace yang sedang aktif.
+
+### Perombakan & Peningkatan (Changed / Improved)
+- **Modularisasi Shared Code (`shared/`)**:
+  - Menyatukan parser dan komposer caption Unicode ke `shared/captionParser.ts`, definisi preset aturan ke `shared/rulePresets.ts`, dan tipe workspace ke `shared/types/workspace.ts`.
+- **Dynamic File Watcher (`chokidar`)**:
+  - Watcher file otomatis berpindah memantau folder `contentRootPath` milik workspace yang sedang aktif setiap kali pengguna berganti workspace.
+- **Halaman Detail Konten (`ContentDetailModal.tsx`)**:
+  - Dirampingkan menjadi *Slide-Over Sheet / Fullscreen Workbench* dengan bar aksi full-ikon ber-Tooltip dan 3 tab terpartisi (`Publikasi & Platform`, `Caption (caption.txt)`, `Berkas, Checklist & Catatan`).
+
+---
+
+## [v1.0.0] - 2026-11-24 (Initial Jurnal Dunia Release)
+
+### Fitur Awal
+- **Auto-Scanner Folder `KONTEN`**: Pemindaian rekursif folder `DD.SLOT` (`01` Siang `11.30 WIB` & `02` Malam `19.30 WIB`), deteksi `motionprovit-*`, `cover-*`, `caption.txt`, dan `wm_final.mp4`.
+- **5 Tampilan Kerja Ala Notion**: Papan Kanban (`@reui/kanban`), Tabel Database, Kalender Event (`@reui/event-calendar`), Matriks Jadwal Slot Harian, dan Galeri Vertikal 9:16.
+- **Two-Way `caption.txt` Disk Sync**: Edit caption langsung di Web UI dan simpan kembali ke file fisik `caption.txt` di hardisk.
+- **Custom Watermark Studio (`@resvg/resvg-js` + FFmpeg)**: Pratinjau SVG 100% WYSIWYG di atas video 9:16, drag-and-drop posisi, manajemen preset, dan render batch lossless-audio (`-c:a copy`, `libx264 CRF 16` / `h264_nvenc`).
+- **Dasbor Auto-Post 4 Platform (TanStack Router)**: Integrasi pemicu manual untuk YouTube Shorts (`googleapis` / browser), TikTok (`patchright` persistent profile), Instagram Reels (`Meta Graph API` / browser), dan Facebook Reels (`Meta Graph API` / browser).

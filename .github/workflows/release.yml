@@ -1,0 +1,95 @@
+name: Release CPGP Studio
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (misal v2.0.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Build production web UI (Vite)
+        run: npm run build
+
+      - name: Prepare CPGP Studio release bundle
+        id: bundle
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.tag }}" ]; then
+              TAG_NAME="${{ inputs.tag }}"
+            else
+              VERSION=$(node -p "require('./package.json').version")
+              TAG_NAME="v${VERSION}"
+            fi
+          fi
+          echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+          BUNDLE_DIR="release-bundle/CPGP-Studio-${TAG_NAME}"
+          mkdir -p "${BUNDLE_DIR}/data"
+          cp -r dist server shared bin src index.html package.json package-lock.json tsconfig.json vite.config.ts components.json start-planner.sh start-planner.bat README.md CHANGELOG.md DESIGN.md RULES.md "${BUNDLE_DIR}/"
+          touch "${BUNDLE_DIR}/data/.gitkeep"
+          chmod +x "${BUNDLE_DIR}/bin/cpgp-studio.mjs" "${BUNDLE_DIR}/start-planner.sh"
+
+          mkdir -p release-artifacts
+          (cd release-bundle && zip -rq "../release-artifacts/CPGP-Studio-${TAG_NAME}.zip" "CPGP-Studio-${TAG_NAME}")
+          (cd release-bundle && tar -czf "../release-artifacts/CPGP-Studio-${TAG_NAME}.tar.gz" "CPGP-Studio-${TAG_NAME}")
+
+          echo "zip=release-artifacts/CPGP-Studio-${TAG_NAME}.zip" >> "$GITHUB_OUTPUT"
+          echo "tar=release-artifacts/CPGP-Studio-${TAG_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bundle.outputs.tag }}
+          name: "CPGP Studio ${{ steps.bundle.outputs.tag }}"
+          generate_release_notes: true
+          body: |
+            ## CPGP Studio ${{ steps.bundle.outputs.tag }} (Content Planer Gam Puko)
+
+            Multi-Workspace Local Content Planner, Watermark Studio, dan Auto-Post Suite (YouTube Shorts, TikTok, Instagram Reels, Facebook Reels).
+
+            ### Cara Menjalankan Cepat
+            1. Ekstrak `CPGP-Studio-${{ steps.bundle.outputs.tag }}.zip` (atau `.tar.gz`).
+            2. Masuk ke folder hasil ekstrak lalu jalankan:
+               ```bash
+               npm install --omit=dev
+               npm link
+               cpgp-studio
+               ```
+               Atau cukup klik 2x **`start-planner.bat`** (Windows) / jalankan **`./start-planner.sh`** (Git Bash / macOS / Linux).
+
+            ### Fitur Utama
+            - Multi-Workspace JSON lokal + Native Folder Picker
+            - Tema Luxury Burgundy Minimalist (Light & Dark Mode)
+            - 3 Mode Aturan Watermark (`wm_final.mp4` terpisah, video langsung, atau overwrite video asli)
+            - `+ Konten Baru` dengan Smart Slot Finder & Batch Slot Generator
+            - Notifikasi pembaruan rilis otomatis dari GitHub
+          files: |
+            ${{ steps.bundle.outputs.zip }}
+            ${{ steps.bundle.outputs.tar }}
