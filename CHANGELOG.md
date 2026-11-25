@@ -4,6 +4,22 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.8.0] - 2026-11-26 (Interactive Luxury Burgundy Terminal Launcher: Device Check, Node.js LTS Auto-Installer & GitHub Updater)
+
+### Fitur Baru (Added)
+- **Interactive Terminal Launcher CPGP (`start-planner.bat`, `scripts/launcher.ps1`, `start-planner.sh`)**:
+  - Tampilan terminal modern bertema **Luxury Burgundy** dengan **ASCII Wordmark CPGP**, kotak border Unicode presisi, dan alur 5 tahap terstruktur:
+    1. **`[1/5]` Pemeriksaan Perangkat & Lingkungan**: Menampilkan OS + Build, Arsitektur (`x64`/`ARM64`), Prosesor, RAM, Kapasitas Disk bebas, deteksi Browser Lokal (`Chrome`/`Edge`), dan Mode Aplikasi (`Production Release` / `Development`).
+    2. **`[2/5]` Pemeriksaan Runtime Node.js (v20+ LTS)**: Jika Node.js belum terpasang atau di bawah v20, otomatis mengecek versi **Node.js LTS terbaru** dari `nodejs.org/dist/index.json` dan menampilkan **Radio Menu interaktif (`↑/↓` pindah, `Spasi` pilih `(●)`, `Enter` konfirmasi)**:
+       - **Install Node.js LTS terbaru otomatis sekarang** (via `winget OpenJS.NodeJS.LTS` atau fallback installer `.msi` resmi dari `nodejs.org`, lalu refresh `PATH` otomatis di sesi yang sama; atau Homebrew/nvm/NodeSource di macOS/Linux).
+       - **Nanti saja** -> menampilkan kotak panduan langkah demi langkah download & instalasi manual Node.js LTS.
+    3. **`[3/5]` Pemeriksaan Pembaruan GitHub (`renaldyakb/CPGP-Studio`)**: Otomatis membandingkan versi lokal dengan rilis terbaru GitHub. Jika ada versi lebih baru, menampilkan **notifikasi pembaruan + Radio Menu (`Spasi` + `Enter`)** untuk memilih **Update sekarang** (via `git pull` atau unduh & ekstrak ZIP rilis aman tanpa menyentuh `data/` dan `.cache/`) atau **Lanjutkan dengan versi saat ini**.
+    4. **`[4/5]` Pemeriksaan Struktur & Dependencies (`node_modules`)**: Memastikan folder `shared/` utuh dan otomatis menjalankan `npm install` / `npm install --omit=dev` bila belum terpasang atau baru diperbarui.
+    5. **`[5/5]` Menjalankan CPGP Studio (`bin/cpgp-studio.mjs`)**: Mendukung flag `--CheckOnly` / `--check-only` untuk diagnostik cepat tanpa menyalakan server.
+- **Bundling Release GitHub Actions (`.github/workflows/release.yml`)**: Menyertakan folder `scripts/` (`scripts/launcher.ps1`) ke dalam paket ZIP & TAR.GZ rilis otomatis.
+
+---
+
 ## [v2.7.1] - 2026-11-26 (Fix Reactive Style/Search Filter Counts & Scoped Download on MotionProvit Page)
 
 ### Perbaikan (Fixed)

@@ -52,7 +52,7 @@ jobs:
 
           BUNDLE_DIR="release-bundle/CPGP-Studio-${TAG_NAME}"
           mkdir -p "${BUNDLE_DIR}/data" "${BUNDLE_DIR}/src"
-          cp -r dist server shared bin docs "${BUNDLE_DIR}/"
+          cp -r dist server shared bin docs scripts "${BUNDLE_DIR}/"
           cp -r src/types "${BUNDLE_DIR}/src/"
           cp package.json package-lock.json start-planner.sh start-planner.bat README.md CHANGELOG.md "${BUNDLE_DIR}/"
           touch "${BUNDLE_DIR}/data/.gitkeep"
@@ -66,6 +66,7 @@ jobs:
           test -f "${BUNDLE_DIR}/src/types/watermark.ts"
           test -f "${BUNDLE_DIR}/server/index.ts"
           test -f "${BUNDLE_DIR}/bin/cpgp-studio.mjs"
+          test -f "${BUNDLE_DIR}/scripts/launcher.ps1"
 
           mkdir -p release-artifacts
           (cd release-bundle && zip -rq "../release-artifacts/CPGP-Studio-${TAG_NAME}.zip" "CPGP-Studio-${TAG_NAME}")
