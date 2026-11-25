@@ -7,10 +7,11 @@ import {
   getWorkspacePaths,
   WORKSPACES_REGISTRY_FILE,
 } from './workspaces/registry.ts';
+import { resolveAppRoot } from './core/appPaths.ts';
 import { getCurrentAppVersion } from './core/updateChecker.ts';
 
 const PORT = Number(process.env.PORT ?? 5173);
-const DIST_DIR = path.resolve(import.meta.dirname, '..', 'dist');
+const DIST_DIR = path.join(resolveAppRoot(), 'dist');
 const HAS_DIST = fs.existsSync(path.join(DIST_DIR, 'index.html'));
 
 const app = express();

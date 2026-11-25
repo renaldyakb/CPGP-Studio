@@ -294,7 +294,9 @@ OS_NAME="$(uname -s) $(uname -r)"
 ARCH_NAME="$(uname -m)"
 DISK_FREE="$(df -h "$SCRIPT_DIR" 2>/dev/null | awk 'NR==2 {print $4 " bebas"}' || echo "-")"
 MODE_LABEL="Development / Source"
-if [ -f "dist/index.html" ]; then
+if [ -f "dist/index.html" ] && [ -f "dist-server/server.mjs" ]; then
+  MODE_LABEL="Standalone Release (Zero npm install)"
+elif [ -f "dist/index.html" ]; then
   MODE_LABEL="Production Release (dist/)"
 fi
 
@@ -460,27 +462,36 @@ echo ""
 # ------------------------------------------------------------------------------
 step_header "5/6" "Pemeriksaan Struktur & Dependencies"
 
-if [ ! -f "shared/captionParser.ts" ]; then
-  status_err "Folder 'shared' tidak ditemukan! Pastikan file ZIP rilis diekstrak secara penuh."
+HAS_STANDALONE=0
+if [ -f "dist/index.html" ] && [ -f "dist-server/server.mjs" ]; then
+  HAS_STANDALONE=1
+fi
+
+if [ "$HAS_STANDALONE" -eq 0 ] && [ ! -f "shared/captionParser.ts" ]; then
+  status_err "Berkas inti aplikasi tidak ditemukan! Pastikan file arsip rilis diekstrak penuh."
   exit 1
 fi
 
-NPM_CMD="npm"
-if command -v npm.cmd >/dev/null 2>&1; then
-  NPM_CMD="npm.cmd"
-fi
-
-if [ ! -d "node_modules" ] || [ "$DID_UPDATE" -eq 1 ]; then
-  if [ -f "dist/index.html" ]; then
-    status_info "Memasang dependencies produksi (${NPM_CMD} install --omit=dev)..."
-    "$NPM_CMD" install --omit=dev
-  else
-    status_info "Memasang dependencies aplikasi (${NPM_CMD} install)..."
-    "$NPM_CMD" install
-  fi
-  status_ok "Dependencies berhasil dipasang."
+if [ "$HAS_STANDALONE" -eq 1 ] && [ -d "node_modules/@resvg/resvg-js" ] && [ -d "node_modules/patchright" ]; then
+  status_ok "Paket rilis mandiri lengkap (100% siap pakai tanpa npm install)."
 else
-  status_ok "Struktur berkas & node_modules lengkap dan siap."
+  NPM_CMD="npm"
+  if command -v npm.cmd >/dev/null 2>&1; then
+    NPM_CMD="npm.cmd"
+  fi
+
+  if [ ! -d "node_modules" ] || [ "$DID_UPDATE" -eq 1 ]; then
+    if [ -f "dist/index.html" ]; then
+      status_info "Memasang dependencies produksi (${NPM_CMD} install --omit=dev)..."
+      "$NPM_CMD" install --omit=dev
+    else
+      status_info "Memasang dependencies aplikasi (${NPM_CMD} install)..."
+      "$NPM_CMD" install
+    fi
+    status_ok "Dependencies berhasil dipasang."
+  else
+    status_ok "Struktur berkas & node_modules lengkap dan siap."
+  fi
 fi
 echo ""
 

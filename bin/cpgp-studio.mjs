@@ -115,16 +115,23 @@ Penggunaan:
   const customPort =
     portIdx !== -1 && args[portIdx + 1] ? Number(args[portIdx + 1]) : null;
   const distIndexPath = path.join(APP_DIR, 'dist', 'index.html');
+  const bundledServerPath = path.join(APP_DIR, 'dist-server', 'server.mjs');
+  const bundledScanPath = path.join(APP_DIR, 'dist-server', 'cli-scan.mjs');
   const hasProdBuild = fs.existsSync(distIndexPath);
+  const hasStandaloneServer =
+    hasProdBuild && fs.existsSync(bundledServerPath);
 
   console.log('========================================================================');
   console.log(`   CPGP Studio v${version} (Content Planer Gam Puko)`);
   console.log('   Multi-Workspace Content Planner | Watermark Studio | Auto-Post');
   console.log('========================================================================');
 
-  if (!fs.existsSync(path.join(APP_DIR, 'shared', 'captionParser.ts'))) {
+  if (
+    !hasStandaloneServer &&
+    !fs.existsSync(path.join(APP_DIR, 'shared', 'captionParser.ts'))
+  ) {
     console.error(
-      '\n[ERROR] Folder "shared" tidak ditemukan di dalam direktori aplikasi.'
+      '\n[ERROR] Berkas inti aplikasi tidak ditemukan di dalam direktori aplikasi.'
     );
     console.error(
       'Kemungkinan file ZIP rilis belum selesai diekstrak secara penuh.'
@@ -135,8 +142,8 @@ Penggunaan:
     process.exit(1);
   }
 
-  // Ensure node_modules exists before running
-  if (!fs.existsSync(path.join(APP_DIR, 'node_modules'))) {
+  // Standalone release bundle ships pre-compiled server + pre-packed runtime node_modules (ZERO npm install!)
+  if (!hasStandaloneServer && !fs.existsSync(path.join(APP_DIR, 'node_modules'))) {
     console.log(
       hasProdBuild
         ? 'Menginstall dependencies produksi (npm install --omit=dev)...'
@@ -152,16 +159,31 @@ Penggunaan:
   }
 
   if (args.includes('--scan-only')) {
-    const code = await runCommand(npmBin, ['run', 'scan']);
+    const code =
+      hasStandaloneServer && fs.existsSync(bundledScanPath)
+        ? await runCommand(process.execPath, [bundledScanPath])
+        : await runCommand(npmBin, ['run', 'scan']);
     process.exit(code);
   }
 
-  // Run initial scan before starting server
-  await runCommand(npmBin, ['run', 'scan']);
+  // Run initial scan before starting server (instant native Node.js in standalone mode!)
+  if (hasStandaloneServer && fs.existsSync(bundledScanPath)) {
+    await runCommand(process.execPath, [bundledScanPath]);
+  } else {
+    await runCommand(npmBin, ['run', 'scan']);
+  }
 
   const port = customPort || 5173;
   const url = `http://localhost:${port}`;
-  console.log(`\n  Mode   : ${hasProdBuild ? 'Production Bundle (dist/)' : 'Development (Vite)'}`);
+  console.log(
+    `\n  Mode   : ${
+      hasStandaloneServer
+        ? 'Standalone Zero-Install Release (dist + dist-server)'
+        : hasProdBuild
+          ? 'Production Bundle (dist/)'
+          : 'Development (Vite)'
+    }`
+  );
   console.log(`  Web UI : ${url}`);
   console.log('  Tekan Ctrl + C untuk menghentikan server.\n');
 
@@ -169,8 +191,13 @@ Penggunaan:
     openBrowser(url);
   }
 
-  if (hasProdBuild) {
-    // Run production standalone server serving dist/ + /api + /media
+  if (hasStandaloneServer) {
+    process.env.PORT = String(port);
+    process.env.CPGP_APP_ROOT = APP_DIR;
+    const code = await runCommand(process.execPath, [bundledServerPath]);
+    process.exit(code);
+  } else if (hasProdBuild) {
+    // Legacy production bundle serving dist/ via tsx
     process.env.PORT = String(port);
     const code = await runCommand(npmBin, ['run', 'server']);
     process.exit(code);

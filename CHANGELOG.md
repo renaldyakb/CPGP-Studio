@@ -4,6 +4,24 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.11.0] - 2026-11-26 (100% Zero `npm install` Standalone Multi-OS Release Bundles)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Kompilasi Backend Mandiri (`scripts/bundle-server.mjs`, `server/core/appPaths.ts`, `server/autopost/youtubeApi.ts`)**:
+  - Mengompilasi seluruh backend (`server/index.ts` -> `dist-server/server.mjs` dan `server/cli-scan.ts` -> `dist-server/cli-scan.mjs`) menggunakan `esbuild`, sehingga tidak lagi membutuhkan `tsx` atau 300+ paket `node_modules` saat dijalankan di rilis.
+  - Memangkas impor `googleapis` menjadi hanya sub-modul `youtube` (`googleapis/build/src/apis/youtube/index.js`) sehingga ukuran bundle turun drastis (~234 MB dihemat) dengan fitur YouTube Data API v3 tetap 100% utuh.
+  - Menambahkan `resolveAppRoot()` (`server/core/appPaths.ts`) agar path `dist/`, `data/`, dan `package.json` selalu konsisten baik saat berjalan dari TypeScript source maupun `dist-server/server.mjs`.
+- **Paket Rilis Multi-OS Tanpa `npm install` (`.github/workflows/release.yml`)**:
+  - GitHub Actions kini memproduksi 3 paket siap pakai per sistem operasi dengan `node_modules/` ultra-ramping (hanya 2 modul runtime native `@resvg/resvg-js` dan `patchright`) yang sudah terpasang di dalam arsip:
+    - **`CPGP-Studio-vX.Y.Z-win-x64.zip`** (Windows)
+    - **`CPGP-Studio-vX.Y.Z-macos-arm64.tar.gz`** (macOS Apple Silicon)
+    - **`CPGP-Studio-vX.Y.Z-linux-x64.tar.gz`** (Linux)
+  - Dilengkapi smoke-test otomatis pada masing-masing OS (`cli-scan.mjs`, `@resvg/resvg-js`, `patchright`) sebelum rilis dipublikasikan.
+- **Startup Instan Tanpa `npm install` (`bin/cpgp-studio.mjs`, `scripts/launcher.ps1`, `start-planner.sh`)**:
+  - Mendeteksi paket rilis mandiri (`dist/` + `dist-server/server.mjs` + runtime `node_modules`) lalu langsung menjalankan `node dist-server/server.mjs` dalam hitungan detik tanpa perlu `npm install` maupun koneksi internet.
+
+---
+
 ## [v2.10.0] - 2026-11-26 (First-Run Luxury Burgundy 4-Step Onboarding Stepper & Dynamic Workspace Folder Naming)
 
 ### Fitur Baru & Peningkatan (Added / Improved)

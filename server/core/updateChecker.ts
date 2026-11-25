@@ -24,9 +24,11 @@ export interface UpdateCheckResult {
 
 let cachedResult: { timestamp: number; data: UpdateCheckResult } | null = null;
 
+import { resolveAppRoot } from './appPaths.ts';
+
 export function getCurrentAppVersion(): string {
   try {
-    const pkgPath = path.resolve(import.meta.dirname, '..', '..', 'package.json');
+    const pkgPath = path.join(resolveAppRoot(), 'package.json');
     const raw = fs.readFileSync(pkgPath, 'utf-8');
     const parsed = JSON.parse(raw) as { version?: string };
     return (parsed.version ?? '2.0.0').replace(/^v/i, '').trim();

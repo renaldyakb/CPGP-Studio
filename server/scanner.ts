@@ -11,9 +11,11 @@ import type {
   ScheduleSlotInfo,
 } from '../src/types/planner.ts';
 
+import { resolveAppRoot } from './core/appPaths.ts';
+
 export { parseCaptionText };
 
-export const WORKSPACE_ROOT = path.resolve(import.meta.dirname, '..', '..');
+export const WORKSPACE_ROOT = path.resolve(resolveAppRoot(), '..');
 export const DEFAULT_CONTENT_ROOT = path.join(WORKSPACE_ROOT, 'KONTEN');
 export const DEFAULT_YEAR = new Date().getFullYear();
 export const OVERWRITE_WATERMARK_MARKER_FILE = '.cpgp-watermarked.json';

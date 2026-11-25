@@ -1,6 +1,7 @@
 # Dependencies & Build Outputs
 node_modules/
 dist/
+dist-server/
 *.tsbuildinfo
 
 # Local Runtime Data, User Workspaces, Tokens & Browser Sessions (NEVER commit)

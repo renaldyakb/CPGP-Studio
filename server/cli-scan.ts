@@ -2,9 +2,17 @@ import { syncDatabaseWithDisk } from './storage.ts';
 import {
   getActiveWorkspace,
   getWorkspacePaths,
+  hasConfiguredWorkspace,
 } from './workspaces/registry.ts';
 
 function runCliScan() {
+  if (!hasConfiguredWorkspace()) {
+    console.log(
+      'CPGP Studio siap untuk penyiapan awal (Onboarding Workspace).'
+    );
+    return;
+  }
+
   const activeWorkspace = getActiveWorkspace();
   const workspacePaths = getWorkspacePaths(activeWorkspace.id);
 

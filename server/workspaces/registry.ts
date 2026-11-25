@@ -15,6 +15,7 @@ import type {
 } from '../../shared/types/workspace.ts';
 import type { PlatformKey } from '../../src/types/planner.ts';
 import type { WatermarkPresetStore } from '../../src/types/watermark.ts';
+import { resolveAppRoot } from '../core/appPaths.ts';
 import {
   DEFAULT_CONTENT_ROOT,
   DEFAULT_YEAR,
@@ -22,7 +23,7 @@ import {
   migrateLegacyMonthFoldersOnDisk,
 } from '../scanner.ts';
 
-export const APP_ROOT = path.resolve(import.meta.dirname, '..', '..');
+export const APP_ROOT = resolveAppRoot();
 export const DATA_DIR = path.join(APP_ROOT, 'data');
 export const WORKSPACES_REGISTRY_FILE = path.join(DATA_DIR, 'workspaces.json');
 export const WORKSPACES_DATA_ROOT = path.join(DATA_DIR, 'workspaces');

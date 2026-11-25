@@ -1,5 +1,8 @@
 import fs from 'node:fs';
-import { google } from 'googleapis';
+import {
+  auth as googleAuth,
+  youtube as createYouTubeClient,
+} from 'googleapis/build/src/apis/youtube/index.js';
 import type { WorkspaceMetadata } from '../../shared/types/workspace.ts';
 import type { AutoPostMode } from '../../src/types/autopost.ts';
 import type { ContentPlannerItem } from '../../src/types/planner.ts';
@@ -59,7 +62,7 @@ function buildOAuth2Client(origin?: string, workspaceId?: string) {
   }
 
   const finalRedirectUri = resolveRedirectUri(redirectUri, origin);
-  return new google.auth.OAuth2(clientId, clientSecret, finalRedirectUri);
+  return new googleAuth.OAuth2(clientId, clientSecret, finalRedirectUri);
 }
 
 export function createYouTubeOAuthUrl(origin: string): string {
@@ -86,7 +89,7 @@ export async function exchangeYouTubeOAuthCode(
 
   let channelTitle: string | null = null;
   try {
-    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+    const youtube = createYouTubeClient({ version: 'v3', auth: oauth2Client });
     const channelRes = await youtube.channels.list({
       part: ['snippet'],
       mine: true,
@@ -179,7 +182,7 @@ export async function publishToYouTubeApi(
     }
   });
 
-  const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+  const youtube = createYouTubeClient({ version: 'v3', auth: oauth2Client });
   const totalBytes = Math.max(1, fs.statSync(videoPath).size);
   const title = buildYouTubeTitle(item);
   const description = item.autoMetadata.captionParsed.rawText || title;

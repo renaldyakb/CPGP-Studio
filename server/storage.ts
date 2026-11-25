@@ -19,13 +19,14 @@ import {
   scanSingleContentFolder,
   type ScannedContentFolder,
 } from './scanner.ts';
+import { resolveAppRoot } from './core/appPaths.ts';
 import {
   getActiveWorkspace,
   getWorkspacePaths,
   LEGACY_PLANNER_FILE,
 } from './workspaces/registry.ts';
 
-export const APP_ROOT = path.resolve(import.meta.dirname, '..');
+export const APP_ROOT = resolveAppRoot();
 export const DATA_DIR = path.join(APP_ROOT, 'data');
 export const DATABASE_FILE_PATH = path.join(DATA_DIR, 'planner-data.json');
 

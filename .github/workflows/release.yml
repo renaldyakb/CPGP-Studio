@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (misal v2.0.1)'
+        description: 'Release tag (misal v2.11.0)'
         required: false
         default: ''
 
@@ -15,8 +15,10 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-app:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,17 +29,8 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci || npm install
-
-      - name: TypeScript typecheck
-        run: npm run typecheck
-
-      - name: Build production web UI (Vite)
-        run: npm run build
-
-      - name: Prepare CPGP Studio production release bundle
-        id: bundle
+      - name: Resolve release tag
+        id: meta
         run: |
           TAG_NAME="${GITHUB_REF_NAME}"
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
@@ -50,55 +43,177 @@ jobs:
           fi
           echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
 
-          BUNDLE_DIR="release-bundle/CPGP-Studio-${TAG_NAME}"
-          mkdir -p "${BUNDLE_DIR}/data" "${BUNDLE_DIR}/src"
-          cp -r dist server shared bin docs scripts "${BUNDLE_DIR}/"
-          cp -r src/types "${BUNDLE_DIR}/src/"
-          cp package.json package-lock.json start-planner.sh start-planner.bat README.md CHANGELOG.md "${BUNDLE_DIR}/"
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Build production frontend (Vite -> dist/)
+        run: npm run build
+
+      - name: Bundle production backend (esbuild -> dist-server/)
+        run: npm run build:server
+
+      - name: Verify compiled outputs
+        run: |
+          test -f dist/index.html
+          test -f dist-server/server.mjs
+          test -f dist-server/cli-scan.mjs
+
+      - name: Upload compiled app artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpgp-compiled
+          path: |
+            dist/
+            dist-server/
+          retention-days: 1
+
+  package-standalone:
+    needs: build-app
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform_id: win-x64
+            archive_ext: zip
+          - os: ubuntu-latest
+            platform_id: linux-x64
+            archive_ext: tar.gz
+          - os: macos-latest
+            platform_id: macos-arm64
+            archive_ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download compiled dist & dist-server
+        uses: actions/download-artifact@v4
+        with:
+          name: cpgp-compiled
+          path: .
+
+      - name: Assemble 100% Zero-npm-install Standalone Bundle
+        shell: bash
+        env:
+          TAG_NAME: ${{ needs.build-app.outputs.tag }}
+          PLATFORM_ID: ${{ matrix.platform_id }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+          BUNDLE_NAME="CPGP-Studio-${TAG_NAME}-${PLATFORM_ID}"
+          BUNDLE_DIR="release-bundle/${BUNDLE_NAME}"
+          mkdir -p "${BUNDLE_DIR}/data" "${BUNDLE_DIR}/scripts"
+
+          # Copy pre-compiled frontend + backend + launchers + docs
+          cp -r dist dist-server bin docs "${BUNDLE_DIR}/"
+          cp scripts/launcher.ps1 "${BUNDLE_DIR}/scripts/"
+          cp package.json start-planner.sh start-planner.bat README.md CHANGELOG.md "${BUNDLE_DIR}/"
           touch "${BUNDLE_DIR}/data/.gitkeep"
-          # Ensure Windows batch file always uses CRLF and shell/CLI scripts use LF
-          node -e "const fs = require('fs'); const bat = '${BUNDLE_DIR}/start-planner.bat'; fs.writeFileSync(bat, fs.readFileSync(bat, 'utf8').replace(/\r?\n/g, '\r\n'), 'utf8');"
+
+          # Install ONLY the 2 external runtime packages (@resvg/resvg-js + patchright)
+          # natively for this OS so users NEVER need to run npm install!
+          mkdir -p runtime-deps
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const runtimePkg = {
+              name: 'cpgp-runtime-deps',
+              private: true,
+              dependencies: {
+                '@resvg/resvg-js': pkg.dependencies['@resvg/resvg-js'],
+                'patchright': pkg.dependencies['patchright']
+              }
+            };
+            fs.writeFileSync('runtime-deps/package.json', JSON.stringify(runtimePkg, null, 2));
+          "
+          (cd runtime-deps && npm install --omit=dev --no-audit --no-fund)
+          mv runtime-deps/node_modules "${BUNDLE_DIR}/node_modules"
+
+          # Normalize line endings (CRLF for .bat, LF for .sh/.mjs)
+          node -e "
+            const fs = require('fs');
+            const bat = '${BUNDLE_DIR}/start-planner.bat';
+            fs.writeFileSync(bat, fs.readFileSync(bat, 'utf8').replace(/\r?\n/g, '\r\n'), 'utf8');
+          "
           chmod +x "${BUNDLE_DIR}/bin/cpgp-studio.mjs" "${BUNDLE_DIR}/start-planner.sh"
 
-          # Verify essential runtime files exist inside the bundle before archiving
-          test -f "${BUNDLE_DIR}/dist/index.html"
-          test -f "${BUNDLE_DIR}/shared/captionParser.ts"
-          test -f "${BUNDLE_DIR}/src/types/watermark.ts"
-          test -f "${BUNDLE_DIR}/server/index.ts"
-          test -f "${BUNDLE_DIR}/bin/cpgp-studio.mjs"
-          test -f "${BUNDLE_DIR}/scripts/launcher.ps1"
+          # Smoke-test the assembled standalone bundle directly with Node.js (ZERO npm install!)
+          (
+            cd "${BUNDLE_DIR}"
+            node dist-server/cli-scan.mjs
+            node -e "
+              Promise.all([import('@resvg/resvg-js'), import('patchright')])
+                .then(([r, p]) => {
+                  if (typeof r.Resvg !== 'function') throw new Error('Resvg missing');
+                  if (!p.chromium) throw new Error('Patchright chromium missing');
+                  console.log('STANDALONE RUNTIME OK:', process.platform, process.arch);
+                })
+                .catch((err) => { console.error(err); process.exit(1); });
+            "
+          )
 
+          # Archive platform bundle
           mkdir -p release-artifacts
-          (cd release-bundle && zip -rq "../release-artifacts/CPGP-Studio-${TAG_NAME}.zip" "CPGP-Studio-${TAG_NAME}")
-          (cd release-bundle && tar -czf "../release-artifacts/CPGP-Studio-${TAG_NAME}.tar.gz" "CPGP-Studio-${TAG_NAME}")
+          if [ "${ARCHIVE_EXT}" = "zip" ]; then
+            if command -v pwsh >/dev/null 2>&1; then
+              pwsh -NoProfile -Command "Compress-Archive -Path 'release-bundle/${BUNDLE_NAME}' -DestinationPath 'release-artifacts/${BUNDLE_NAME}.zip' -CompressionLevel Optimal -Force"
+            else
+              (cd release-bundle && zip -rq "../release-artifacts/${BUNDLE_NAME}.zip" "${BUNDLE_NAME}")
+            fi
+          else
+            (cd release-bundle && tar -czf "../release-artifacts/${BUNDLE_NAME}.tar.gz" "${BUNDLE_NAME}")
+          fi
 
-          echo "zip=release-artifacts/CPGP-Studio-${TAG_NAME}.zip" >> "$GITHUB_OUTPUT"
-          echo "tar=release-artifacts/CPGP-Studio-${TAG_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          ls -lh release-artifacts/
+
+      - name: Upload platform release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform_id }}
+          path: release-artifacts/*
+          retention-days: 1
+
+  publish-release:
+    needs: [build-app, package-standalone]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: List final release assets
+        run: ls -lh release-artifacts/
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.bundle.outputs.tag }}
-          name: "CPGP Studio ${{ steps.bundle.outputs.tag }}"
+          tag_name: ${{ needs.build-app.outputs.tag }}
+          name: "CPGP Studio ${{ needs.build-app.outputs.tag }}"
           generate_release_notes: true
           body: |
-            ## CPGP Studio ${{ steps.bundle.outputs.tag }} (Content Planer Gam Puko)
+            ## CPGP Studio ${{ needs.build-app.outputs.tag }} (Content Planer Gam Puko)
 
-            Multi-Workspace Local Content Planner, Watermark Studio, dan Auto-Post Suite (YouTube Shorts, TikTok, Instagram Reels, Facebook Reels).
+            **100% Zero `npm install` Standalone Release** — Ekstrak lalu langsung jalan dalam hitungan detik!
+            Seluruh fitur lengkap sudah pre-compiled & siap pakai (Multi-Workspace Content Planner, Watermark Studio Multi-GPU, Auto-Post 4 Platform tanpa API Key, dan Add-on MotionProvit).
 
-            ### Cara Menjalankan Cepat (Production Bundle)
-            1. Klik kanan **`CPGP-Studio-${{ steps.bundle.outputs.tag }}.zip`** lalu pilih **Extract All...** ke folder lokal (disarankan di luar OneDrive, misal `D:\CPGP-Studio`).
-            2. Klik 2x **`start-planner.bat`** (Windows) atau jalankan **`./start-planner.sh`** (Git Bash / macOS / Linux).
-            3. Atau pasang perintah terminal global `cpgp-studio`:
-               ```bash
-               npm install --omit=dev
-               npm link
-               cpgp-studio
-               ```
-
-            ### Catatan Penting
-            - Paket rilis sudah menyertakan hasil build production (`dist/`) sehingga berjalan ringan langsung via Node.js tanpa perlu Vite dev server.
-            - Jika ada versi baru di GitHub Releases, CPGP otomatis menampilkan banner notifikasi update di bagian atas aplikasi.
+            ### Cara Menjalankan Cepat (Tanpa `npm install`)
+            - **Windows (`CPGP-Studio-${{ needs.build-app.outputs.tag }}-win-x64.zip`)**:
+              1. Klik kanan file ZIP -> **Extract All...** ke folder lokal (misal `D:\CPGP-Studio`).
+              2. Klik 2x **`start-planner.bat`** — launcher otomatis cek perangkat, Node.js LTS, FFmpeg, Chrome/Edge, lalu langsung membuka **CPGP Studio** (tanpa `npm install`).
+            - **macOS (`CPGP-Studio-${{ needs.build-app.outputs.tag }}-macos-arm64.tar.gz`) / Linux (`CPGP-Studio-${{ needs.build-app.outputs.tag }}-linux-x64.tar.gz`)**:
+              1. Ekstrak arsip `.tar.gz`.
+              2. Jalankan **`./start-planner.sh`**.
           files: |
-            ${{ steps.bundle.outputs.zip }}
-            ${{ steps.bundle.outputs.tar }}
+            release-artifacts/*

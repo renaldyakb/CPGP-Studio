@@ -452,7 +452,8 @@ function Invoke-GitHubSelfUpdate {
     }
 
     Write-StatusInfo 'Menyalin pembaruan (folder data/ dan .cache/ tetap aman)...'
-    $protected = @('data', '.cache', 'node_modules', '.git')
+    $bundleHasStandalone = (Test-Path -LiteralPath (Join-Path $sourceRoot 'dist-server\server.mjs')) -and (Test-Path -LiteralPath (Join-Path $sourceRoot 'node_modules'))
+    $protected = if ($bundleHasStandalone) { @('data', '.cache', '.git') } else { @('data', '.cache', 'node_modules', '.git') }
     $entries = Get-ChildItem -LiteralPath $sourceRoot -Force
     foreach ($entry in $entries) {
       if ($protected -contains $entry.Name) { continue }
@@ -525,8 +526,9 @@ if ((Test-Path "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") -or (T
 }
 $browserLabel = if ($browsers.Count -gt 0) { $browsers -join ', ' } else { 'Tidak terdeteksi (opsional)' }
 
-$hasProdBuild = Test-Path -LiteralPath (Join-Path $AppRoot 'dist\index.html')
-$modeLabel    = if ($hasProdBuild) { 'Production Release (dist/)' } else { 'Development / Source' }
+$hasProdBuild   = Test-Path -LiteralPath (Join-Path $AppRoot 'dist\index.html')
+$hasStandalone  = $hasProdBuild -and (Test-Path -LiteralPath (Join-Path $AppRoot 'dist-server\server.mjs'))
+$modeLabel      = if ($hasStandalone) { 'Standalone Release (Zero npm install)' } elseif ($hasProdBuild) { 'Production Release (dist/)' } else { 'Development / Source' }
 
 Write-InfoRow -Label 'Sistem Operasi' -Value $osCaption
 Write-InfoRow -Label 'Arsitektur'     -Value $archLabel
@@ -709,7 +711,10 @@ try {
     $latestVersion = $latestTag -replace '^v', ''
     if ($rel.html_url) { $releaseUrl = [string]$rel.html_url }
     if ($rel.assets) {
-      $zipAsset = $rel.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
+      $zipAsset = $rel.assets | Where-Object { $_.name -like '*-win-x64.zip' } | Select-Object -First 1
+      if (-not $zipAsset) {
+        $zipAsset = $rel.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
+      }
       if ($zipAsset) { $zipAssetUrl = [string]$zipAsset.browser_download_url }
     }
     $checkOk = $true
@@ -777,8 +782,12 @@ Write-Host ''
 # ------------------------------------------------------------------------------
 Write-StepHeader -StepTag '5/6' -Title 'Pemeriksaan Struktur & Dependencies'
 
-if (-not (Test-Path -LiteralPath (Join-Path $AppRoot 'shared\captionParser.ts'))) {
-  Write-StatusErr 'Folder "shared" tidak ditemukan!'
+$hasProdBuild   = Test-Path -LiteralPath (Join-Path $AppRoot 'dist\index.html')
+$hasStandalone  = $hasProdBuild -and (Test-Path -LiteralPath (Join-Path $AppRoot 'dist-server\server.mjs'))
+$hasRuntimeDeps = (Test-Path -LiteralPath (Join-Path $AppRoot 'node_modules\@resvg\resvg-js')) -and (Test-Path -LiteralPath (Join-Path $AppRoot 'node_modules\patchright'))
+
+if (-not $hasStandalone -and -not (Test-Path -LiteralPath (Join-Path $AppRoot 'shared\captionParser.ts'))) {
+  Write-StatusErr 'Berkas inti aplikasi tidak ditemukan!'
   Write-StatusInfo 'Pastikan file ZIP rilis sudah diekstrak penuh (Extract All) ke folder lokal seperti D:\CPGP-Studio.'
   Write-Host ''
   Write-Host "  ${MUTED}Tekan tombol apa saja untuk keluar...${RST}"
@@ -786,28 +795,30 @@ if (-not (Test-Path -LiteralPath (Join-Path $AppRoot 'shared\captionParser.ts'))
   exit 1
 }
 
-$hasNodeModules = Test-Path -LiteralPath (Join-Path $AppRoot 'node_modules')
-$hasProdBuild   = Test-Path -LiteralPath (Join-Path $AppRoot 'dist\index.html')
-
-if (-not $hasNodeModules -or $didUpdate) {
-  if ($hasProdBuild) {
-    Write-StatusInfo 'Memasang dependencies produksi (npm install --omit=dev)...'
-    & npm.cmd install --omit=dev
-  } else {
-    Write-StatusInfo 'Memasang dependencies aplikasi (npm install)...'
-    & npm.cmd install
-  }
-  if ($LASTEXITCODE -ne 0) {
-    Write-StatusErr 'Gagal menginstall dependencies dengan npm.'
-    Write-StatusInfo 'Periksa koneksi internet Anda lalu jalankan ulang start-planner.bat.'
-    Write-Host ''
-    Write-Host "  ${MUTED}Tekan tombol apa saja untuk keluar...${RST}"
-    if (-not [Console]::IsInputRedirected) { [void][Console]::ReadKey($true) }
-    exit 1
-  }
-  Write-StatusOk 'Dependencies berhasil dipasang.'
+if ($hasStandalone -and $hasRuntimeDeps) {
+  Write-StatusOk 'Paket rilis mandiri lengkap (100% siap pakai tanpa npm install).'
 } else {
-  Write-StatusOk 'Struktur berkas & node_modules lengkap dan siap.'
+  $hasNodeModules = Test-Path -LiteralPath (Join-Path $AppRoot 'node_modules')
+  if (-not $hasNodeModules -or $didUpdate) {
+    if ($hasProdBuild) {
+      Write-StatusInfo 'Memasang dependencies produksi (npm install --omit=dev)...'
+      & npm.cmd install --omit=dev
+    } else {
+      Write-StatusInfo 'Memasang dependencies aplikasi (npm install)...'
+      & npm.cmd install
+    }
+    if ($LASTEXITCODE -ne 0) {
+      Write-StatusErr 'Gagal menginstall dependencies dengan npm.'
+      Write-StatusInfo 'Periksa koneksi internet Anda lalu jalankan ulang start-planner.bat.'
+      Write-Host ''
+      Write-Host "  ${MUTED}Tekan tombol apa saja untuk keluar...${RST}"
+      if (-not [Console]::IsInputRedirected) { [void][Console]::ReadKey($true) }
+      exit 1
+    }
+    Write-StatusOk 'Dependencies berhasil dipasang.'
+  } else {
+    Write-StatusOk 'Struktur berkas & node_modules lengkap dan siap.'
+  }
 }
 Write-Host ''
 
