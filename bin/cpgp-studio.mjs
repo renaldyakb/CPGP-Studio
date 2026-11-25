@@ -51,10 +51,11 @@ function openBrowser(url) {
 
 function runCommand(cmd, cmdArgs) {
   return new Promise((resolve) => {
+    const needsShell = isWindows && /\.(cmd|bat)$/i.test(cmd);
     const child = spawn(cmd, cmdArgs, {
       cwd: APP_DIR,
       stdio: 'inherit',
-      shell: isWindows,
+      shell: needsShell,
     });
     child.on('exit', (code) => resolve(code ?? 0));
   });

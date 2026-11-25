@@ -4,6 +4,15 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.11.1] - 2026-11-26 (Fix Windows Path Space Bug in Standalone Release CLI Launcher)
+
+### Perbaikan (Fixed)
+- **Perbaikan Error `'C:\Program' is not recognized` di Mode Standalone (`bin/cpgp-studio.mjs`)**:
+  - Memperbaiki `runCommand()` agar hanya mengaktifkan `shell: true` untuk skrip `.cmd`/`.bat` (`npm.cmd`), dan menjalankan binary `node.exe` (`process.execPath`) secara langsung dengan `shell: false`.
+  - Menghilangkan kegagalan saat `node.exe` berada di `C:\Program Files\nodejs\node.exe` atau saat folder ekstrak mengandung spasi, sekaligus menghilangkan peringatan `DEP0190`.
+
+---
+
 ## [v2.11.0] - 2026-11-26 (100% Zero `npm install` Standalone Multi-OS Release Bundles)
 
 ### Fitur Baru & Peningkatan (Added / Improved)
