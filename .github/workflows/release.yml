@@ -56,6 +56,8 @@ jobs:
           cp -r src/types "${BUNDLE_DIR}/src/"
           cp package.json package-lock.json start-planner.sh start-planner.bat README.md CHANGELOG.md "${BUNDLE_DIR}/"
           touch "${BUNDLE_DIR}/data/.gitkeep"
+          # Ensure Windows batch file always uses CRLF and shell/CLI scripts use LF
+          node -e "const fs = require('fs'); const bat = '${BUNDLE_DIR}/start-planner.bat'; fs.writeFileSync(bat, fs.readFileSync(bat, 'utf8').replace(/\r?\n/g, '\r\n'), 'utf8');"
           chmod +x "${BUNDLE_DIR}/bin/cpgp-studio.mjs" "${BUNDLE_DIR}/start-planner.sh"
 
           # Verify essential runtime files exist inside the bundle before archiving

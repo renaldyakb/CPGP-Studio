@@ -4,6 +4,14 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.0.2] - 2026-11-25 (Windows Batch Launcher Fix)
+
+### Perbaikan (Fixed)
+- **Fix `start-planner.bat` Langsung Tertutup di Windows**: Menghapus tanda kurung `()` di dalam blok `if (...)` yang menyebabkan syntax error `. was unexpected at this time` pada `cmd.exe`, menggantinya dengan label `goto` yang 100% aman.
+- **Line Endings Otomatis (`.gitattributes` & GitHub Release Workflow)**: Memastikan `start-planner.bat` selalu menggunakan CRLF (`\r\n`) dan `start-planner.sh` / `bin/cpgp-studio.mjs` selalu menggunakan LF (`\n`) di dalam bundel ZIP/TAR rilis.
+
+---
+
 ## [v2.0.1] - 2026-11-25 (Production Release Bundle & Launcher Fix)
 
 ### Perbaikan (Fixed)
