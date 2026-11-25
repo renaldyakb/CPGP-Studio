@@ -15,8 +15,23 @@ export { parseCaptionText };
 
 export const WORKSPACE_ROOT = path.resolve(import.meta.dirname, '..', '..');
 export const DEFAULT_CONTENT_ROOT = path.join(WORKSPACE_ROOT, 'KONTEN');
-export const DEFAULT_YEAR = 2026;
+export const DEFAULT_YEAR = new Date().getFullYear();
 export const OVERWRITE_WATERMARK_MARKER_FILE = '.cpgp-watermarked.json';
+
+export const INDONESIAN_MONTH_LIST = [
+  'Januari',
+  'Februari',
+  'Maret',
+  'April',
+  'Mei',
+  'Juni',
+  'Juli',
+  'Agustus',
+  'September',
+  'Oktober',
+  'November',
+  'Desember',
+] as const;
 
 const CONTENT_FOLDER_REGEX = /^(\d{1,2})\.(\d{2})$/;
 const DEFAULT_RAW_VIDEO_REGEX =
@@ -117,6 +132,161 @@ export function createEmptyAssetInfo(
   };
 }
 
+export function formatYearMonthFolder(
+  year: number,
+  monthNumber: number
+): string {
+  const safeYear =
+    Number.isFinite(year) && year >= 2000 && year <= 2100
+      ? Math.floor(year)
+      : new Date().getFullYear();
+  const idx = Math.max(0, Math.min(11, Math.floor(monthNumber) - 1));
+  const monthName = INDONESIAN_MONTH_LIST[idx] ?? 'November';
+  return `${safeYear}-${monthName}`;
+}
+
+export function normalizeYearMonthFolderName(
+  rawMonthFolder: string,
+  fallbackYear = new Date().getFullYear()
+): string {
+  const cleaned = rawMonthFolder.trim();
+  if (!cleaned) {
+    const now = new Date();
+    return formatYearMonthFolder(fallbackYear || now.getFullYear(), now.getMonth() + 1);
+  }
+  const info = resolveMonthInfo(cleaned, fallbackYear);
+  return formatYearMonthFolder(info.year, info.monthNumber);
+}
+
+/**
+ * Migrates legacy bare month folders (e.g. `KONTEN\November`) to canonical `YYYY-Bulan`
+ * format (e.g. `KONTEN\2026-November`) safely without losing any files.
+ */
+export function migrateLegacyMonthFoldersOnDisk(
+  contentRootPath: string,
+  defaultYear = new Date().getFullYear()
+): Array<{ from: string; to: string }> {
+  const migrated: Array<{ from: string; to: string }> = [];
+  if (!contentRootPath || !fs.existsSync(contentRootPath)) {
+    return migrated;
+  }
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(contentRootPath, { withFileTypes: true });
+  } catch {
+    return migrated;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const name = entry.name.trim();
+    // Skip folders that already have a 4-digit year (e.g. 2026-November or 2027) or DD.SLOT
+    if (/\b20\d{2}\b/.test(name) || CONTENT_FOLDER_REGEX.test(name)) {
+      continue;
+    }
+
+    const monthInfo = MONTH_MAP[name.toLowerCase()];
+    if (!monthInfo) continue;
+
+    const targetName = formatYearMonthFolder(defaultYear, monthInfo.number);
+    if (targetName === name) continue;
+
+    const srcPath = path.join(contentRootPath, name);
+    const dstPath = path.join(contentRootPath, targetName);
+
+    try {
+      if (!fs.existsSync(dstPath)) {
+        try {
+          fs.renameSync(srcPath, dstPath);
+          migrated.push({ from: name, to: targetName });
+          continue;
+        } catch (renameErr) {
+          const code = (renameErr as NodeJS.ErrnoException)?.code;
+          if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EXDEV') {
+            throw renameErr;
+          }
+          // Windows directory handle held (e.g. chokidar/Explorer): create target and move children safely
+          fs.mkdirSync(dstPath, { recursive: true });
+        }
+      }
+
+      const children = fs.readdirSync(srcPath, { withFileTypes: true });
+      for (const child of children) {
+        const childSrc = path.join(srcPath, child.name);
+        const childDst = path.join(dstPath, child.name);
+        if (fs.existsSync(childDst)) continue;
+        try {
+          fs.renameSync(childSrc, childDst);
+        } catch (childErr) {
+          const code = (childErr as NodeJS.ErrnoException)?.code;
+          if (code === 'EPERM' || code === 'EBUSY' || code === 'EXDEV') {
+            fs.cpSync(childSrc, childDst, { recursive: true });
+            try {
+              fs.rmSync(childSrc, { recursive: true, force: true });
+            } catch {
+              // ignore if source handle is still busy
+            }
+          } else {
+            throw childErr;
+          }
+        }
+      }
+      try {
+        const remaining = fs.readdirSync(srcPath);
+        if (remaining.length === 0) {
+          fs.rmdirSync(srcPath);
+        }
+      } catch {
+        // Parent folder may remain empty until watcher releases handle
+      }
+      migrated.push({ from: name, to: targetName });
+    } catch (error) {
+      console.error(
+        `[Scanner] Gagal migrasi folder bulan ${name} -> ${targetName}:`,
+        error
+      );
+    }
+  }
+
+  return migrated;
+}
+
+/**
+ * Ensures an initialized workspace has its initialization year-month folder (e.g. `2026-November`)
+ * created on disk when using month_slot / auto_both structure.
+ */
+export function ensureInitialYearMonthFolderOnDisk(
+  contentRootPath: string,
+  initYear = new Date().getFullYear()
+): string | null {
+  if (!contentRootPath || !fs.existsSync(contentRootPath)) {
+    return null;
+  }
+  try {
+    const entries = fs.readdirSync(contentRootPath, { withFileTypes: true });
+    const yearPrefix = `${initYear}-`;
+    const hasCurrentYearFolder = entries.some(
+      (e) =>
+        e.isDirectory() &&
+        (e.name.startsWith(yearPrefix) || e.name === String(initYear))
+    );
+    if (hasCurrentYearFolder) {
+      return null;
+    }
+
+    const now = new Date();
+    const targetName = formatYearMonthFolder(initYear, now.getMonth() + 1);
+    const targetPath = path.join(contentRootPath, targetName);
+    if (!fs.existsSync(targetPath)) {
+      fs.mkdirSync(targetPath, { recursive: true });
+    }
+    return targetName;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveMonthInfo(
   monthFolder: string,
   defaultYear = DEFAULT_YEAR
@@ -137,8 +307,8 @@ export function resolveMonthInfo(
   }
 
   return {
-    monthNumber: 11,
-    monthName: cleaned || 'November',
+    monthNumber: new Date().getMonth() + 1,
+    monthName: cleaned || INDONESIAN_MONTH_LIST[new Date().getMonth()] || 'November',
     year,
   };
 }
@@ -246,7 +416,16 @@ export function scanSingleContentFolder(
   const folderCode = path.basename(folderAbsPath);
   const relFromRoot = toPosixPath(path.relative(contentRootPath, folderAbsPath));
   const pathParts = relFromRoot.split('/').filter(Boolean);
-  const monthFolder = pathParts.length > 1 ? pathParts[0] : 'November';
+  let monthFolder: string;
+  if (pathParts.length >= 3) {
+    // Support nested YYYY/Bulan/DD.SLOT -> canonical YYYY-Bulan
+    monthFolder = `${pathParts[0]}-${pathParts[1]}`;
+  } else if (pathParts.length === 2) {
+    monthFolder = pathParts[0];
+  } else {
+    const now = new Date();
+    monthFolder = formatYearMonthFolder(defaultYear, now.getMonth() + 1);
+  }
   const relativeFolderPath = relFromRoot;
   const id = relativeFolderPath;
 

@@ -14,6 +14,7 @@ import type {
 } from '../src/types/planner.ts';
 import type { WorkspaceMetadata } from '../shared/types/workspace.ts';
 import {
+  migrateLegacyMonthFoldersOnDisk,
   scanContentDirectory,
   scanSingleContentFolder,
   type ScannedContentFolder,
@@ -413,6 +414,11 @@ export function syncDatabaseWithDisk(
     loadDatabaseFromFile(resolvedDbFile) ??
     createEmptyDatabase(resolvedRoot, resolvedYear, targetWs);
 
+  // Automatically migrate bare month folders (e.g. "November" -> "2026-November") on disk
+  if (targetWs.rules.folderStructure !== 'flat_slot') {
+    migrateLegacyMonthFoldersOnDisk(resolvedRoot, resolvedYear);
+  }
+
   const scannedFolders = scanContentDirectory(
     resolvedRoot,
     resolvedYear,
@@ -420,8 +426,26 @@ export function syncDatabaseWithDisk(
   );
   const nextItems: Record<string, ContentPlannerItem> = {};
 
+  // Build fallback lookup maps by isoDate+slotCode and bare month/folderCode so migrating
+  // "November/24.01" -> "2026-November/24.01" preserves 100% of userProperties without data loss!
+  const existingByIsoSlot = new Map<string, ContentPlannerItem>();
+  for (const existingItem of Object.values(existingDb.items)) {
+    const isoKey = `${existingItem.schedule.isoDate}::${existingItem.schedule.slotCode}`;
+    if (!existingByIsoSlot.has(isoKey)) {
+      existingByIsoSlot.set(isoKey, existingItem);
+    }
+  }
+
   for (const scanned of scannedFolders) {
-    const existingItem = existingDb.items[scanned.id];
+    const legacyBareId = `${scanned.schedule.monthName}/${scanned.folderCode}`;
+    const isoSlotKey = `${scanned.schedule.isoDate}::${scanned.schedule.slotCode}`;
+    const existingItem =
+      existingDb.items[scanned.id] ??
+      (scanned.schedule.year === resolvedYear
+        ? existingDb.items[legacyBareId]
+        : undefined) ??
+      existingByIsoSlot.get(isoSlotKey);
+
     const userProperties = mergeUserProperties(
       scanned,
       existingItem?.userProperties

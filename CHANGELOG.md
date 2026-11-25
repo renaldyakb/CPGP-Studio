@@ -4,6 +4,20 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.7.0] - 2026-11-26 (Canonical `YYYY-Bulan` Year-Month Folders, Auto New-Year Rollover, Legacy Migration & Chronological Slot Assignment)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Konvensi Folder Tahun-Bulan `YYYY-Bulan` & Rollover Tahun Baru Otomatis (`server/scanner.ts`, `server/core/contentCreator.ts`, `server/addons/motionprovitScraper.ts`)**:
+  - Setiap folder bulan kini menggunakan format kanonik **`YYYY-Bulan`** (contoh: `2026-November`, `2026-Desember`, dan otomatis membuat **`2027-Januari`** ketika jadwal melewati 31 Desember 2026).
+  - Menambahkan **`migrateLegacyMonthFoldersOnDisk()`** dengan fallback anti-`EPERM` Windows yang otomatis memigrasikan folder bulan lama (`November` -> `2026-November`, `Desember` -> `2026-Desember`) sambil mempertahankan 100% metadata `userProperties` (`publishedUrl`, status 4 platform, checklist, catatan, tag) di `planner.json` tanpa kehilangan data.
+- **Inisialisasi Tahun Otomatis pada Workspace Baru (`server/workspaces/registry.ts`)**:
+  - `defaultYear` pada workspace baru kini otomatis membaca tahun inisialisasi saat ini (`new Date().getFullYear()`) dan langsung membuatkan folder tahun-bulan awal (`<tahun>-<Bulan>`) di `contentRootPath` saat workspace diinisialisasi.
+- **Penjadwalan Berurutan Anti-Acak & Info Jelas di MotionProvit (`contentCreator.ts`, `motionprovitScraper.ts`, `MotionProvitPage.tsx`, `CreateContentModal.tsx`)**:
+  - Memperbaiki `suggestNextAvailableSlot()` dan `allocateNextAvailableSlots()` agar menggunakan kalender riil (menghormati 28/29/30/31 hari per bulan dan pergantian tahun) dan **selalu melanjutkan urutan slot kosong setelah konten terakhir** (tidak pernah mengikuti tanggal unduh/render MotionProvit).
+  - Menambahkan banner informasi penjadwalan berurutan di halaman **Add-on MotionProvit** yang menampilkan **Slot Terakhir -> Slot Berikutnya Otomatis**, tombol **`Reset Urutan`**, serta pratinjau target folder `YYYY-Bulan DD.SLOT` di tiap kartu terpilih.
+
+---
+
 ## [v2.6.4] - 2026-11-25 (100% Background Silent MotionProvit Downloads & Sync — Zero Browser Popups)
 
 ### Peningkatan (Improved)

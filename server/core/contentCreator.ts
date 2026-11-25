@@ -9,26 +9,32 @@ import type {
   WorkspaceMetadata,
 } from '../../shared/types/workspace.ts';
 import type { PlannerDatabase } from '../../src/types/planner.ts';
-import { toPosixPath } from '../scanner.ts';
+import {
+  formatYearMonthFolder,
+  normalizeYearMonthFolderName,
+  resolveMonthInfo,
+  toPosixPath,
+} from '../scanner.ts';
 
-const INDONESIAN_MONTHS = [
-  'Januari',
-  'Februari',
-  'Maret',
-  'April',
-  'Mei',
-  'Juni',
-  'Juli',
-  'Agustus',
-  'September',
-  'Oktober',
-  'November',
-  'Desember',
-];
+function getDefaultMonthFolderName(fallbackYear?: number): string {
+  const now = new Date();
+  const year = fallbackYear || now.getFullYear();
+  return formatYearMonthFolder(year, now.getMonth() + 1);
+}
 
-function getDefaultMonthFolderName(): string {
-  const monthIdx = new Date().getMonth();
-  return INDONESIAN_MONTHS[monthIdx] ?? 'November';
+function toIsoDateParts(date: Date): {
+  year: number;
+  monthNumber: number;
+  dayOfMonth: number;
+  isoDate: string;
+  monthFolder: string;
+} {
+  const year = date.getFullYear();
+  const monthNumber = date.getMonth() + 1;
+  const dayOfMonth = date.getDate();
+  const isoDate = `${year}-${String(monthNumber).padStart(2, '0')}-${String(dayOfMonth).padStart(2, '0')}`;
+  const monthFolder = formatYearMonthFolder(year, monthNumber);
+  return { year, monthNumber, dayOfMonth, isoDate, monthFolder };
 }
 
 export function suggestNextAvailableSlot(
@@ -42,72 +48,131 @@ export function suggestNextAvailableSlot(
       ? workspace.timeSlots
       : DEFAULT_TIME_SLOTS;
   const orderedSlotCodes = Object.keys(slotDefs).sort();
+  if (orderedSlotCodes.length === 0) {
+    orderedSlotCodes.push('01', '02');
+  }
   const primarySlotCode = orderedSlotCodes[0] ?? '01';
+  const fallbackYear = workspace.defaultYear || new Date().getFullYear();
 
-  let monthFolder = (preferredMonth ?? '').trim();
-  if (!monthFolder) {
-    if (allItems.length > 0) {
-      const sorted = [...allItems].sort((a, b) =>
-        b.schedule.isoDate.localeCompare(a.schedule.isoDate)
+  // Track ALL occupied slots chronologically across every month and year by exact ISO date + slotCode
+  const occupiedIsoSlots = new Set<string>();
+  const sortedItems = [...allItems].sort((a, b) => {
+    const cmpDate = a.schedule.isoDate.localeCompare(b.schedule.isoDate);
+    if (cmpDate !== 0) return cmpDate;
+    return a.schedule.slotCode.localeCompare(b.schedule.slotCode);
+  });
+
+  for (const item of sortedItems) {
+    occupiedIsoSlots.add(`${item.schedule.isoDate}::${item.schedule.slotCode}`);
+  }
+
+  const latestItem =
+    sortedItems.length > 0 ? sortedItems[sortedItems.length - 1] : null;
+  const lastOccupiedSlot = latestItem
+    ? {
+        monthFolder: normalizeYearMonthFolderName(
+          latestItem.monthFolder,
+          latestItem.schedule.year || fallbackYear
+        ),
+        folderCode: latestItem.folderCode,
+        isoDate: latestItem.schedule.isoDate,
+      }
+    : null;
+
+  // Determine chronological cursor:
+  // - If user explicitly requested a preferredMonth, check that month's latest item or day 1 of that month
+  // - Otherwise ALWAYS continue strictly after the latest occupied content item (never jump back to download date!)
+  // - If workspace is empty, start from today (in workspace's initialized year)
+  let cursorDate: Date;
+  if (preferredMonth && preferredMonth.trim()) {
+    const prefInfo = resolveMonthInfo(preferredMonth.trim(), fallbackYear);
+    const matchingMonthItems = sortedItems.filter(
+      (i) =>
+        i.schedule.year === prefInfo.year &&
+        i.schedule.monthNumber === prefInfo.monthNumber
+    );
+    if (matchingMonthItems.length > 0) {
+      const lastInMonth = matchingMonthItems[matchingMonthItems.length - 1];
+      cursorDate = new Date(
+        lastInMonth.schedule.year,
+        lastInMonth.schedule.monthNumber - 1,
+        lastInMonth.schedule.dayOfMonth
       );
-      monthFolder = sorted[0].monthFolder || getDefaultMonthFolderName();
+    } else if (latestItem) {
+      cursorDate = new Date(prefInfo.year, prefInfo.monthNumber - 1, 1);
     } else {
-      monthFolder = getDefaultMonthFolderName();
+      const now = new Date();
+      const startDay =
+        prefInfo.year === now.getFullYear() &&
+        prefInfo.monthNumber === now.getMonth() + 1
+          ? now.getDate()
+          : 1;
+      cursorDate = new Date(prefInfo.year, prefInfo.monthNumber - 1, startDay);
     }
+  } else if (latestItem) {
+    cursorDate = new Date(
+      latestItem.schedule.year,
+      latestItem.schedule.monthNumber - 1,
+      latestItem.schedule.dayOfMonth
+    );
+  } else {
+    const now = new Date();
+    cursorDate = new Date(fallbackYear, now.getMonth(), now.getDate());
   }
 
-  const monthItems = allItems.filter(
-    (item) => item.monthFolder.toLowerCase() === monthFolder.toLowerCase()
-  );
-
-  const occupiedCodes = new Set<string>(
-    monthItems.map((item) => item.folderCode)
-  );
-
-  let maxDay = 0;
-  for (const item of monthItems) {
-    if (item.schedule.dayOfMonth > maxDay) {
-      maxDay = item.schedule.dayOfMonth;
-    }
-  }
-
-  const startDay = maxDay > 0 ? maxDay : new Date().getDate();
-
-  for (let offset = 0; offset < 31; offset += 1) {
-    const candidateDay = ((startDay - 1 + offset) % 31) + 1;
-    const paddedDay = String(candidateDay).padStart(2, '0');
+  // Advance day-by-day using real calendar dates (handles 28/29/30/31 days & automatic New Year rollover!)
+  for (let dayOffset = 0; dayOffset < 730; dayOffset += 1) {
+    const candidateDate = new Date(
+      cursorDate.getFullYear(),
+      cursorDate.getMonth(),
+      cursorDate.getDate() + dayOffset
+    );
+    const parts = toIsoDateParts(candidateDate);
+    const paddedDay = String(parts.dayOfMonth).padStart(2, '0');
 
     for (const slotCode of orderedSlotCodes) {
-      const candidateCode = `${paddedDay}.${slotCode}`;
-      if (!occupiedCodes.has(candidateCode)) {
+      const isoSlotKey = `${parts.isoDate}::${slotCode}`;
+      if (!occupiedIsoSlots.has(isoSlotKey)) {
+        const candidateCode = `${paddedDay}.${slotCode}`;
         const slotMeta = slotDefs[slotCode] ?? {
           code: slotCode,
-          label: slotCode === '01' ? 'Siang' : slotCode === '02' ? 'Malam' : `Slot ${slotCode}`,
+          label:
+            slotCode === '01'
+              ? 'Siang'
+              : slotCode === '02'
+                ? 'Malam'
+                : `Slot ${slotCode}`,
           window: '11.30 - 12.00 WIB',
         };
         return {
-          monthFolder,
-          dayOfMonth: candidateDay,
+          monthFolder: parts.monthFolder,
+          year: parts.year,
+          isoDate: parts.isoDate,
+          dayOfMonth: parts.dayOfMonth,
           slotCode,
           folderCode: candidateCode,
           slotLabel: slotMeta.label,
           slotTimeWindow: slotMeta.window,
+          lastOccupiedSlot,
         };
       }
     }
   }
 
-  const fallbackDay = Math.min(31, Math.max(1, startDay));
-  const fallbackCode = `${String(fallbackDay).padStart(2, '0')}.${primarySlotCode}`;
+  const fallbackParts = toIsoDateParts(cursorDate);
+  const fallbackCode = `${String(fallbackParts.dayOfMonth).padStart(2, '0')}.${primarySlotCode}`;
   const fallbackSlotMeta = slotDefs[primarySlotCode] ?? DEFAULT_TIME_SLOTS['01'];
 
   return {
-    monthFolder,
-    dayOfMonth: fallbackDay,
+    monthFolder: fallbackParts.monthFolder,
+    year: fallbackParts.year,
+    isoDate: fallbackParts.isoDate,
+    dayOfMonth: fallbackParts.dayOfMonth,
     slotCode: primarySlotCode,
     folderCode: fallbackCode,
     slotLabel: fallbackSlotMeta.label,
     slotTimeWindow: fallbackSlotMeta.window,
+    lastOccupiedSlot,
   };
 }
 
@@ -123,7 +188,12 @@ export function createContentFolderOnDisk(
   const rawMonth = (input.monthFolder ?? '').trim();
   const isFlat =
     workspace.rules.folderStructure === 'flat_slot' && !rawMonth;
-  const monthFolder = isFlat ? '' : rawMonth || getDefaultMonthFolderName();
+  const fallbackYear = workspace.defaultYear || new Date().getFullYear();
+  const monthFolder = isFlat
+    ? ''
+    : rawMonth
+      ? normalizeYearMonthFolderName(rawMonth, fallbackYear)
+      : getDefaultMonthFolderName(fallbackYear);
 
   const folderPath = monthFolder
     ? path.join(workspace.contentRootPath, monthFolder, folderCode)
@@ -208,7 +278,12 @@ export function batchGenerateSlotsOnDisk(
   const rawMonth = (input.monthFolder ?? '').trim();
   const isFlat =
     workspace.rules.folderStructure === 'flat_slot' && !rawMonth;
-  const monthFolder = isFlat ? '' : rawMonth || getDefaultMonthFolderName();
+  const fallbackYear = workspace.defaultYear || new Date().getFullYear();
+  const monthFolder = isFlat
+    ? ''
+    : rawMonth
+      ? normalizeYearMonthFolderName(rawMonth, fallbackYear)
+      : getDefaultMonthFolderName(fallbackYear);
 
   const hashtags =
     Array.isArray(input.defaultHashtags) && input.defaultHashtags.length > 0

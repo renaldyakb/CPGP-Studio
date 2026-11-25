@@ -8,10 +8,12 @@ import {
   DatabaseZap,
   ExternalLink,
   Film,
+  Info,
   KeyRound,
   Loader2,
   LogOut,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldCheck,
   Trash2,
@@ -34,7 +36,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   DatePicker,
-  INDONESIAN_MONTH_NAMES,
+  formatYearMonthFolder,
   monthNameToIndex,
 } from '@/components/ui/date-picker';
 import { Input, NativeSelect } from '@/components/ui/input';
@@ -59,9 +61,14 @@ function slotToIsoDate(slot: NextSuggestedSlot | null, defaultYear: number): str
   if (!slot) {
     return toIsoDate(new Date());
   }
+  if (slot.isoDate && /^\d{4}-\d{2}-\d{2}$/.test(slot.isoDate)) {
+    return slot.isoDate;
+  }
+  const yearMatch = slot.monthFolder.match(/\b(20\d{2})\b/);
+  const year = slot.year || (yearMatch ? Number(yearMatch[1]) : defaultYear) || new Date().getFullYear();
   const monthIdx = monthNameToIndex(slot.monthFolder);
   const d = new Date(
-    defaultYear || new Date().getFullYear(),
+    year,
     monthIdx >= 0 ? monthIdx : new Date().getMonth(),
     slot.dayOfMonth
   );
@@ -437,9 +444,12 @@ export function MotionProvitPage() {
     const map = new Map<string, string>();
     if (selectedIds.length === 0) return map;
 
-    const occupied = new Set<string>();
+    // Match occupied slots strictly by exact ISO date + slotCode across months and years
+    const occupiedIsoSlots = new Set<string>();
     for (const item of allItems) {
-      occupied.add(`${item.monthFolder.toLowerCase()}::${item.folderCode}`);
+      occupiedIsoSlots.add(
+        `${item.schedule.isoDate}::${item.schedule.slotCode}`
+      );
     }
 
     const baseDate =
@@ -455,12 +465,14 @@ export function MotionProvitPage() {
 
     for (const jobId of selectedIds) {
       let guard = 0;
-      while (guard < 500) {
+      while (guard < 800) {
         guard += 1;
-        const monthName = INDONESIAN_MONTH_NAMES[cursor.getMonth()] ?? 'November';
+        const yearMonthLabel = formatYearMonthFolder(cursor);
         const day = cursor.getDate();
-        const code = `${String(day).padStart(2, '0')}.${orderedSlotCodes[slotIdx] ?? '01'}`;
-        const key = `${monthName.toLowerCase()}::${code}`;
+        const slotCode = orderedSlotCodes[slotIdx] ?? '01';
+        const code = `${String(day).padStart(2, '0')}.${slotCode}`;
+        const isoDate = toIsoDate(cursor);
+        const key = `${isoDate}::${slotCode}`;
 
         slotIdx += 1;
         if (slotIdx >= orderedSlotCodes.length) {
@@ -472,9 +484,9 @@ export function MotionProvitPage() {
           );
         }
 
-        if (!occupied.has(key)) {
-          occupied.add(key);
-          map.set(jobId, `${monthName} ${code}`);
+        if (!occupiedIsoSlots.has(key)) {
+          occupiedIsoSlots.add(key);
+          map.set(jobId, `${yearMonthLabel} ${code}`);
           break;
         }
       }
@@ -806,7 +818,7 @@ export function MotionProvitPage() {
 
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] font-light text-muted-foreground/75">
-                  Mulai slot kosong
+                  Mulai slot berurutan
                 </span>
                 <div className="w-[152px]">
                   <DatePicker
@@ -832,6 +844,70 @@ export function MotionProvitPage() {
                     </option>
                   ))}
                 </NativeSelect>
+                {nextSlot ? (
+                  <IconActionButton
+                    icon={RotateCcw}
+                    label={`Reset ke urutan otomatis (${nextSlot.monthFolder} ${nextSlot.folderCode})`}
+                    variant="outline"
+                    disabled={isImporting}
+                    onClick={() => {
+                      setStartDateIso(slotToIsoDate(nextSlot, workspaceYear));
+                      setStartSlotCode(nextSlot.slotCode || '01');
+                    }}
+                  />
+                ) : null}
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-[11px] font-light leading-relaxed text-muted-foreground">
+              <Info
+                className="mt-0.5 size-3.5 shrink-0 text-primary"
+                aria-hidden="true"
+              />
+              <div className="space-y-0.5">
+                <p className="text-foreground/90 font-normal">
+                  Penjadwalan berurutan aktif
+                  {nextSlot?.lastOccupiedSlot ? (
+                    <>
+                      {' '}
+                      (terakhir:{' '}
+                      <span className="font-mono font-medium text-foreground">
+                        {nextSlot.lastOccupiedSlot.monthFolder}{' '}
+                        {nextSlot.lastOccupiedSlot.folderCode}
+                      </span>
+                      {' -> '}berikutnya:{' '}
+                      <span className="font-mono font-medium text-foreground">
+                        {nextSlot.monthFolder} {nextSlot.folderCode}
+                      </span>
+                      )
+                    </>
+                  ) : nextSlot ? (
+                    <>
+                      {' '}
+                      (mulai:{' '}
+                      <span className="font-mono font-medium text-foreground">
+                        {nextSlot.monthFolder} {nextSlot.folderCode}
+                      </span>
+                      )
+                    </>
+                  ) : null}
+                  .
+                </p>
+                <p>
+                  Tanggal slot sengaja tidak mengikuti tanggal unduh/render
+                  MotionProvit agar urutan jadwal tetap rapi. Folder otomatis
+                  memakai format{' '}
+                  <code className="font-mono text-foreground">YYYY-Bulan</code>{' '}
+                  (misal{' '}
+                  <code className="font-mono text-foreground">
+                    2026-Desember
+                  </code>{' '}
+                  lalu otomatis lanjut ke{' '}
+                  <code className="font-mono text-foreground">
+                    2027-Januari
+                  </code>{' '}
+                  saat masuk tahun baru).
+                </p>
               </div>
             </div>
 

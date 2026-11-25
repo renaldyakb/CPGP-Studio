@@ -26,7 +26,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   DatePicker,
   DateRangePicker,
-  INDONESIAN_MONTH_NAMES,
+  formatYearMonthFolder,
   monthNameToIndex,
 } from '@/components/ui/date-picker';
 import {
@@ -61,8 +61,10 @@ export interface CreateContentModalProps {
 function buildDateFromFolder(
   monthName: string,
   dayOfMonth: number,
-  year: number
+  fallbackYear: number
 ): Date {
+  const yearMatch = monthName.match(/\b(20\d{2})\b/);
+  const year = yearMatch ? Number(yearMatch[1]) : fallbackYear;
   const idx = monthNameToIndex(monthName);
   const monthIndex = idx >= 0 ? idx : new Date().getMonth();
   const maxDay = new Date(year, monthIndex + 1, 0).getDate();
@@ -159,17 +161,17 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
         if (!data || !data.folderCode) return;
         setSuggestedSlot(data);
 
-        const targetMonth = data.monthFolder || monthHint || 'November';
+        const targetMonth = data.monthFolder || monthHint || formatYearMonthFolder(new Date());
         const targetDay =
           typeof data.dayOfMonth === 'number' ? data.dayOfMonth : 1;
         const suggestedDate = buildDateFromFolder(
           targetMonth,
           targetDay,
-          defaultYear
+          data.year || defaultYear
         );
 
         setSelectedDate(suggestedDate);
-        setMonthFolder(INDONESIAN_MONTH_NAMES[suggestedDate.getMonth()]);
+        setMonthFolder(formatYearMonthFolder(suggestedDate));
         setDayOfMonth(suggestedDate.getDate());
         setBatchRange(buildDefaultRangeFromDate(suggestedDate));
 
@@ -204,14 +206,16 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     }
 
     const fallbackMonth =
-      availableMonths[availableMonths.length - 1] || 'November';
+      availableMonths[availableMonths.length - 1] ||
+      formatYearMonthFolder(new Date());
     const initialDate = buildDateFromFolder(fallbackMonth, 1, defaultYear);
     setSelectedDate(initialDate);
-    setMonthFolder(INDONESIAN_MONTH_NAMES[initialDate.getMonth()]);
+    setMonthFolder(formatYearMonthFolder(initialDate));
     setDayOfMonth(initialDate.getDate());
     setBatchRange(buildDefaultRangeFromDate(initialDate));
 
-    void fetchSuggestedSlot(fallbackMonth);
+    // Request global chronological next slot (continuing after latest occupied item, across months/years)
+    void fetchSuggestedSlot();
   }, [
     isOpen,
     initialTab,
@@ -234,7 +238,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
   const handleSingleDateChange = (date?: Date) => {
     if (!date) return;
     setSelectedDate(date);
-    setMonthFolder(INDONESIAN_MONTH_NAMES[date.getMonth()]);
+    setMonthFolder(formatYearMonthFolder(date));
     setDayOfMonth(date.getDate());
   };
 
@@ -279,7 +283,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     const to = batchRange.to ?? from;
     const fromYear = from.getFullYear();
     const fromMonth = from.getMonth();
-    const monthName = INDONESIAN_MONTH_NAMES[fromMonth];
+    const monthFolderLabel = formatYearMonthFolder(from);
     const lastDayOfMonth = new Date(fromYear, fromMonth + 1, 0).getDate();
     const clampedCrossMonth =
       to.getFullYear() !== fromYear || to.getMonth() !== fromMonth;
@@ -289,7 +293,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
       : Math.max(startDay, to.getDate());
 
     return {
-      monthFolder: monthName,
+      monthFolder: monthFolderLabel,
       startDay,
       endDay,
       dayCount: Math.max(0, endDay - startDay + 1),
@@ -554,10 +558,10 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         const date = buildDateFromFolder(
                           suggestedSlot.monthFolder,
                           suggestedSlot.dayOfMonth,
-                          defaultYear
+                          suggestedSlot.year || defaultYear
                         );
                         setSelectedDate(date);
-                        setMonthFolder(INDONESIAN_MONTH_NAMES[date.getMonth()]);
+                        setMonthFolder(formatYearMonthFolder(date));
                         setDayOfMonth(date.getDate());
                         setSlotCode(suggestedSlot.slotCode);
                       }}

@@ -68,7 +68,10 @@ const MONTH_ALIASES: Record<string, number> = {
 };
 
 export function monthNameToIndex(name: string): number {
-  const normalized = name.trim().toLowerCase();
+  const normalized = name
+    .trim()
+    .toLowerCase()
+    .replace(/^20\d{2}[-_\s/]+/, '');
   if (!normalized) return -1;
   if (normalized in MONTH_ALIASES) {
     return MONTH_ALIASES[normalized];
@@ -77,6 +80,12 @@ export function monthNameToIndex(name: string): number {
     (m) => m.toLowerCase() === normalized
   );
   return idx;
+}
+
+export function formatYearMonthFolder(date: Date): string {
+  const year = date.getFullYear();
+  const month = INDONESIAN_MONTH_NAMES[date.getMonth()] ?? 'November';
+  return `${year}-${month}`;
 }
 
 export interface DatePickerProps {

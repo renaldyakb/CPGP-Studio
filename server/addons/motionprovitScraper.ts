@@ -1844,10 +1844,11 @@ function allocateNextAvailableSlots(
     orderedSlotCodes.push('01', '02');
   }
 
-  const occupiedKeys = new Set<string>();
+  // Track occupied slots by exact YYYY-MM-DD::SLOT so cross-month and cross-year allocation
+  // (e.g. 2026-Desember/31.02 -> 2027-Januari/01.01) never collides or resets to download date!
+  const occupiedIsoSlots = new Set<string>();
   for (const item of Object.values(db.items)) {
-    const key = `${item.monthFolder.toLowerCase()}::${item.folderCode}`;
-    occupiedKeys.add(key);
+    occupiedIsoSlots.add(`${item.schedule.isoDate}::${item.schedule.slotCode}`);
   }
 
   let cursorDate: Date;
@@ -1862,14 +1863,19 @@ function allocateNextAvailableSlots(
     }
   } else {
     const suggested = suggestNextAvailableSlot(db, workspace);
-    const monthIdx = INDONESIAN_MONTHS.findIndex(
-      (m) => m.toLowerCase() === suggested.monthFolder.toLowerCase()
-    );
-    cursorDate = new Date(
-      workspace.defaultYear || new Date().getFullYear(),
-      monthIdx >= 0 ? monthIdx : new Date().getMonth(),
-      suggested.dayOfMonth
-    );
+    if (suggested.isoDate && /^\d{4}-\d{2}-\d{2}$/.test(suggested.isoDate)) {
+      const [y, m, d] = suggested.isoDate.split('-').map(Number);
+      cursorDate = new Date(y, m - 1, d);
+    } else {
+      const monthIdx = INDONESIAN_MONTHS.findIndex((m) =>
+        suggested.monthFolder.toLowerCase().includes(m.toLowerCase())
+      );
+      cursorDate = new Date(
+        suggested.year || workspace.defaultYear || new Date().getFullYear(),
+        monthIdx >= 0 ? monthIdx : new Date().getMonth(),
+        suggested.dayOfMonth
+      );
+    }
     const idx = orderedSlotCodes.indexOf(suggested.slotCode);
     if (idx >= 0) initialSlotIndex = idx;
   }
@@ -1884,16 +1890,20 @@ function allocateNextAvailableSlots(
   let slotIdx = initialSlotIndex;
   let safetyGuard = 0;
 
-  while (results.length < count && safetyGuard < 1000) {
+  while (results.length < count && safetyGuard < 1500) {
     safetyGuard += 1;
-    const monthFolder = INDONESIAN_MONTHS[cursorDate.getMonth()] ?? 'November';
+    const year = cursorDate.getFullYear();
+    const monthNumber = cursorDate.getMonth() + 1;
+    const monthName = INDONESIAN_MONTHS[cursorDate.getMonth()] ?? 'November';
+    const monthFolder = `${year}-${monthName}`;
     const dayOfMonth = cursorDate.getDate();
     const slotCode = orderedSlotCodes[slotIdx] ?? '01';
     const folderCode = `${String(dayOfMonth).padStart(2, '0')}.${slotCode}`;
-    const key = `${monthFolder.toLowerCase()}::${folderCode}`;
+    const isoDate = `${year}-${String(monthNumber).padStart(2, '0')}-${String(dayOfMonth).padStart(2, '0')}`;
+    const isoSlotKey = `${isoDate}::${slotCode}`;
 
-    if (!occupiedKeys.has(key)) {
-      occupiedKeys.add(key);
+    if (!occupiedIsoSlots.has(isoSlotKey)) {
+      occupiedIsoSlots.add(isoSlotKey);
       results.push({ monthFolder, dayOfMonth, slotCode, folderCode });
     }
 

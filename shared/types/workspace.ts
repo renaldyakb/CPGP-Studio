@@ -136,9 +136,16 @@ export interface PathValidationResult {
 
 export interface NextSuggestedSlot {
   monthFolder: string;
+  year?: number;
+  isoDate?: string;
   dayOfMonth: number;
   slotCode: string;
   folderCode: string;
   slotLabel: string;
   slotTimeWindow: string;
+  lastOccupiedSlot?: {
+    monthFolder: string;
+    folderCode: string;
+    isoDate: string;
+  } | null;
 }

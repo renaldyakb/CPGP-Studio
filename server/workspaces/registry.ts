@@ -15,7 +15,12 @@ import type {
 } from '../../shared/types/workspace.ts';
 import type { PlatformKey } from '../../src/types/planner.ts';
 import type { WatermarkPresetStore } from '../../src/types/watermark.ts';
-import { DEFAULT_CONTENT_ROOT, DEFAULT_YEAR } from '../scanner.ts';
+import {
+  DEFAULT_CONTENT_ROOT,
+  DEFAULT_YEAR,
+  ensureInitialYearMonthFolderOnDisk,
+  migrateLegacyMonthFoldersOnDisk,
+} from '../scanner.ts';
 
 export const APP_ROOT = path.resolve(import.meta.dirname, '..', '..');
 export const DATA_DIR = path.join(APP_ROOT, 'data');
@@ -413,6 +418,8 @@ export function createWorkspace(input: CreateWorkspaceInput): {
       ? input.activePlatforms
       : [...ALL_PLATFORMS];
 
+  const initYear = new Date().getFullYear();
+
   const workspace: WorkspaceMetadata = {
     id,
     name,
@@ -420,7 +427,7 @@ export function createWorkspace(input: CreateWorkspaceInput): {
     description: (input.description ?? '').trim(),
     accentColor,
     contentRootPath,
-    defaultYear: DEFAULT_YEAR,
+    defaultYear: initYear,
     activePlatforms,
     browserProfileMode: input.browserProfileMode ?? 'isolated',
     rules,
@@ -434,6 +441,12 @@ export function createWorkspace(input: CreateWorkspaceInput): {
   };
 
   ensureWorkspaceDataDirectory(id);
+
+  // Migrate any legacy bare month folders & ensure the initialization year-month folder exists
+  if (rules.folderStructure !== 'flat_slot' && fs.existsSync(contentRootPath)) {
+    migrateLegacyMonthFoldersOnDisk(contentRootPath, initYear);
+    ensureInitialYearMonthFolderOnDisk(contentRootPath, initYear);
+  }
 
   if (input.copyWatermarkPresetsFromWorkspaceId) {
     const sourceWs =
