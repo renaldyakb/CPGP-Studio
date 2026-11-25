@@ -11,10 +11,19 @@ import {
 
 export const PLATFORM_STUDIO_URLS: Record<PlatformKey, string> = {
   yt_shorts: 'https://studio.youtube.com',
-  tiktok: 'https://www.tiktok.com/tiktokstudio/upload',
-  ig_reels: 'https://www.instagram.com',
-  fb_reels: 'https://business.facebook.com/latest/reels_composer',
+  tiktok: 'https://www.tiktok.com/tiktokstudio/upload?lang=en',
+  ig_reels: 'https://www.instagram.com/',
+  fb_reels: 'https://business.facebook.com/latest/composer/',
 };
+
+export type PlatformSessionState = 'logged_in' | 'logged_out' | 'unknown';
+
+export interface PlatformSessionCheckResult {
+  platform: PlatformKey;
+  state: PlatformSessionState;
+  detail: string;
+  checkedAt: string;
+}
 
 export type BrowserSessionListener = (
   status: AutoPostBrowserSessionStatus
@@ -330,6 +339,251 @@ export async function openLoginProfile(
     profileDir: config.browser.profileDir,
     browserSession: getBrowserSessionStatus(),
   };
+}
+
+export async function checkPlatformLoginSessions(
+  platforms?: PlatformKey[]
+): Promise<Record<PlatformKey, PlatformSessionCheckResult>> {
+  const requestedPlatforms =
+    Array.isArray(platforms) && platforms.length > 0
+      ? platforms.filter((p) => ALL_PLATFORM_KEYS.includes(p))
+      : ALL_PLATFORM_KEYS;
+
+  const targetPlatforms =
+    requestedPlatforms.length > 0 ? requestedPlatforms : ALL_PLATFORM_KEYS;
+
+  const nowIso = new Date().toISOString();
+  const results: Record<PlatformKey, PlatformSessionCheckResult> = {
+    yt_shorts: {
+      platform: 'yt_shorts',
+      state: 'unknown',
+      detail: 'Belum diperiksa.',
+      checkedAt: nowIso,
+    },
+    tiktok: {
+      platform: 'tiktok',
+      state: 'unknown',
+      detail: 'Belum diperiksa.',
+      checkedAt: nowIso,
+    },
+    ig_reels: {
+      platform: 'ig_reels',
+      state: 'unknown',
+      detail: 'Belum diperiksa.',
+      checkedAt: nowIso,
+    },
+    fb_reels: {
+      platform: 'fb_reels',
+      state: 'unknown',
+      detail: 'Belum diperiksa.',
+      checkedAt: nowIso,
+    },
+  };
+
+  const context = await getOrLaunchBrowserContext();
+  const checkPage = await context.newPage();
+
+  try {
+    for (const platform of targetPlatforms) {
+      if (!isContextAlive(context) || checkPage.isClosed()) {
+        results[platform] = {
+          platform,
+          state: 'unknown',
+          detail: 'Sesi browser ditutup saat pemeriksaan berlangsung.',
+          checkedAt: new Date().toISOString(),
+        };
+        continue;
+      }
+
+      results[platform] = await checkSinglePlatformSession(checkPage, platform);
+    }
+  } finally {
+    if (!checkPage.isClosed()) {
+      await checkPage.close().catch(() => {});
+    }
+    emitBrowserSessionStatus();
+  }
+
+  return results;
+}
+
+async function checkSinglePlatformSession(
+  page: Page,
+  platform: PlatformKey
+): Promise<PlatformSessionCheckResult> {
+  const checkedAt = () => new Date().toISOString();
+
+  try {
+    if (platform === 'yt_shorts') {
+      await page.goto(PLATFORM_STUDIO_URLS.yt_shorts, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+      await page.waitForTimeout(2500);
+      const url = page.url().toLowerCase();
+      if (url.includes('accounts.google.com') || url.includes('/signin')) {
+        return {
+          platform,
+          state: 'logged_out',
+          detail: 'Belum login Google / YouTube Studio.',
+          checkedAt: checkedAt(),
+        };
+      }
+      if (url.includes('/channel/')) {
+        return {
+          platform,
+          state: 'logged_in',
+          detail: 'Sesi YouTube Studio aktif.',
+          checkedAt: checkedAt(),
+        };
+      }
+      return {
+        platform,
+        state: 'unknown',
+        detail: `Status sesi YouTube Studio belum terkonfirmasi (${page.url()}).`,
+        checkedAt: checkedAt(),
+      };
+    }
+
+    if (platform === 'tiktok') {
+      await page.goto(PLATFORM_STUDIO_URLS.tiktok, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+      await page.waitForTimeout(2500);
+      const url = page.url().toLowerCase();
+      if (url.includes('/login')) {
+        return {
+          platform,
+          state: 'logged_out',
+          detail: 'Belum login TikTok Studio.',
+          checkedAt: checkedAt(),
+        };
+      }
+      const uploadIndicator = page
+        .locator(
+          'iframe[data-tt="Upload_index_iframe"], div.upload-container, div.public-DraftEditor-content, button:has-text("Select video")'
+        )
+        .first();
+      let indicatorFound = (await uploadIndicator.count()) > 0;
+      if (!indicatorFound) {
+        await uploadIndicator
+          .waitFor({ state: 'attached', timeout: 3000 })
+          .then(() => {
+            indicatorFound = true;
+          })
+          .catch(() => {});
+      }
+      if (indicatorFound) {
+        return {
+          platform,
+          state: 'logged_in',
+          detail: 'Sesi TikTok Studio aktif.',
+          checkedAt: checkedAt(),
+        };
+      }
+      return {
+        platform,
+        state: 'unknown',
+        detail: 'Halaman TikTok Studio terbuka, tetapi indikator upload belum muncul.',
+        checkedAt: checkedAt(),
+      };
+    }
+
+    if (platform === 'ig_reels') {
+      await page.goto(PLATFORM_STUDIO_URLS.ig_reels, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+      await page
+        .locator(
+          'a[href^="/direct/inbox/"], input[name="username"], a[href^="/accounts/login/"]'
+        )
+        .first()
+        .waitFor({ state: 'attached', timeout: 15000 })
+        .catch(() => {});
+
+      const inboxCount = await page.locator('a[href^="/direct/inbox/"]').count();
+      if (inboxCount > 0) {
+        return {
+          platform,
+          state: 'logged_in',
+          detail: 'Sesi Instagram aktif.',
+          checkedAt: checkedAt(),
+        };
+      }
+      return {
+        platform,
+        state: 'logged_out',
+        detail: 'Belum login Instagram.',
+        checkedAt: checkedAt(),
+      };
+    }
+
+    // fb_reels
+    await page.goto(PLATFORM_STUDIO_URLS.fb_reels, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+    await page.waitForTimeout(3000);
+    const url = page.url().toLowerCase();
+    const emailVisible = await page
+      .locator('input[name="email"]')
+      .first()
+      .isVisible({ timeout: 500 })
+      .catch(() => false);
+
+    if (
+      url.includes('/login') ||
+      url.includes('checkpoint') ||
+      url.includes('two_step_verification') ||
+      emailVisible
+    ) {
+      return {
+        platform,
+        state: 'logged_out',
+        detail: 'Belum login Meta Business Suite / Facebook.',
+        checkedAt: checkedAt(),
+      };
+    }
+
+    const homeVisible = await page
+      .locator('a[href*="/latest/home"]')
+      .first()
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
+    const composerVisible = homeVisible
+      ? true
+      : await page
+          .locator('[data-surface*="bizweb_create_post"]')
+          .first()
+          .isVisible({ timeout: 2000 })
+          .catch(() => false);
+
+    if (homeVisible || composerVisible) {
+      return {
+        platform,
+        state: 'logged_in',
+        detail: 'Sesi Meta Business Suite aktif.',
+        checkedAt: checkedAt(),
+      };
+    }
+
+    return {
+      platform,
+      state: 'unknown',
+      detail: 'Halaman Meta Business Suite terbuka, tetapi status login belum terkonfirmasi.',
+      checkedAt: checkedAt(),
+    };
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    return {
+      platform,
+      state: 'unknown',
+      detail: `Gagal memeriksa sesi (${details}).`,
+      checkedAt: checkedAt(),
+    };
+  }
 }
 
 export async function closeBrowserSession(): Promise<AutoPostBrowserSessionStatus> {

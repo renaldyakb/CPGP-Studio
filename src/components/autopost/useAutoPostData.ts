@@ -20,6 +20,46 @@ export type AutoPostPage =
 
 export type ToastKind = 'success' | 'info' | 'error';
 
+export type PlatformSessionState = 'logged_in' | 'logged_out' | 'unknown';
+
+export interface PlatformSessionCheckResult {
+  platform: PlatformKey;
+  state: PlatformSessionState;
+  detail: string;
+  checkedAt: string;
+}
+
+const SESSION_CHECKS_STORAGE_KEY = 'autopost.studio.sessionChecks.v1';
+
+function loadStoredSessionChecks(): Partial<
+  Record<PlatformKey, PlatformSessionCheckResult>
+> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_CHECKS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed as Partial<Record<PlatformKey, PlatformSessionCheckResult>>;
+  } catch {
+    return {};
+  }
+}
+
+function persistSessionChecks(
+  checks: Partial<Record<PlatformKey, PlatformSessionCheckResult>>
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(
+      SESSION_CHECKS_STORAGE_KEY,
+      JSON.stringify(checks)
+    );
+  } catch {
+    // ignore storage quota or privacy mode errors
+  }
+}
+
 export interface AutoPostSettingsPatch {
   defaultMode?: AutoPostMode;
   browser?: {
@@ -151,6 +191,7 @@ export interface UseAutoPostDataResult {
   settings: AutoPostSettings;
   jobs: AutoPostJob[];
   browserSession: AutoPostBrowserSessionStatus;
+  sessionChecks: Partial<Record<PlatformKey, PlatformSessionCheckResult>>;
   isLoading: boolean;
   isRefreshing: boolean;
   busyKey: string | null;
@@ -165,6 +206,7 @@ export interface UseAutoPostDataResult {
   confirmJob: (jobId: string, publishedUrl?: string) => Promise<void>;
   openProfile: (platforms?: PlatformKey[]) => Promise<void>;
   closeProfile: () => Promise<void>;
+  checkStudioSessions: (platforms?: PlatformKey[]) => Promise<void>;
   discoverMeta: (accessToken?: string) => Promise<MetaDiscoveredPage[] | null>;
   exchangeMetaToken: (input: {
     appId?: string;
@@ -189,6 +231,9 @@ export function useAutoPostData(
   const [jobs, setJobs] = useState<AutoPostJob[]>([]);
   const [browserSession, setBrowserSession] =
     useState<AutoPostBrowserSessionStatus>(EMPTY_SESSION);
+  const [sessionChecks, setSessionChecks] = useState<
+    Partial<Record<PlatformKey, PlatformSessionCheckResult>>
+  >(() => loadStoredSessionChecks());
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -468,6 +513,63 @@ export function useAutoPostData(
     }
   }, [onToast]);
 
+  const checkStudioSessions = useCallback(
+    async (platforms?: PlatformKey[]) => {
+      const targetBusyKey =
+        platforms && platforms.length === 1
+          ? `check-sessions:${platforms[0]}`
+          : 'check-sessions';
+      setBusyKey(targetBusyKey);
+      try {
+        const res = await requestJson<{
+          ok?: boolean;
+          sessions?: Partial<Record<PlatformKey, PlatformSessionCheckResult>>;
+          browserSession?: AutoPostBrowserSessionStatus;
+          capabilities?: AutoPostCapabilities;
+        }>('/api/autopost/check-sessions', {
+          method: 'POST',
+          body: JSON.stringify(platforms ? { platforms } : {}),
+        });
+
+        if (res.browserSession) setBrowserSession(res.browserSession);
+        if (res.capabilities) setCapabilities(res.capabilities);
+
+        const incoming = res.sessions ?? {};
+        setSessionChecks((prev) => {
+          const next = { ...prev, ...incoming };
+          persistSessionChecks(next);
+          return next;
+        });
+
+        const checkedEntries = Object.values(incoming).filter(
+          (entry): entry is PlatformSessionCheckResult => Boolean(entry)
+        );
+        const loggedInCount = checkedEntries.filter(
+          (entry) => entry.state === 'logged_in'
+        ).length;
+
+        if (checkedEntries.length > 0) {
+          onToast?.(
+            `Cek sesi selesai: ${loggedInCount} dari ${checkedEntries.length} platform sudah login.`,
+            loggedInCount === checkedEntries.length ? 'success' : 'info'
+          );
+        } else {
+          onToast?.('Tidak ada sesi platform yang diperiksa.', 'info');
+        }
+      } catch (error) {
+        onToast?.(
+          error instanceof Error
+            ? error.message
+            : 'Gagal memeriksa sesi studio.',
+          'error'
+        );
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [onToast]
+  );
+
   const discoverMeta = useCallback(
     async (
       accessToken?: string
@@ -696,6 +798,7 @@ export function useAutoPostData(
     settings,
     jobs,
     browserSession,
+    sessionChecks,
     isLoading,
     isRefreshing,
     busyKey,
@@ -706,6 +809,7 @@ export function useAutoPostData(
     confirmJob,
     openProfile,
     closeProfile,
+    checkStudioSessions,
     discoverMeta,
     exchangeMetaToken,
     testMetaConnection,

@@ -4,6 +4,20 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.2.0] - 2026-11-25 (Zero-API-Key Browser Auto-Post Engine v2 — Ported from social-auto-upload)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Upgrade Total 4 Publisher Browser Lokal (`server/autopost/browserPublishers.ts`)**:
+  - Mengadopsi arsitektur selector struktural bebas-bahasa (berfungsi di UI Bahasa Indonesia maupun Inggris) dan verifikasi jaringan dari `dreammis/social-auto-upload` langsung ke engine TypeScript `patchright` CPGP (tanpa perlu install Python dan tanpa wajib API Key):
+    - **Instagram Reels**: Handler popup notifikasi otomatis (`page.addLocatorHandler`), injeksi video langsung (`input[type="file"][accept*="video/mp4"]`), **upload Cover 9:16 otomatis** di tahap Edit, navigasi wizard struktural (`._ac76`), dan verifikasi publikasi via respons `POST /api/v1/media/configure*` untuk mengambil URL live `instagram.com/reel/...`.
+    - **Facebook Page Reels (Meta Business Suite)**: Navigasi langsung ke `business.facebook.com/latest/composer/`, pembersihan otomatis tooltip `GeoGuidanceCard`, upload via `filechooser` yang otomatis berpindah ke wizard 3 langkah `lib:bizweb_create_reel`, dan verifikasi via GraphQL `BusinessComposerStoryCreationMutation`.
+    - **YouTube Shorts**: Navigasi langsung ke `youtube.com/upload`, pengisian `.fill()` + blur aman (mencegah dropdown `#` menutupi tombol), **upload Thumbnail/Cover 9:16 otomatis**, pemilihan `VIDEO_MADE_FOR_KIDS_NOT_MFK`, dan **menunggu progress upload 100%** sebelum menekan `#done-button`.
+    - **TikTok Studio**: Deteksi otomatis iframe (`iframe[data-tt="Upload_index_iframe"]`) vs halaman langsung, pengisian caption Draft.js via `keyboard.insertText`, deteksi tombol Post aktif + penanganan modal konfirmasi `Post now`.
+- **Cek Status Login 4 Platform Secara Live (`POST /api/autopost/check-sessions` & `StudioPage.tsx`)**:
+  - Tombol **`Cek Sesi`** (semua platform sekaligus atau per platform) untuk memverifikasi status sesi login asli di Chrome/Edge lokal (`Aktif` / `Perlu Login`) tanpa perlu API Key.
+
+---
+
 ## [v2.1.1] - 2026-11-25 (Meta API 8-Step Flow, Long-Lived Token Exchange & Connection Test)
 
 ### Fitur Baru & Peningkatan (Added / Improved)

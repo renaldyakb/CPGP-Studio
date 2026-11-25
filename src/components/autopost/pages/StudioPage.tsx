@@ -1,4 +1,4 @@
-import { ExternalLink, Loader2 } from 'lucide-react';
+import { ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
 import {
   Accordion,
   AccordionContent,
@@ -10,6 +10,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { NativeSelect } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import type { AutoPostPageProps } from '../pageProps';
 import { IconActionButton } from '../parts/IconActionButton';
 import {
@@ -17,10 +22,48 @@ import {
   PLATFORM_ORDER,
   PlatformIcon,
 } from '../parts/platformMeta';
-import { resolvePlatformEngine } from '../useAutoPostData';
+import {
+  resolvePlatformEngine,
+  type PlatformSessionCheckResult,
+} from '../useAutoPostData';
+
+function renderSessionBadge(check?: PlatformSessionCheckResult) {
+  if (!check) {
+    return <Badge variant="muted">Belum Dicek</Badge>;
+  }
+
+  const badgeProps =
+    check.state === 'logged_in'
+      ? ({ variant: 'success', label: 'Aktif' } as const)
+      : check.state === 'logged_out'
+        ? ({ variant: 'warning', label: 'Perlu Login' } as const)
+        : ({ variant: 'muted', label: 'Belum Dicek' } as const);
+
+  const detail = check.detail?.trim();
+  if (!detail) {
+    return <Badge variant={badgeProps.variant}>{badgeProps.label}</Badge>;
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            tabIndex={0}
+            className="inline-flex cursor-default rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        }
+      >
+        <Badge variant={badgeProps.variant}>{badgeProps.label}</Badge>
+      </TooltipTrigger>
+      <TooltipContent side="top">{detail}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 export function StudioPage({ ctx }: AutoPostPageProps) {
-  const { capabilities, settings, browserSession, busyKey } = ctx.data;
+  const { capabilities, settings, browserSession, sessionChecks, busyKey } =
+    ctx.data;
   const browser = settings.browser;
 
   const isOpen = browserSession.isOpen;
@@ -28,36 +71,44 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
     capabilities.chromeAvailable || capabilities.edgeAvailable;
   const isOpeningProfile = busyKey === 'open-profile';
   const isClosingProfile = busyKey === 'close-profile';
+  const isCheckingAllSessions = busyKey === 'check-sessions';
+  const isCheckingAnySession =
+    isCheckingAllSessions || Boolean(busyKey?.startsWith('check-sessions:'));
   const isSavingSettings = busyKey === 'settings';
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
           <CardTitle>Browser Lokal</CardTitle>
+          <Badge variant={isOpen ? 'success' : 'muted'}>
+            {isOpen
+              ? `Terbuka (${browserSession.openTabsCount} tab)`
+              : 'Tertutup'}
+          </Badge>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <Badge variant={isOpen ? 'success' : 'muted'}>
-              {isOpen
-                ? `Sesi terbuka (${browserSession.openTabsCount} tab)`
-                : 'Browser tertutup'}
+          <p className="text-xs font-light text-muted-foreground/75">
+            Tanpa API Key. Cukup login sekali di Chrome/Edge, sesi disimpan
+            lokal dan mendukung upload video + cover 9:16 ke 4 platform.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-light text-muted-foreground/75">
+              Terdeteksi
+            </span>
+            <Badge
+              variant={capabilities.chromeAvailable ? 'success' : 'muted'}
+              size="sm"
+            >
+              Chrome
             </Badge>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] text-muted-foreground">
-                Browser terdeteksi
-              </span>
-              <Badge
-                variant={capabilities.chromeAvailable ? 'success' : 'muted'}
-              >
-                Google Chrome
-              </Badge>
-              <Badge
-                variant={capabilities.edgeAvailable ? 'success' : 'muted'}
-              >
-                Microsoft Edge
-              </Badge>
-            </div>
+            <Badge
+              variant={capabilities.edgeAvailable ? 'success' : 'muted'}
+              size="sm"
+            >
+              Edge
+            </Badge>
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -66,7 +117,7 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                 htmlFor="autopost-browser-channel"
                 className="block text-xs font-medium text-foreground"
               >
-                Channel browser
+                Channel
               </label>
               <NativeSelect
                 id="autopost-browser-channel"
@@ -86,7 +137,7 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
 
             <div className="space-y-1.5">
               <span className="block text-xs font-medium text-foreground">
-                Folder profil
+                Folder Profil
               </span>
               <code className="flex min-h-9 items-center truncate rounded-md border border-input bg-muted px-2.5 font-mono text-xs text-foreground">
                 {browser.profileDir}
@@ -100,11 +151,11 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                 htmlFor="autopost-keep-tab"
                 className="cursor-pointer text-xs font-medium text-foreground"
               >
-                Biarkan tab studio terbuka pada mode tinjau
+                Tab Tinjau
               </label>
-              <p className="text-[11px] text-muted-foreground">
-                Tab studio tetap terbuka setelah tahap tinjau supaya Anda bisa
-                memeriksa pratinjau unggahan sebelum menutup sesi.
+              <p className="text-[11px] font-light text-muted-foreground/75">
+                Pertahankan tab studio terbuka saat mode tinjau agar pratinjau
+                unggah mudah diperiksa.
               </p>
             </div>
             <Switch
@@ -123,24 +174,50 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
             <Button
               type="button"
               variant="editorial"
-              disabled={isOpeningProfile || !anyBrowserAvailable}
+              disabled={
+                isOpeningProfile || isCheckingAnySession || !anyBrowserAvailable
+              }
               onClick={() => void ctx.data.openProfile()}
             >
               {isOpeningProfile ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                <Loader2
+                  className="h-3.5 w-3.5 animate-spin"
+                  aria-hidden="true"
+                />
               ) : null}
-              Buka semua studio
+              Buka Semua
             </Button>
             <Button
               type="button"
               variant="outline"
-              disabled={!isOpen || isClosingProfile}
+              disabled={
+                isCheckingAnySession || isOpeningProfile || !anyBrowserAvailable
+              }
+              onClick={() => void ctx.data.checkStudioSessions()}
+            >
+              {isCheckingAllSessions ? (
+                <Loader2
+                  className="h-3.5 w-3.5 animate-spin"
+                  aria-hidden="true"
+                />
+              ) : (
+                <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              Cek Sesi
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!isOpen || isClosingProfile || isCheckingAnySession}
               onClick={() => void ctx.data.closeProfile()}
             >
               {isClosingProfile ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                <Loader2
+                  className="h-3.5 w-3.5 animate-spin"
+                  aria-hidden="true"
+                />
               ) : null}
-              Tutup sesi
+              Tutup
             </Button>
           </div>
         </CardContent>
@@ -150,18 +227,8 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
         {PLATFORM_ORDER.map((key) => {
           const meta = PLATFORM_META[key];
           const engine = resolvePlatformEngine(key, capabilities);
-          const connected =
-            key === 'yt_shorts'
-              ? capabilities.youtubeApiReady
-              : capabilities.profileInitialized;
-          const connectedLabel =
-            key === 'yt_shorts'
-              ? connected
-                ? 'YouTube API terhubung'
-                : 'Belum terhubung'
-              : connected
-                ? 'Login tersimpan'
-                : 'Belum login';
+          const sessionCheck = sessionChecks[key];
+          const isCheckingThis = busyKey === `check-sessions:${key}`;
 
           return (
             <Card key={key}>
@@ -175,16 +242,32 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                 </Badge>
               </CardHeader>
               <CardContent className="flex items-center justify-between gap-2 p-4 pt-0">
-                <Badge variant={connected ? 'success' : 'muted'}>
-                  {connectedLabel}
-                </Badge>
-                <IconActionButton
-                  icon={ExternalLink}
-                  label={`Buka login ${meta.label}`}
-                  variant="outline"
-                  disabled={isOpeningProfile}
-                  onClick={() => void ctx.data.openProfile([key])}
-                />
+                {renderSessionBadge(sessionCheck)}
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <IconActionButton
+                    icon={isCheckingThis ? Loader2 : ShieldCheck}
+                    iconClassName={isCheckingThis ? 'animate-spin' : undefined}
+                    label={`Cek status login ${meta.label}`}
+                    variant="outline"
+                    disabled={
+                      isCheckingAnySession ||
+                      isOpeningProfile ||
+                      !anyBrowserAvailable
+                    }
+                    onClick={() => void ctx.data.checkStudioSessions([key])}
+                  />
+                  <IconActionButton
+                    icon={ExternalLink}
+                    label={`Buka login ${meta.label}`}
+                    variant="outline"
+                    disabled={
+                      isOpeningProfile ||
+                      isCheckingAnySession ||
+                      !anyBrowserAvailable
+                    }
+                    onClick={() => void ctx.data.openProfile([key])}
+                  />
+                </div>
               </CardContent>
             </Card>
           );
@@ -193,36 +276,28 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
 
       <Card>
         <CardContent className="p-4">
-          {/* Base UI Accordion: satu item terbuka karena multiple dimatikan, klik ulang menutupnya. */}
           <Accordion>
             <AccordionItem value="login-guide">
-              <AccordionTrigger>Panduan login satu kali</AccordionTrigger>
+              <AccordionTrigger>Panduan login sekali</AccordionTrigger>
               <AccordionContent>
-                <ol className="list-decimal space-y-2 pl-4 text-xs leading-relaxed text-muted-foreground">
+                <ol className="list-decimal space-y-1.5 pl-4 text-xs font-light leading-relaxed text-muted-foreground/75">
                   <li>
-                    Buka jendela browser profil khusus lewat tombol Buka semua
-                    studio, atau tombol Buka login pada kartu platform yang
-                    ingin Anda siapkan.
+                    Klik Buka Semua atau tombol buka di kartu platform untuk
+                    menjalankan browser profil lokal.
                   </li>
                   <li>
-                    Login manual di setiap platform, termasuk verifikasi dua
-                    faktor (2FA) dan captcha. Aplikasi tidak pernah mengisi kata
-                    sandi maupun menyimpannya.
+                    Login manual di tiap platform termasuk 2FA dan captcha;
+                    sandi tidak pernah disimpan aplikasi.
                   </li>
                   <li>
-                    Setelah semua platform selesai login, tutup sesi lewat
-                    tombol Tutup sesi. Cookie tersimpan di folder{' '}
+                    Klik Cek Sesi untuk memastikan status aktif, lalu klik Tutup
+                    agar sesi tersimpan di{' '}
                     <code className="font-mono text-foreground">
                       {browser.profileDir}
-                    </code>{' '}
-                    dan dipakai lagi pada proses Auto-Post berikutnya.
+                    </code>
+                    .
                   </li>
                 </ol>
-                <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                  Jika sebuah platform menampilkan halaman verifikasi tambahan,
-                  selesaikan verifikasi itu secara manual di jendela browser
-                  yang terbuka.
-                </p>
               </AccordionContent>
             </AccordionItem>
           </Accordion>

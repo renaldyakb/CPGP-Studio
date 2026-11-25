@@ -24,6 +24,7 @@ import type {
   UpdateWorkspaceInput,
 } from '../shared/types/workspace.ts';
 import {
+  checkPlatformLoginSessions,
   closeBrowserSession,
   getActiveBrowserProfileDir,
   getBrowserSessionStatus,
@@ -1713,6 +1714,45 @@ export function createApiRouter(): Express {
         res.status(500).json({
           error: 'Gagal menutup sesi browser Auto-Post',
           details: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  );
+
+  // POST /api/autopost/check-sessions
+  app.post(
+    '/api/autopost/check-sessions',
+    async (req: Request, res: Response) => {
+      try {
+        const rawPlatforms = req.body?.platforms;
+        let platforms: PlatformKey[] | undefined;
+
+        if (Array.isArray(rawPlatforms) && rawPlatforms.length > 0) {
+          const filtered = rawPlatforms.filter(
+            (entry): entry is PlatformKey =>
+              typeof entry === 'string' &&
+              ALL_PLATFORM_KEYS.includes(entry as PlatformKey)
+          );
+          if (filtered.length === 0) {
+            res.status(400).json({
+              error: `Daftar platform tidak valid. Gunakan: ${ALL_PLATFORM_KEYS.join(', ')}`,
+            });
+            return;
+          }
+          platforms = Array.from(new Set(filtered));
+        }
+
+        const sessions = await checkPlatformLoginSessions(platforms);
+        res.json({
+          ok: true,
+          sessions,
+        });
+      } catch (error) {
+        res.status(500).json({
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal memeriksa sesi login browser Auto-Post',
         });
       }
     }

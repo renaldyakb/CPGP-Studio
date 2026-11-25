@@ -1,4 +1,5 @@
-import type { Frame, Locator, Page } from 'patchright';
+import fs from 'node:fs';
+import type { Frame, FrameLocator, Locator, Page } from 'patchright';
 import type { WorkspaceMetadata } from '../../shared/types/workspace.ts';
 import type { AutoPostMode } from '../../src/types/autopost.ts';
 import type { ContentPlannerItem, PlatformKey } from '../../src/types/planner.ts';
@@ -30,6 +31,8 @@ export interface BrowserPublishResult {
   summary: string;
 }
 
+type LocatorScope = Page | Frame | FrameLocator;
+
 function createAbortError(message = 'Proses auto-post dibatalkan.'): Error {
   const err = new Error(message);
   err.name = 'AbortError';
@@ -42,20 +45,13 @@ function throwIfAborted(signal: AbortSignal): void {
   }
 }
 
-async function humanDelay(
-  minMs: number,
-  maxMs: number,
-  signal: AbortSignal
-): Promise<void> {
+async function abortableWait(ms: number, signal: AbortSignal): Promise<void> {
   throwIfAborted(signal);
-  const delayMs =
-    minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
-
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort);
       resolve();
-    }, delayMs);
+    }, Math.max(0, ms));
 
     const onAbort = () => {
       clearTimeout(timer);
@@ -64,6 +60,44 @@ async function humanDelay(
 
     signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+async function humanDelay(
+  minMs: number,
+  maxMs: number,
+  signal: AbortSignal
+): Promise<void> {
+  const delayMs =
+    minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
+  await abortableWait(delayMs, signal);
+}
+
+async function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal
+): Promise<T> {
+  throwIfAborted(signal);
+  let onAbort: (() => void) | null = null;
+
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      reject(createAbortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    return await Promise.race([promise, abortPromise]);
+  } catch (error) {
+    if (signal.aborted) {
+      promise.catch(() => {});
+    }
+    throw error;
+  } finally {
+    if (onAbort) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
 function getTitleForItem(item: ContentPlannerItem): string {
@@ -82,8 +116,24 @@ function getCaptionForItem(item: ContentPlannerItem): string {
   );
 }
 
+function getCoverPathForItem(item: ContentPlannerItem): string | null {
+  const cover = item.autoMetadata.assets.cover;
+  if (cover.exists && cover.absolutePath && fs.existsSync(cover.absolutePath)) {
+    return cover.absolutePath;
+  }
+  return null;
+}
+
+async function safeBringToFront(page: Page): Promise<void> {
+  try {
+    await page.bringToFront();
+  } catch {
+    // Ignore if browser window is minimized or closed
+  }
+}
+
 async function findFirstVisibleLocator(
-  target: Page | Frame,
+  target: LocatorScope,
   selectors: string[],
   timeoutMs = 8000,
   signal?: AbortSignal
@@ -106,40 +156,42 @@ async function findFirstVisibleLocator(
       }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (signal) {
+      await abortableWait(300, signal);
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
   }
 
   return null;
 }
 
-async function findFirstAttachedLocator(
-  target: Page | Frame,
+async function tryClickAny(
+  target: LocatorScope,
   selectors: string[],
-  timeoutMs = 10000,
+  timeoutMs = 6000,
   signal?: AbortSignal
-): Promise<Locator | null> {
-  const deadline = Date.now() + timeoutMs;
+): Promise<boolean> {
+  const locator = await findFirstVisibleLocator(
+    target,
+    selectors,
+    timeoutMs,
+    signal
+  );
+  if (!locator) return false;
 
-  while (Date.now() < deadline) {
-    if (signal?.aborted) {
-      throw createAbortError();
+  try {
+    await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await locator.click({ timeout: 5000 });
+    return true;
+  } catch {
+    try {
+      await locator.click({ force: true, timeout: 4000 });
+      return true;
+    } catch {
+      return false;
     }
-
-    for (const selector of selectors) {
-      try {
-        const locator = target.locator(selector).first();
-        if ((await locator.count()) > 0) {
-          return locator;
-        }
-      } catch {
-        // Ignore transient lookup errors
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 300));
   }
-
-  return null;
 }
 
 async function findFileInputAcrossFrames(
@@ -169,41 +221,45 @@ async function findFileInputAcrossFrames(
       }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    if (signal) {
+      await abortableWait(350, signal);
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
   }
 
   return null;
 }
 
-async function tryClickAny(
-  target: Page | Frame,
-  selectors: string[],
-  timeoutMs = 6000,
-  signal?: AbortSignal
-): Promise<boolean> {
-  const locator = await findFirstVisibleLocator(
-    target,
-    selectors,
-    timeoutMs,
-    signal
-  );
-  if (!locator) return false;
-
+async function isLocatorEnabled(locator: Locator): Promise<boolean> {
   try {
-    await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await locator.click({ timeout: 5000 });
-    return true;
+    const visible = await locator.isVisible({ timeout: 300 });
+    if (!visible) return false;
+    const disabledAttr = await locator.getAttribute('disabled');
+    const ariaDisabled = await locator.getAttribute('aria-disabled');
+    return disabledAttr === null && ariaDisabled !== 'true';
   } catch {
-    try {
-      await locator.click({ force: true, timeout: 4000 });
-      return true;
-    } catch {
-      return false;
-    }
+    return false;
   }
 }
 
-async function fillEditableField(
+async function waitForEnabledLocator(
+  locator: Locator,
+  timeoutMs: number,
+  signal: AbortSignal
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+    if (await isLocatorEnabled(locator)) {
+      return true;
+    }
+    await abortableWait(500, signal);
+  }
+  return false;
+}
+
+async function fillTextWithInsertFallback(
   page: Page,
   locator: Locator,
   text: string,
@@ -212,27 +268,18 @@ async function fillEditableField(
   throwIfAborted(signal);
   try {
     await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await locator.click({ timeout: 5000 });
-    await humanDelay(200, 450, signal);
-
-    const tagName = await locator
-      .evaluate((el) => el.tagName.toLowerCase())
-      .catch(() => '');
-
-    if (tagName === 'input' || tagName === 'textarea') {
-      await locator.fill(text);
-      return true;
-    }
-
-    await page.keyboard.press('Control+A');
-    await humanDelay(120, 260, signal);
-    await page.keyboard.press('Backspace');
-    await humanDelay(120, 260, signal);
-    await page.keyboard.insertText(text);
+    await locator.click({ timeout: 6000 });
+    await humanDelay(180, 350, signal);
+    await locator.fill(text);
     return true;
   } catch {
     try {
-      await locator.fill(text);
+      await locator.click({ timeout: 4000 });
+      await page.keyboard.press('Control+A');
+      await humanDelay(100, 220, signal);
+      await page.keyboard.press('Backspace');
+      await humanDelay(100, 220, signal);
+      await page.keyboard.insertText(text);
       return true;
     } catch {
       return false;
@@ -240,85 +287,100 @@ async function fillEditableField(
   }
 }
 
-async function safeBringToFront(page: Page): Promise<void> {
+async function fillYouTubeTextbox(
+  page: Page,
+  locator: Locator,
+  text: string,
+  signal: AbortSignal
+): Promise<boolean> {
+  throwIfAborted(signal);
   try {
-    await page.bringToFront();
+    await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await locator.click({ timeout: 6000 });
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Delete');
+    await humanDelay(120, 250, signal);
+
+    try {
+      await locator.fill(text);
+    } catch {
+      await page.keyboard.type(text);
+    }
+
+    await page
+      .evaluate(() => {
+        const active = document.activeElement as HTMLElement | null;
+        if (active && typeof active.blur === 'function') {
+          active.blur();
+        }
+      })
+      .catch(() => {});
+
+    const dropdownCount = await page
+      .locator('tp-yt-iron-dropdown:visible')
+      .count()
+      .catch(() => 0);
+    if (dropdownCount > 0) {
+      await page.keyboard.press('Escape').catch(() => {});
+    }
+
+    return true;
   } catch {
-    // Ignore if browser window is minimized or closed
+    return false;
   }
 }
 
-async function isYouTubeLoginRequired(page: Page): Promise<boolean> {
-  const url = page.url().toLowerCase();
-  if (
-    url.includes('accounts.google.com') ||
-    url.includes('/signin') ||
-    url.includes('servicelogin')
-  ) {
-    return true;
-  }
-
-  const emailInput = await findFirstVisibleLocator(
-    page,
-    ['input[type="email"]', 'a:has-text("Sign in")', 'a:has-text("Masuk")'],
-    1200
+async function sweepGeoGuidanceCards(page: Page): Promise<void> {
+  const buttons = page.locator(
+    '[data-surface$="lib:GeoGuidanceCard"] [role="button"]:not([aria-label])'
   );
-  return Boolean(emailInput);
-}
-
-async function isTikTokLoginRequired(page: Page): Promise<boolean> {
-  const url = page.url().toLowerCase();
-  if (url.includes('/login')) {
-    return true;
+  const count = await buttons.count().catch(() => 0);
+  for (let i = 0; i < count; i += 1) {
+    const btn = buttons.nth(i);
+    const visible = await btn.isVisible({ timeout: 250 }).catch(() => false);
+    if (visible) {
+      await btn.click({ timeout: 2500 }).catch(() => {});
+    }
   }
-
-  const loginPrompt = await findFirstVisibleLocator(
-    page,
-    [
-      'input[name="username"]',
-      '[data-e2e="login-button"]',
-      'button:has-text("Log in")',
-      'button:has-text("Masuk")',
-      '#loginContainer',
-    ],
-    1500
-  );
-  return Boolean(loginPrompt);
 }
 
-async function isInstagramLoginRequired(page: Page): Promise<boolean> {
-  const url = page.url().toLowerCase();
-  if (url.includes('/accounts/login')) {
-    return true;
+async function readFacebookActiveStepMarker(page: Page): Promise<string> {
+  return page
+    .evaluate(() => {
+      const steps = Array.from(
+        document.querySelectorAll('[aria-current="step"]')
+      );
+      return steps
+        .map((el, idx) => {
+          const text = (el.textContent ?? '').trim();
+          const role = el.getAttribute('role') ?? '';
+          return `${idx}:${role}:${text}`;
+        })
+        .join('|');
+    })
+    .catch(() => '');
+}
+
+async function extractYouTubeVideoUrl(page: Page): Promise<string | null> {
+  try {
+    const link = page
+      .locator(
+        'a#share-url, a[href*="youtu.be"], a[href*="/shorts/"], a[href*="watch?v="]'
+      )
+      .first();
+    if ((await link.count()) > 0) {
+      const href = await link.getAttribute('href');
+      if (href && href.trim()) {
+        return href.trim();
+      }
+    }
+  } catch {
+    // Ignore link scraping failure
   }
-
-  const loginInput = await findFirstVisibleLocator(
-    page,
-    ['input[name="username"]', 'input[name="password"]'],
-    1500
-  );
-  return Boolean(loginInput);
+  return null;
 }
 
-async function isFacebookLoginRequired(page: Page): Promise<boolean> {
-  const url = page.url().toLowerCase();
-  if (
-    url.includes('facebook.com/login') ||
-    url.includes('/login.php') ||
-    url.includes('login/?next=')
-  ) {
-    return true;
-  }
-
-  const loginInput = await findFirstVisibleLocator(
-    page,
-    ['input[name="email"]', 'input[name="pass"]', 'button[name="login"]'],
-    1500
-  );
-  return Boolean(loginInput);
-}
-
-async function publishYouTubeStudio(
+export async function publishInstagramViaBrowser(
   page: Page,
   item: ContentPlannerItem,
   videoPath: string,
@@ -328,192 +390,898 @@ async function publishYouTubeStudio(
   onProgress: (update: BrowserPublishProgressUpdate) => void
 ): Promise<BrowserPublishResult> {
   onProgress({
-    step: 'Membuka YouTube Studio',
+    step: 'Membuka Instagram',
     progressPercent: 12,
-    log: 'Membuka YouTube Studio di tab browser lokal.',
+    log: 'Membuka Instagram Web di browser lokal.',
     level: 'info',
   });
 
-  await page.goto(PLATFORM_STUDIO_URLS.yt_shorts, {
-    waitUntil: 'domcontentloaded',
-    timeout: 45000,
-  });
-  await humanDelay(2000, 3200, signal);
+  await raceWithAbort(
+    page.goto(PLATFORM_STUDIO_URLS.ig_reels, {
+      waitUntil: 'domcontentloaded',
+      timeout: 120_000,
+    }),
+    signal
+  );
 
-  if (await isYouTubeLoginRequired(page)) {
+  await raceWithAbort(
+    page
+      .locator(
+        'a[href^="/direct/inbox/"], input[name="username"], a[href^="/accounts/login/"]'
+      )
+      .first()
+      .waitFor({ state: 'attached', timeout: 20_000 })
+      .catch(() => {}),
+    signal
+  );
+
+  const inboxCount = await page.locator('a[href^="/direct/inbox/"]').count();
+  if (inboxCount === 0) {
     await safeBringToFront(page);
     onProgress({
-      step: 'Menunggu login YouTube Studio',
+      step: 'Menunggu login Instagram',
       progressPercent: 25,
-      log: 'Silakan login YouTube Studio di tab Chrome yang terbuka',
+      log: 'Belum login Instagram. Silakan login di tab Chrome yang terbuka.',
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
       summary:
-        'Sesi login Google / YouTube Studio diperlukan. Silakan login di tab browser yang terbuka lalu jalankan ulang atau selesaikan manual.',
+        'Belum login Instagram. Silakan login di tab Chrome yang terbuka.',
     };
   }
 
-  onProgress({
-    step: 'Mencari tombol Upload di YouTube Studio',
-    progressPercent: 25,
-    log: 'Mencari tombol Create / Upload video di YouTube Studio.',
-    level: 'info',
+  const notifDialog = page.getByRole('dialog').filter({
+    has: page.locator(
+      'img[src^="/images/instagram/xig/ico/xxhdpi_launcher.png"]'
+    ),
   });
 
-  let fileInput = await findFirstAttachedLocator(
-    page,
-    ['input[type="file"][name="Filedata"]', 'input[type="file"]'],
-    2500,
-    signal
-  );
+  await page.addLocatorHandler(notifDialog, async () => {
+    await notifDialog.locator('._a9-z > button').nth(1).click().catch(() => {});
+  });
 
-  if (!fileInput) {
-    const clickedUploadIcon = await tryClickAny(
-      page,
-      [
-        '#upload-icon',
-        'ytcp-icon-button#upload-icon',
-        'button[aria-label*="Upload video" i]',
-        'button[aria-label*="Upload videos" i]',
-        'button[aria-label*="Unggah video" i]',
-      ],
-      4000,
-      signal
-    );
+  try {
+    onProgress({
+      step: 'Membuka dialog Create di Instagram',
+      progressPercent: 26,
+      log: 'Mencari tombol Create di sidebar Instagram (selector struktural).',
+      level: 'info',
+    });
 
-    if (!clickedUploadIcon) {
-      const clickedCreate = await tryClickAny(
-        page,
-        [
-          '#create-icon',
-          'ytcp-button#create-icon',
-          'button[aria-label*="Create" i]',
-          'button[aria-label*="Buat" i]',
-          'ytcp-button:has-text("Create")',
-          'ytcp-button:has-text("Buat")',
-        ],
-        7000,
-        signal
-      );
+    const navPopups = page
+      .locator('a._a6hd[href="#"]')
+      .filter({ has: page.locator('[aria-selected]') });
 
-      if (clickedCreate) {
-        await humanDelay(600, 1100, signal);
-        await tryClickAny(
-          page,
-          [
-            'tp-yt-paper-item#text-item-0',
-            'tp-yt-paper-item:has-text("Upload video")',
-            'tp-yt-paper-item:has-text("Upload videos")',
-            'tp-yt-paper-item:has-text("Unggah video")',
-          ],
-          5000,
-          signal
-        );
+    let createClicked = false;
+    if ((await navPopups.count()) === 4) {
+      try {
+        await navPopups.nth(1).click({ timeout: 8000 });
+        createClicked = true;
+      } catch {
+        createClicked = false;
       }
     }
 
-    await humanDelay(700, 1200, signal);
-    fileInput = await findFileInputAcrossFrames(
-      page,
-      ['input[type="file"][name="Filedata"]', 'input[type="file"]'],
-      12000,
+    if (!createClicked) {
+      createClicked = await tryClickAny(
+        page,
+        [
+          'svg[aria-label="New post"]',
+          'svg[aria-label="Postingan baru"]',
+          'a[role="link"]:has(svg[aria-label*="Create"])',
+          'a[role="link"]:has(svg[aria-label*="Buat"])',
+        ],
+        10_000,
+        signal
+      );
+    }
+
+    if (!createClicked) {
+      await safeBringToFront(page);
+      onProgress({
+        step: 'Tombol Create Instagram tidak ditemukan',
+        progressPercent: 30,
+        log: 'Tombol Create Instagram tidak ditemukan otomatis. Tab dibiarkan terbuka.',
+        level: 'warning',
+      });
+      return {
+        status: 'awaiting_review',
+        publishedUrl: null,
+        summary:
+          'Tombol Create Instagram tidak terdeteksi otomatis. Silakan klik Create secara manual di tab browser.',
+      };
+    }
+
+    await humanDelay(700, 1100, signal);
+
+    const dialog = page.getByRole('dialog');
+    const mp4FileInput = dialog
+      .locator('input[type="file"][accept*="video/mp4"]')
+      .first();
+
+    // If a submenu opened instead of the upload dialog, click its first item (Post/Postingan)
+    if ((await mp4FileInput.count()) === 0) {
+      await tryClickAny(
+        page,
+        [
+          '[role="menu"] [role="menuitem"]',
+          'a[role="link"]:has(svg[aria-label*="Post"])',
+          'a[role="link"]:has(svg[aria-label*="Postingan"])',
+          'span:has-text("Post")',
+          'span:has-text("Postingan")',
+          'a:has-text("Post")',
+          'div[role="button"]:has-text("Post")',
+          'div[role="button"]:has-text("Postingan")',
+        ],
+        3000,
+        signal
+      );
+      await humanDelay(500, 900, signal);
+    }
+
+    let fileInput: Locator | null = mp4FileInput;
+    try {
+      await raceWithAbort(
+        mp4FileInput.waitFor({ state: 'attached', timeout: 15_000 }),
+        signal
+      );
+    } catch (err) {
+      if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw createAbortError();
+      }
+      const fallbackInput = dialog.locator('input[type="file"]').first();
+      if ((await fallbackInput.count()) > 0) {
+        fileInput = fallbackInput;
+      } else {
+        fileInput = null;
+      }
+    }
+
+    if (!fileInput) {
+      await safeBringToFront(page);
+      onProgress({
+        step: 'Input file Instagram tidak ditemukan',
+        progressPercent: 38,
+        log: 'Input file unggahan Instagram tidak ditemukan otomatis. Tab tetap dibuka.',
+        level: 'warning',
+      });
+      return {
+        status: 'awaiting_review',
+        publishedUrl: null,
+        summary: `Input file upload Instagram tidak ditemukan. Silakan pilih ${videoFileName} secara manual di tab Instagram.`,
+      };
+    }
+
+    onProgress({
+      step: `Mengunggah video ${videoFileName} ke Instagram`,
+      progressPercent: 45,
+      log: `Memasukkan file ${videoFileName} langsung ke input upload Instagram.`,
+      level: 'info',
+    });
+
+    await fileInput.setInputFiles(videoPath);
+
+    // Dismiss optional Reels NUX modal (bounded 2s check)
+    const reelsNuxDialog = page.getByRole('dialog').filter({
+      has: page.locator(
+        'img[src^="/images/instagram/clips/reels_nux_icon.png"]'
+      ),
+    });
+    try {
+      await raceWithAbort(
+        reelsNuxDialog.first().waitFor({ state: 'visible', timeout: 2000 }),
+        signal
+      );
+      await reelsNuxDialog
+        .locator('._a9-z div > button')
+        .first()
+        .click({ timeout: 3000 })
+        .catch(() => {});
+    } catch (err) {
+      if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw createAbortError();
+      }
+      // Optional NUX modal not displayed
+    }
+
+    const PRIMARY_ACTION = '._ac76 [role="button"]:not(:has(svg))';
+    const primaryActionBtn = dialog.locator(PRIMARY_ACTION).first();
+
+    await raceWithAbort(
+      primaryActionBtn.waitFor({ state: 'visible', timeout: 45_000 }),
       signal
     );
-  }
 
-  if (!fileInput) {
+    const coverPath = getCoverPathForItem(item);
+
+    // Step 0: Crop -> Edit, Step 1: Edit (+ cover) -> Caption
+    for (let step = 0; step < 2; step += 1) {
+      throwIfAborted(signal);
+
+      if (step === 1 && coverPath) {
+        const coverInput = dialog.locator(
+          'input[type="file"][accept="image/jpeg,image/png"]'
+        );
+        if ((await coverInput.count()) === 1) {
+          try {
+            await coverInput.setInputFiles(coverPath);
+            onProgress({
+              step: 'Cover 9:16 dipasang di Instagram Reels',
+              progressPercent: 64,
+              log: 'Cover 9:16 berhasil dipasang di Instagram Reels!',
+              level: 'success',
+            });
+            await humanDelay(600, 1000, signal);
+          } catch {
+            // Non-fatal if cover upload fails
+          }
+        }
+      }
+
+      onProgress({
+        step:
+          step === 0
+            ? 'Melewati tahap Crop Instagram Reels'
+            : 'Melanjutkan ke form caption Instagram Reels',
+        progressPercent: step === 0 ? 56 : 68,
+        log: `Menekan tombol wizard langkah ${step + 1} di dialog Instagram.`,
+        level: 'info',
+      });
+
+      const prevHeading = (
+        await dialog
+          .locator('._ac76 [role="heading"]')
+          .first()
+          .innerText()
+          .catch(() => '')
+      ).trim();
+
+      await primaryActionBtn.click({ timeout: 10_000 });
+
+      const stepDeadline = Date.now() + 45_000;
+      while (Date.now() < stepDeadline) {
+        throwIfAborted(signal);
+        const lexicalVisible = await dialog
+          .locator('[data-lexical-editor="true"]')
+          .first()
+          .isVisible({ timeout: 150 })
+          .catch(() => false);
+        if (lexicalVisible) {
+          break;
+        }
+        const currHeading = (
+          await dialog
+            .locator('._ac76 [role="heading"]')
+            .first()
+            .innerText()
+            .catch(() => '')
+        ).trim();
+        if (currHeading && currHeading !== prevHeading) {
+          break;
+        }
+        await abortableWait(300, signal);
+      }
+
+      await humanDelay(350, 650, signal);
+    }
+
+    const caption = getCaptionForItem(item).slice(0, 2200);
+    const captionBox = dialog
+      .locator(
+        '[contenteditable="true"][role="textbox"][data-lexical-editor="true"], div[aria-label*="caption" i], div[aria-label*="keterangan" i]'
+      )
+      .first();
+
+    let captionVisible = false;
+    try {
+      await raceWithAbort(
+        captionBox.waitFor({ state: 'visible', timeout: 15_000 }),
+        signal
+      );
+      captionVisible = true;
+    } catch (err) {
+      if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw createAbortError();
+      }
+    }
+
+    if (captionVisible) {
+      onProgress({
+        step: 'Mengisi caption Instagram Reels',
+        progressPercent: 76,
+        log: `Mengisi caption Instagram (${caption.length} karakter).`,
+        level: 'info',
+      });
+      await fillTextWithInsertFallback(page, captionBox, caption, signal);
+      await humanDelay(500, 900, signal);
+    } else {
+      onProgress({
+        step: 'Kolom caption Instagram belum terlihat',
+        progressPercent: 76,
+        log: 'Kolom caption Instagram tidak ditemukan otomatis. Tab tetap dibuka agar Anda bisa menempelkan caption.',
+        level: 'warning',
+      });
+    }
+
+    if (mode === 'review') {
+      await safeBringToFront(page);
+      onProgress({
+        step: 'Siap direview di Instagram Reels',
+        progressPercent: 85,
+        log: 'Video, cover, dan caption Instagram Reels sudah siap. Silakan review lalu klik Share / Bagikan.',
+        level: 'success',
+      });
+      return {
+        status: 'awaiting_review',
+        publishedUrl: null,
+        summary:
+          'Video dan caption sudah disiapkan di Instagram Reels. Cek tab browser untuk konfirmasi akhir.',
+      };
+    }
+
+    onProgress({
+      step: 'Membagikan Instagram Reels',
+      progressPercent: 90,
+      log: 'Menekan tombol Share dan menunggu konfirmasi API configure Instagram.',
+      level: 'info',
+    });
+
+    const configureResponsePromise = page.waitForResponse(
+      (resp) => {
+        if (resp.request().method() !== 'POST') return false;
+        if (!resp.url().includes('/api/v1/media/configure')) return false;
+        if (resp.status() === 202) return false;
+        return true;
+      },
+      { timeout: 120_000 }
+    );
+
+    await primaryActionBtn.click({ timeout: 10_000 });
+    const configureResponse = await raceWithAbort(
+      configureResponsePromise,
+      signal
+    );
+
+    let publishedUrl: string | null = null;
+    try {
+      const rawBody = await configureResponse.text();
+      const cleanedBody = rawBody.replace(/^for\s*\(;;\);\s*/, '').trim();
+      const parsed = JSON.parse(cleanedBody) as {
+        media?: { code?: string };
+        code?: string;
+      };
+      const code = parsed?.media?.code ?? parsed?.code;
+      if (typeof code === 'string' && code.trim()) {
+        publishedUrl = `https://www.instagram.com/reel/${code.trim()}/`;
+      }
+    } catch {
+      publishedUrl = null;
+    }
+
+    onProgress({
+      step: 'Instagram Reels dibagikan',
+      progressPercent: 100,
+      log: publishedUrl
+        ? `Instagram Reels berhasil dipublikasikan: ${publishedUrl}`
+        : 'Instagram Reels berhasil dipublikasikan.',
+      level: 'success',
+    });
+
+    return {
+      status: 'completed',
+      publishedUrl,
+      summary: publishedUrl
+        ? `Berhasil publish Instagram Reels: ${publishedUrl}`
+        : 'Berhasil publish Instagram Reels.',
+    };
+  } finally {
+    await page.removeLocatorHandler(notifDialog).catch(() => {});
+  }
+}
+
+export async function publishFacebookViaBrowser(
+  page: Page,
+  item: ContentPlannerItem,
+  videoPath: string,
+  videoFileName: string,
+  mode: AutoPostMode,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<BrowserPublishResult> {
+  onProgress({
+    step: 'Membuka Meta Business Suite',
+    progressPercent: 12,
+    log: 'Membuka Meta Business Suite Composer di browser lokal.',
+    level: 'info',
+  });
+
+  await raceWithAbort(
+    page.goto(PLATFORM_STUDIO_URLS.fb_reels, {
+      waitUntil: 'domcontentloaded',
+      timeout: 120_000,
+    }),
+    signal
+  );
+  await humanDelay(2500, 3500, signal);
+
+  const currentUrl = page.url().toLowerCase();
+  const emailVisible = await page
+    .locator('input[name="email"]')
+    .first()
+    .isVisible({ timeout: 1000 })
+    .catch(() => false);
+
+  if (
+    currentUrl.includes('/login') ||
+    currentUrl.includes('checkpoint') ||
+    currentUrl.includes('two_step_verification') ||
+    emailVisible
+  ) {
     await safeBringToFront(page);
     onProgress({
-      step: 'Menunggu upload manual di YouTube Studio',
-      progressPercent: 40,
-      log: 'Input file upload YouTube Studio tidak ditemukan otomatis. Tab dibiarkan terbuka agar Anda bisa memilih video secara manual.',
+      step: 'Menunggu login Meta Business Suite',
+      progressPercent: 25,
+      log: 'Belum login Meta Business Suite / Facebook. Silakan login di tab Chrome yang terbuka.',
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary: `Tombol upload YouTube Studio tidak terdeteksi otomatis. Silakan pilih file ${videoFileName} di tab YouTube Studio yang terbuka.`,
+      summary:
+        'Sesi login Facebook / Meta Business Suite diperlukan. Silakan login di tab browser yang terbuka.',
+    };
+  }
+
+  await sweepGeoGuidanceCards(page);
+
+  onProgress({
+    step: `Mengunggah video ${videoFileName} ke Meta Business Suite`,
+    progressPercent: 30,
+    log: `Memasukkan file ${videoFileName} ke Composer Meta Business Suite.`,
+    level: 'info',
+  });
+
+  const mediaSurface = page
+    .locator('[data-surface$="lib:bizweb_create_post:media"]')
+    .first();
+
+  await raceWithAbort(
+    page
+      .locator(
+        '[data-surface$="lib:bizweb_create_post:media"], input[type="file"][accept*="video"]'
+      )
+      .first()
+      .waitFor({ state: 'attached', timeout: 15_000 })
+      .catch(() => {}),
+    signal
+  );
+
+  let videoUploaded = false;
+  if (await mediaSurface.isVisible({ timeout: 2500 }).catch(() => false)) {
+    try {
+      const [chooser] = await raceWithAbort(
+        Promise.all([
+          page.waitForEvent('filechooser', { timeout: 15_000 }),
+          mediaSurface.getByRole('button').first().click({ timeout: 10_000 }),
+        ]),
+        signal
+      );
+      await chooser.setFiles([videoPath]);
+      videoUploaded = true;
+    } catch (err) {
+      if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw createAbortError();
+      }
+      videoUploaded = false;
+    }
+  }
+
+  if (!videoUploaded) {
+    const fallbackInput = await findFileInputAcrossFrames(
+      page,
+      ['input[type="file"][accept*="video"]', 'input[type="file"]'],
+      8000,
+      signal
+    );
+    if (fallbackInput) {
+      await fallbackInput.setInputFiles(videoPath);
+      videoUploaded = true;
+    }
+  }
+
+  if (!videoUploaded) {
+    await safeBringToFront(page);
+    onProgress({
+      step: 'Input video Meta Business Suite tidak ditemukan',
+      progressPercent: 35,
+      log: 'Input file video Facebook Reels tidak ditemukan otomatis. Tab dibiarkan terbuka untuk upload manual.',
+      level: 'warning',
+    });
+    return {
+      status: 'awaiting_review',
+      publishedUrl: null,
+      summary: `Input file Facebook Reels tidak ditemukan otomatis. Silakan pilih ${videoFileName} di tab Meta Business Suite.`,
     };
   }
 
   onProgress({
-    step: `Mengunggah video ${videoFileName} ke YouTube Studio`,
-    progressPercent: 42,
-    log: `Memasukkan file ${videoFileName} ke YouTube Studio.`,
+    step: 'Menunggu transisi ke Reels Composer',
+    progressPercent: 45,
+    log: 'Menunggu Meta Business Suite beralih ke antarmuka Create Reel.',
     level: 'info',
   });
 
-  await fileInput.setInputFiles(videoPath);
-  await humanDelay(2500, 4000, signal);
-
-  const title = getTitleForItem(item);
-  const description = getCaptionForItem(item);
-
-  const titleBox = await findFirstVisibleLocator(
-    page,
-    [
-      'ytcp-social-suggestions-textbox[id="title-textarea"] #textbox',
-      'div#textbox[aria-label*="Add a title" i]',
-      'div#textbox[aria-label*="judul" i]',
-      '#textbox',
-    ],
-    22000,
+  const reelSurface = page
+    .locator('[data-surface$="lib:bizweb_create_reel"]')
+    .first();
+  await raceWithAbort(
+    reelSurface.waitFor({ state: 'visible', timeout: 60_000 }),
     signal
   );
 
-  if (titleBox) {
+  await sweepGeoGuidanceCards(page);
+
+  const footerButtons = page.locator(
+    '[data-surface$="bizweb_create_reel:footer"] [role="button"]:not([aria-label])'
+  );
+
+  onProgress({
+    step: 'Menunggu proses upload video Facebook Reels (100%)',
+    progressPercent: 55,
+    log: 'Menunggu proses unggah video mencapai 100% atau tombol Next aktif.',
+    level: 'info',
+  });
+
+  const uploadDeadline = Date.now() + 150_000;
+  while (Date.now() < uploadDeadline) {
+    throwIfAborted(signal);
+    const has100Percent = await reelSurface
+      .getByText('100%')
+      .first()
+      .isVisible({ timeout: 250 })
+      .catch(() => false);
+    const nextReady = await isLocatorEnabled(footerButtons.nth(1));
+    if (has100Percent || nextReady) {
+      break;
+    }
+    await abortableWait(600, signal);
+  }
+
+  await sweepGeoGuidanceCards(page);
+
+  const title = getTitleForItem(item);
+  const caption = getCaptionForItem(item);
+
+  const titleInput = page
+    .locator(
+      '[data-surface$="bizweb_create_reel:left_panel"] input[type="text"]:not([role]):visible'
+    )
+    .first();
+  if (
+    (await titleInput.count().catch(() => 0)) > 0 &&
+    (await titleInput.isVisible({ timeout: 500 }).catch(() => false))
+  ) {
+    await fillTextWithInsertFallback(page, titleInput, title, signal);
+    await humanDelay(300, 600, signal);
+  }
+
+  const captionBox = reelSurface
+    .locator('[contenteditable="true"]:visible')
+    .first();
+  const captionVisible = await captionBox
+    .isVisible({ timeout: 8000 })
+    .catch(() => false);
+
+  if (captionVisible) {
     onProgress({
-      step: 'Mengisi judul dan deskripsi YouTube',
-      progressPercent: 60,
-      log: `Mengisi judul YouTube (${title.length} karakter).`,
+      step: 'Mengisi deskripsi Facebook Reels',
+      progressPercent: 68,
+      log: `Mengisi deskripsi Facebook Reels (${caption.length} karakter).`,
+      level: 'info',
+    });
+    await fillTextWithInsertFallback(page, captionBox, caption, signal);
+    await humanDelay(400, 800, signal);
+  } else {
+    const fallbackCaptionBox = page
+      .locator('[contenteditable="true"]:visible')
+      .first();
+    if (await fallbackCaptionBox.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await fillTextWithInsertFallback(
+        page,
+        fallbackCaptionBox,
+        caption,
+        signal
+      );
+    } else {
+      onProgress({
+        step: 'Kolom deskripsi Facebook belum terlihat',
+        progressPercent: 68,
+        log: 'Kolom deskripsi Facebook Reels tidak ditemukan otomatis. Video sudah diunggah.',
+        level: 'warning',
+      });
+    }
+  }
+
+  // Advance Reel wizard: Step 0 (Details) -> Step 1 (Edit) -> Step 2 (Share)
+  for (let step = 0; step < 2; step += 1) {
+    throwIfAborted(signal);
+    const nextBtn = footerButtons.nth(1);
+    const ready = await waitForEnabledLocator(nextBtn, 120_000, signal);
+    if (!ready) {
+      await safeBringToFront(page);
+      onProgress({
+        step: 'Tombol Next Facebook Reels belum aktif',
+        progressPercent: 78,
+        log: `Tombol Next pada langkah ${step + 1} belum aktif dalam batas waktu. Tab dibiarkan terbuka.`,
+        level: 'warning',
+      });
+      return {
+        status: 'awaiting_review',
+        publishedUrl: null,
+        summary:
+          'Tombol Next Facebook Reels belum aktif. Silakan lanjutkan manual di tab Meta Business Suite.',
+      };
+    }
+
+    onProgress({
+      step:
+        step === 0
+          ? 'Melanjutkan ke tahap Edit Facebook Reels'
+          : 'Melanjutkan ke tahap Share Facebook Reels',
+      progressPercent: step === 0 ? 75 : 82,
+      log: `Menekan tombol Next langkah ${step + 1} di Meta Business Suite.`,
       level: 'info',
     });
 
-    await fillEditableField(page, titleBox, title, signal);
-    await humanDelay(500, 900, signal);
+    const prevStepMarker = await readFacebookActiveStepMarker(page);
+    await nextBtn.click({ timeout: 10_000 });
 
-    const descriptionBox = await findFirstVisibleLocator(
-      page,
-      [
-        'ytcp-social-suggestions-textbox[id="description-textarea"] #textbox',
-        'div#textbox[aria-label*="Tell viewers" i]',
-        'div#textbox[aria-label*="Ceritakan" i]',
-      ],
-      4000,
-      signal
-    );
-
-    if (descriptionBox) {
-      await fillEditableField(page, descriptionBox, description, signal);
-    } else {
-      try {
-        const allTextboxes = page.locator('#textbox');
-        if ((await allTextboxes.count()) >= 2) {
-          await fillEditableField(page, allTextboxes.nth(1), description, signal);
-        }
-      } catch {
-        onProgress({
-          step: 'Deskripsi perlu dicek manual',
-          progressPercent: 65,
-          log: 'Kolom deskripsi YouTube tidak ditemukan otomatis, judul sudah diisi.',
-          level: 'warning',
-        });
+    const stepDeadline = Date.now() + 45_000;
+    while (Date.now() < stepDeadline) {
+      throwIfAborted(signal);
+      const currStepMarker = await readFacebookActiveStepMarker(page);
+      if (currStepMarker && currStepMarker !== prevStepMarker) {
+        break;
       }
+      await abortableWait(350, signal);
     }
-  } else {
-    onProgress({
-      step: 'Form detail YouTube belum termuat penuh',
-      progressPercent: 60,
-      log: 'Kolom judul YouTube Studio belum terlihat. Tab tetap dibuka agar Anda bisa melanjutkan manual.',
-      level: 'warning',
-    });
+
+    await sweepGeoGuidanceCards(page);
+    await humanDelay(400, 750, signal);
   }
 
-  await humanDelay(500, 1000, signal);
-  const notForKidsClicked = await tryClickAny(
+  if (mode === 'review') {
+    await safeBringToFront(page);
+    onProgress({
+      step: 'Siap direview di tahap Share Facebook Reels',
+      progressPercent: 85,
+      log: 'Facebook Reels sudah sampai di tahap Share (Langkah 3). Silakan review lalu klik Share / Bagikan.',
+      level: 'success',
+    });
+    return {
+      status: 'awaiting_review',
+      publishedUrl: null,
+      summary:
+        'Video dan deskripsi sudah siap di langkah Share Meta Business Suite. Cek tab browser untuk konfirmasi akhir.',
+    };
+  }
+
+  const shareBtn = footerButtons.nth(1);
+  const shareReady = await waitForEnabledLocator(shareBtn, 120_000, signal);
+  if (!shareReady) {
+    await safeBringToFront(page);
+    onProgress({
+      step: 'Tombol Share Facebook belum siap',
+      progressPercent: 85,
+      log: 'Tombol Share / Bagikan Facebook Reels belum aktif. Tab dibiarkan terbuka untuk review manual.',
+      level: 'warning',
+    });
+    return {
+      status: 'awaiting_review',
+      publishedUrl: null,
+      summary:
+        'Tombol Share Facebook Reels belum siap diklik otomatis. Video dan deskripsi tetap terbuka di tab browser.',
+    };
+  }
+
+  onProgress({
+    step: 'Mempublikasikan Facebook Reels',
+    progressPercent: 92,
+    log: 'Menekan tombol Share dan menunggu mutasi GraphQL Meta Business Suite.',
+    level: 'info',
+  });
+
+  const graphqlPromise = page.waitForResponse(
+    (resp) => {
+      if (!resp.url().includes('/api/graphql')) return false;
+      const postData = resp.request().postData() ?? '';
+      return postData.includes(
+        'fb_api_req_friendly_name=BusinessComposerStoryCreationMutation'
+      );
+    },
+    { timeout: 90_000 }
+  );
+
+  await shareBtn.click({ timeout: 10_000 });
+  await raceWithAbort(graphqlPromise, signal);
+
+  const doneDialog = page
+    .locator('[role="dialog"][aria-labelledby][tabindex="-1"]')
+    .first();
+  try {
+    await raceWithAbort(
+      doneDialog.waitFor({ state: 'visible', timeout: 60_000 }),
+      signal
+    );
+    const closeBtn = doneDialog
+      .locator('[role="button"][aria-label], button')
+      .last();
+    if (await closeBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await closeBtn.click({ timeout: 3000 }).catch(() => {});
+    } else {
+      await page.keyboard.press('Escape').catch(() => {});
+    }
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    // Completion dialog may auto-close or redirect
+  }
+
+  onProgress({
+    step: 'Terpublikasi di Facebook Reels',
+    progressPercent: 100,
+    log: 'Facebook Reels berhasil dipublikasikan via Meta Business Suite.',
+    level: 'success',
+  });
+
+  return {
+    status: 'completed',
+    publishedUrl: null,
+    summary: 'Berhasil publish Facebook Reels via Meta Business Suite.',
+  };
+}
+
+export async function publishYouTubeViaBrowser(
+  page: Page,
+  item: ContentPlannerItem,
+  videoPath: string,
+  videoFileName: string,
+  mode: AutoPostMode,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<BrowserPublishResult> {
+  onProgress({
+    step: 'Membuka YouTube Upload',
+    progressPercent: 12,
+    log: 'Membuka https://www.youtube.com/upload di tab browser lokal.',
+    level: 'info',
+  });
+
+  await raceWithAbort(
+    page.goto('https://www.youtube.com/upload', {
+      waitUntil: 'domcontentloaded',
+      timeout: 90_000,
+    }),
+    signal
+  );
+  await abortableWait(2500, signal);
+
+  const currentUrl = page.url().toLowerCase();
+  if (
+    currentUrl.includes('accounts.google.com') ||
+    currentUrl.includes('/signin') ||
+    currentUrl.includes('servicelogin')
+  ) {
+    await safeBringToFront(page);
+    onProgress({
+      step: 'Menunggu login YouTube Studio',
+      progressPercent: 25,
+      log: 'Belum login Google / YouTube Studio. Silakan login di tab Chrome yang terbuka.',
+      level: 'warning',
+    });
+    return {
+      status: 'awaiting_review',
+      publishedUrl: null,
+      summary:
+        'Sesi login Google / YouTube Studio diperlukan. Silakan login di tab browser yang terbuka lalu jalankan ulang.',
+    };
+  }
+
+  onProgress({
+    step: `Mengunggah video ${videoFileName} ke YouTube`,
+    progressPercent: 28,
+    log: `Mencari input file video dan mengunggah ${videoFileName}.`,
+    level: 'info',
+  });
+
+  const fileInput = page.locator('input[type="file"]').first();
+  try {
+    await raceWithAbort(
+      fileInput.waitFor({ state: 'attached', timeout: 45_000 }),
+      signal
+    );
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    await safeBringToFront(page);
+    onProgress({
+      step: 'Input file YouTube tidak ditemukan',
+      progressPercent: 35,
+      log: 'Input file upload YouTube tidak ditemukan otomatis. Tab dibiarkan terbuka.',
+      level: 'warning',
+    });
+    return {
+      status: 'awaiting_review',
+      publishedUrl: null,
+      summary: `Input file upload YouTube tidak ditemukan. Silakan pilih ${videoFileName} secara manual di tab YouTube Studio.`,
+    };
+  }
+
+  await fileInput.setInputFiles(videoPath);
+
+  await raceWithAbort(
+    page
+      .locator('#title-textarea')
+      .first()
+      .waitFor({ state: 'visible', timeout: 90_000 }),
+    signal
+  );
+
+  const title = getTitleForItem(item).slice(0, 100);
+  const caption = getCaptionForItem(item);
+
+  onProgress({
+    step: 'Mengisi judul dan deskripsi YouTube',
+    progressPercent: 52,
+    log: `Mengisi judul (${title.length} karakter) dan deskripsi YouTube.`,
+    level: 'info',
+  });
+
+  await fillYouTubeTextbox(
+    page,
+    page.locator('#title-textarea #textbox').first(),
+    title,
+    signal
+  );
+  await humanDelay(400, 750, signal);
+
+  await fillYouTubeTextbox(
+    page,
+    page.locator('#description-textarea #textbox').first(),
+    caption,
+    signal
+  );
+  await humanDelay(400, 750, signal);
+
+  // Optional cover / thumbnail upload (non-fatal)
+  const coverPath = getCoverPathForItem(item);
+  if (coverPath) {
+    try {
+      const thumbInput = page
+        .locator(
+          '#file-loader input[type="file"], ytcp-thumbnail-uploader input[type="file"]'
+        )
+        .first();
+      if ((await thumbInput.count()) > 0) {
+        await thumbInput.setInputFiles(coverPath);
+        onProgress({
+          step: 'Memasang cover thumbnail YouTube',
+          progressPercent: 60,
+          log: 'Cover thumbnail berhasil dipasang di YouTube Studio.',
+          level: 'info',
+        });
+        await humanDelay(400, 700, signal);
+      }
+    } catch {
+      // Non-fatal if thumbnail input is disabled for Shorts or unverified channel
+    }
+  }
+
+  await tryClickAny(
     page,
     [
       'tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]',
@@ -521,39 +1289,114 @@ async function publishYouTubeStudio(
       'tp-yt-paper-radio-button:has-text("No, it\'s not made for kids")',
       'tp-yt-paper-radio-button:has-text("Tidak, video ini tidak dibuat untuk anak-anak")',
     ],
-    4000,
+    5000,
     signal
   );
 
-  if (notForKidsClicked) {
-    onProgress({
-      step: 'Mengatur opsi audiens (Bukan untuk anak-anak)',
-      progressPercent: 72,
-      log: 'Opsi "Not made for kids" dipilih.',
-      level: 'info',
-    });
+  onProgress({
+    step: 'Menuju tahap Visibilitas YouTube',
+    progressPercent: 68,
+    log: 'Melanjutkan langkah wizard menuju pemilihan Visibilitas.',
+    level: 'info',
+  });
+
+  for (let stepIdx = 0; stepIdx < 4; stepIdx += 1) {
+    throwIfAborted(signal);
+    const publicRadioVisible = await page
+      .locator('tp-yt-paper-radio-button[name="PUBLIC"]')
+      .first()
+      .isVisible({ timeout: 500 })
+      .catch(() => false);
+    if (publicRadioVisible) {
+      break;
+    }
+
+    const clickedNext = await tryClickAny(
+      page,
+      ['#next-button', 'ytcp-button#next-button'],
+      5000,
+      signal
+    );
+    if (!clickedNext) break;
+    await humanDelay(700, 1200, signal);
   }
 
-  let detectedUrl: string | null = null;
-  try {
-    const linkLocator = page
-      .locator(
-        'a.style-scope.ytcp-video-info[href*="youtu"], a[href*="youtube.com/shorts/"], a[href*="youtu.be/"]'
-      )
-      .first();
-    if ((await linkLocator.count()) > 0) {
-      detectedUrl = (await linkLocator.getAttribute('href')) ?? null;
-    }
-  } catch {
-    detectedUrl = null;
+  const targetVisibility = mode === 'review' ? 'UNLISTED' : 'PUBLIC';
+  const visibilitySelected = await tryClickAny(
+    page,
+    [`tp-yt-paper-radio-button[name="${targetVisibility}"]`],
+    6000,
+    signal
+  );
+
+  if (!visibilitySelected && mode === 'publish') {
+    await safeBringToFront(page);
+    onProgress({
+      step: 'Opsi Visibilitas Public tidak ditemukan',
+      progressPercent: 85,
+      log: 'Opsi Visibilitas Public tidak terdeteksi otomatis. Tab dibiarkan terbuka untuk review manual.',
+      level: 'warning',
+    });
+    return {
+      status: 'awaiting_review',
+      publishedUrl: await extractYouTubeVideoUrl(page),
+      summary:
+        'Tidak bisa memilih opsi Public secara otomatis di YouTube Studio. Tab tetap dibuka agar Anda bisa menyelesaikannya.',
+    };
   }
+
+  onProgress({
+    step: 'Menunggu proses upload YouTube selesai (100%)',
+    progressPercent: 78,
+    log: 'Memantau progres unggahan video di YouTube Studio.',
+    level: 'info',
+  });
+
+  const progressSelector =
+    '.progress-label, span.progress-label, ytcp-video-upload-progress';
+  const completionRegex =
+    /processing|checks|complete|finished|memproses|pemeriksaan|selesai|处理|检查/i;
+  const uploadingRegex = /uploading|mengunggah|上传/i;
+  const progressDeadline = Date.now() + 600_000;
+  let emptyChecks = 0;
+
+  while (Date.now() < progressDeadline) {
+    throwIfAborted(signal);
+    const texts = await page
+      .locator(progressSelector)
+      .allInnerTexts()
+      .catch(() => [] as string[]);
+    const combined = texts
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .join(' ');
+
+    if (!combined) {
+      emptyChecks += 1;
+      if (emptyChecks >= 4) {
+        break;
+      }
+    } else {
+      emptyChecks = 0;
+      if (completionRegex.test(combined)) {
+        break;
+      }
+      if (!combined.includes('%') && !uploadingRegex.test(combined)) {
+        break;
+      }
+    }
+
+    await abortableWait(1500, signal);
+  }
+
+  const detectedUrl = await extractYouTubeVideoUrl(page);
 
   if (mode === 'review') {
     await safeBringToFront(page);
     onProgress({
       step: 'Siap direview di YouTube Studio',
       progressPercent: 85,
-      log: 'Video, judul, dan deskripsi sudah siap di tab YouTube Studio. Silakan review lalu klik Terbitkan.',
+      log: 'Video, judul, deskripsi, dan visibilitas (Unlisted) sudah siap di tab YouTube Studio. Silakan review lalu klik Save / Publish.',
       level: 'success',
     });
     return {
@@ -565,62 +1408,23 @@ async function publishYouTubeStudio(
   }
 
   onProgress({
-    step: 'Melanjutkan ke langkah Visibilitas YouTube',
-    progressPercent: 80,
-    log: 'Menuju tahap Visibilitas (Public) di YouTube Studio.',
+    step: 'Menyelesaikan publikasi YouTube Shorts',
+    progressPercent: 92,
+    log: 'Menekan tombol Publish (#done-button) di YouTube Studio.',
     level: 'info',
   });
 
-  for (let stepIdx = 0; stepIdx < 3; stepIdx += 1) {
-    const clickedNext = await tryClickAny(
-      page,
-      ['#next-button', 'ytcp-button#next-button'],
-      4000,
-      signal
-    );
-    if (!clickedNext) break;
-    await humanDelay(800, 1400, signal);
-  }
-
-  const publicSelected = await tryClickAny(
-    page,
-    [
-      'tp-yt-paper-radio-button[name="PUBLIC"]',
-      'tp-yt-paper-radio-button:has-text("Public")',
-      'tp-yt-paper-radio-button:has-text("Publik")',
-    ],
-    5000,
-    signal
-  );
-
-  if (!publicSelected) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Opsi Publik tidak ditemukan',
-      progressPercent: 85,
-      log: 'Opsi Visibilitas Public tidak terdeteksi otomatis. Tab dibiarkan terbuka untuk review manual.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: detectedUrl,
-      summary:
-        'Tidak bisa memilih opsi Public secara otomatis di YouTube Studio. Tab tetap dibuka agar Anda bisa menyelesaikannya.',
-    };
-  }
-
-  await humanDelay(700, 1200, signal);
   const doneClicked = await tryClickAny(
     page,
     ['#done-button', 'ytcp-button#done-button'],
-    5000,
+    8000,
     signal
   );
 
   if (!doneClicked) {
     await safeBringToFront(page);
     onProgress({
-      step: 'Tombol Publish belum siap',
+      step: 'Tombol Publish YouTube belum siap',
       progressPercent: 85,
       log: 'Tombol Publish YouTube belum dapat diklik otomatis. Tab dibiarkan terbuka untuk review manual.',
       level: 'warning',
@@ -633,40 +1437,28 @@ async function publishYouTubeStudio(
     };
   }
 
-  await humanDelay(2500, 4000, signal);
-  try {
-    const finalLink = page
-      .locator(
-        'a#share-url, a[href*="youtube.com/shorts/"], a[href*="youtu.be/"], a.style-scope.ytcp-video-info[href*="youtu"]'
-      )
-      .first();
-    if ((await finalLink.count()) > 0) {
-      const href = await finalLink.getAttribute('href');
-      if (href) detectedUrl = href;
-    }
-  } catch {
-    // Keep previously detected URL if any
-  }
+  await abortableWait(4000, signal);
+  const finalUrl = (await extractYouTubeVideoUrl(page)) ?? detectedUrl;
 
   onProgress({
     step: 'Terpublikasi di YouTube Studio',
     progressPercent: 100,
-    log: detectedUrl
-      ? `Video berhasil dipublikasikan di YouTube Studio: ${detectedUrl}`
+    log: finalUrl
+      ? `Video berhasil dipublikasikan di YouTube Studio: ${finalUrl}`
       : 'Video berhasil dipublikasikan melalui YouTube Studio.',
     level: 'success',
   });
 
   return {
     status: 'completed',
-    publishedUrl: detectedUrl,
-    summary: detectedUrl
-      ? `Berhasil publish via YouTube Studio: ${detectedUrl}`
+    publishedUrl: finalUrl,
+    summary: finalUrl
+      ? `Berhasil publish via YouTube Studio: ${finalUrl}`
       : 'Berhasil publish via YouTube Studio.',
   };
 }
 
-async function publishTikTokStudio(
+export async function publishTikTokViaBrowser(
   page: Page,
   item: ContentPlannerItem,
   videoPath: string,
@@ -682,18 +1474,21 @@ async function publishTikTokStudio(
     level: 'info',
   });
 
-  await page.goto(PLATFORM_STUDIO_URLS.tiktok, {
-    waitUntil: 'domcontentloaded',
-    timeout: 45000,
-  });
-  await humanDelay(2000, 3500, signal);
+  await raceWithAbort(
+    page.goto(PLATFORM_STUDIO_URLS.tiktok, {
+      waitUntil: 'domcontentloaded',
+      timeout: 90_000,
+    }),
+    signal
+  );
+  await abortableWait(2500, signal);
 
-  if (await isTikTokLoginRequired(page)) {
+  if (page.url().toLowerCase().includes('/login')) {
     await safeBringToFront(page);
     onProgress({
       step: 'Menunggu login TikTok Studio',
       progressPercent: 25,
-      log: 'Silakan login TikTok Studio di tab Chrome yang terbuka',
+      log: 'Belum login TikTok Studio. Silakan login di tab Chrome yang terbuka.',
       level: 'warning',
     });
     return {
@@ -704,21 +1499,74 @@ async function publishTikTokStudio(
     };
   }
 
-  onProgress({
-    step: 'Mencari input upload TikTok Studio',
-    progressPercent: 28,
-    log: 'Mencari input file video di TikTok Studio.',
-    level: 'info',
-  });
-
-  const fileInput = await findFileInputAcrossFrames(
-    page,
-    ['input[type="file"][accept*="video"]', 'input[type="file"]'],
-    18000,
+  await raceWithAbort(
+    page
+      .locator(
+        'iframe[data-tt="Upload_index_iframe"], div.upload-container, input[type="file"]'
+      )
+      .first()
+      .waitFor({ state: 'attached', timeout: 15_000 })
+      .catch(() => {}),
     signal
   );
 
-  if (!fileInput) {
+  const hasIframe =
+    (await page.locator('iframe[data-tt="Upload_index_iframe"]').count()) > 0;
+  const root: Page | FrameLocator = hasIframe
+    ? page.frameLocator('iframe[data-tt="Upload_index_iframe"]')
+    : page;
+
+  onProgress({
+    step: `Mengunggah video ${videoFileName} ke TikTok Studio`,
+    progressPercent: 35,
+    log: `Memasukkan file ${videoFileName} ke TikTok Studio${hasIframe ? ' (iframe)' : ''}.`,
+    level: 'info',
+  });
+
+  let videoUploaded = false;
+  const fileInput = root.locator('input[type="file"]').first();
+  try {
+    await raceWithAbort(
+      fileInput.waitFor({ state: 'attached', timeout: 8000 }),
+      signal
+    );
+    await fileInput.setInputFiles(videoPath);
+    videoUploaded = true;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    videoUploaded = false;
+  }
+
+  if (!videoUploaded) {
+    const selectButton = root
+      .locator('button:has-text("Select video"), button:has-text("Pilih video")')
+      .first();
+    if (await selectButton.isVisible({ timeout: 3000 }).catch(() => false)) {
+      try {
+        const [chooser] = await raceWithAbort(
+          Promise.all([
+            page.waitForEvent('filechooser', { timeout: 15_000 }),
+            selectButton.click({ timeout: 8000 }),
+          ]),
+          signal
+        );
+        await chooser.setFiles([videoPath]);
+        videoUploaded = true;
+      } catch (err) {
+        if (
+          signal.aborted ||
+          (err instanceof Error && err.name === 'AbortError')
+        ) {
+          throw createAbortError();
+        }
+        videoUploaded = false;
+      }
+    }
+  }
+
+  if (!videoUploaded) {
     await safeBringToFront(page);
     onProgress({
       step: 'Input file TikTok tidak ditemukan',
@@ -733,46 +1581,44 @@ async function publishTikTokStudio(
     };
   }
 
-  onProgress({
-    step: `Mengunggah video ${videoFileName} ke TikTok`,
-    progressPercent: 45,
-    log: `Memasukkan file ${videoFileName} ke TikTok Studio.`,
-    level: 'info',
-  });
+  const captionEditor = root
+    .locator('div.public-DraftEditor-content, [contenteditable="true"]')
+    .first();
 
-  await fileInput.setInputFiles(videoPath);
-  await humanDelay(3000, 4800, signal);
-
-  const caption = getCaptionForItem(item);
-  const captionEditor = await findFirstVisibleLocator(
-    page,
-    [
-      '.public-DraftEditor-content',
-      '[data-e2e="caption-editor"] [contenteditable="true"]',
-      'div[contenteditable="true"][role="combobox"]',
-      'div[contenteditable="true"]',
-    ],
-    20000,
+  await raceWithAbort(
+    captionEditor.waitFor({ state: 'visible', timeout: 60_000 }),
     signal
   );
 
-  if (captionEditor) {
-    onProgress({
-      step: 'Mengisi caption TikTok',
-      progressPercent: 70,
-      log: `Mengisi caption TikTok (${caption.length} karakter).`,
-      level: 'info',
-    });
-    await fillEditableField(page, captionEditor, caption, signal);
-    await humanDelay(700, 1200, signal);
-  } else {
-    onProgress({
-      step: 'Editor caption TikTok belum ditemukan',
-      progressPercent: 70,
-      log: 'Kolom caption TikTok belum muncul otomatis. Video sudah dimasukkan, silakan cek tab TikTok Studio.',
-      level: 'warning',
-    });
-  }
+  const caption = getCaptionForItem(item);
+  onProgress({
+    step: 'Mengisi caption TikTok Studio',
+    progressPercent: 65,
+    log: `Mengisi caption TikTok (${caption.length} karakter).`,
+    level: 'info',
+  });
+
+  await captionEditor.click({ timeout: 8000 });
+  await humanDelay(200, 400, signal);
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Delete');
+  await humanDelay(150, 300, signal);
+  await page.keyboard.insertText(caption);
+
+  onProgress({
+    step: 'Menunggu tombol Post TikTok siap',
+    progressPercent: 78,
+    log: 'Menunggu pemrosesan video TikTok selesai hingga tombol Post aktif.',
+    level: 'info',
+  });
+
+  const postButton = root
+    .locator(
+      'button[data-e2e="post_video_button"], div.button-group > button:has-text("Post"), div.button-group > button:has-text("Posting")'
+    )
+    .first();
+
+  const postReady = await waitForEnabledLocator(postButton, 120_000, signal);
 
   if (mode === 'review') {
     await safeBringToFront(page);
@@ -790,32 +1636,12 @@ async function publishTikTokStudio(
     };
   }
 
-  onProgress({
-    step: 'Menekan tombol Post di TikTok Studio',
-    progressPercent: 88,
-    log: 'Mencoba mengirim postingan di TikTok Studio.',
-    level: 'info',
-  });
-
-  await humanDelay(2500, 4000, signal);
-  const posted = await tryClickAny(
-    page,
-    [
-      '[data-e2e="post_video_button"]',
-      'button[data-e2e="post_video_button"]',
-      'button:has-text("Post")',
-      'button:has-text("Posting")',
-    ],
-    10000,
-    signal
-  );
-
-  if (!posted) {
+  if (!postReady) {
     await safeBringToFront(page);
     onProgress({
       step: 'Tombol Post TikTok belum siap',
       progressPercent: 85,
-      log: 'Tombol Post TikTok belum bisa diklik (mungkin video masih diproses). Tab dibiarkan terbuka untuk review manual.',
+      log: 'Tombol Post TikTok belum aktif dalam 120 detik. Tab dibiarkan terbuka untuk review manual.',
       level: 'warning',
     });
     return {
@@ -826,502 +1652,73 @@ async function publishTikTokStudio(
     };
   }
 
-  await humanDelay(2500, 4000, signal);
-  await tryClickAny(
-    page,
-    [
-      'button:has-text("Post now")',
-      'button:has-text("Posting sekarang")',
-      'button:has-text("Continue")',
-    ],
+  onProgress({
+    step: 'Menekan tombol Post di TikTok Studio',
+    progressPercent: 90,
+    log: 'Mengirim postingan di TikTok Studio.',
+    level: 'info',
+  });
+
+  await postButton.click({ timeout: 10_000 });
+  await humanDelay(1200, 2000, signal);
+
+  // Handle optional confirmation dialog ("Post now" / "Posting sekarang")
+  const confirmedInRoot = await tryClickAny(
+    root,
+    ['button:has-text("Post now")', 'button:has-text("Posting sekarang")'],
     2500,
     signal
   );
+  if (!confirmedInRoot) {
+    await tryClickAny(
+      page,
+      ['button:has-text("Post now")', 'button:has-text("Posting sekarang")'],
+      2000,
+      signal
+    );
+  }
+
+  await raceWithAbort(
+    page
+      .waitForURL('**/tiktokstudio/content**', { timeout: 20_000 })
+      .catch(() => {}),
+    signal
+  );
+
+  let publishedUrl: string | null = null;
+  try {
+    const videoLinks = page.locator('a[href*="/video/"]');
+    const linkCount = await videoLinks.count();
+    for (let i = 0; i < linkCount; i += 1) {
+      const href = await videoLinks.nth(i).getAttribute('href');
+      if (!href) continue;
+      const match = href.match(/video\/(\d+)/);
+      if (match) {
+        publishedUrl = href.startsWith('http')
+          ? href
+          : `https://www.tiktok.com${href.startsWith('/') ? '' : '/'}${href}`;
+        break;
+      }
+    }
+  } catch {
+    publishedUrl = null;
+  }
 
   onProgress({
     step: 'Terpublikasi di TikTok Studio',
     progressPercent: 100,
-    log: 'Video telah dikirim ke TikTok Studio.',
+    log: publishedUrl
+      ? `Video berhasil dipublikasikan di TikTok Studio: ${publishedUrl}`
+      : 'Video telah dikirim ke TikTok Studio.',
     level: 'success',
   });
 
   return {
     status: 'completed',
-    publishedUrl: null,
-    summary: 'Berhasil klik Post di TikTok Studio.',
-  };
-}
-
-async function publishInstagramReels(
-  page: Page,
-  item: ContentPlannerItem,
-  videoPath: string,
-  videoFileName: string,
-  mode: AutoPostMode,
-  signal: AbortSignal,
-  onProgress: (update: BrowserPublishProgressUpdate) => void
-): Promise<BrowserPublishResult> {
-  onProgress({
-    step: 'Membuka Instagram',
-    progressPercent: 12,
-    log: 'Membuka Instagram Web di browser lokal.',
-    level: 'info',
-  });
-
-  await page.goto(PLATFORM_STUDIO_URLS.ig_reels, {
-    waitUntil: 'domcontentloaded',
-    timeout: 45000,
-  });
-  await humanDelay(2000, 3200, signal);
-
-  if (await isInstagramLoginRequired(page)) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Menunggu login Instagram',
-      progressPercent: 25,
-      log: 'Silakan login Instagram di tab Chrome yang terbuka',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Sesi login Instagram diperlukan. Silakan login di tab browser yang terbuka.',
-    };
-  }
-
-  // Dismiss optional notification modal if shown
-  await tryClickAny(
-    page,
-    ['button:has-text("Not Now")', 'button:has-text("Lain kali")'],
-    2000,
-    signal
-  );
-
-  onProgress({
-    step: 'Membuka dialog Create / Buat di Instagram',
-    progressPercent: 26,
-    log: 'Mencari tombol Create / Buat di navigasi Instagram.',
-    level: 'info',
-  });
-
-  const createClicked = await tryClickAny(
-    page,
-    [
-      'svg[aria-label="New post"]',
-      'svg[aria-label="Postingan baru"]',
-      'a:has-text("Create")',
-      'span:has-text("Create")',
-      'a:has-text("Buat")',
-      'span:has-text("Buat")',
-    ],
-    10000,
-    signal
-  );
-
-  if (!createClicked) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Tombol Create Instagram tidak ditemukan',
-      progressPercent: 30,
-      log: 'Tombol Create / Buat di Instagram tidak ditemukan otomatis. Tab dibiarkan terbuka.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Tombol Create Instagram tidak terdeteksi otomatis. Silakan klik Create secara manual di tab browser.',
-    };
-  }
-
-  await humanDelay(700, 1200, signal);
-
-  // If Instagram shows a dropdown menu ("Post" / "Postingan"), click it
-  await tryClickAny(
-    page,
-    [
-      'span:has-text("Post")',
-      'span:has-text("Postingan")',
-      'a:has-text("Post")',
-    ],
-    2000,
-    signal
-  );
-
-  const fileInput = await findFileInputAcrossFrames(
-    page,
-    ['input[type="file"][accept*="video"]', 'input[type="file"]'],
-    12000,
-    signal
-  );
-
-  if (!fileInput) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Input file Instagram tidak ditemukan',
-      progressPercent: 38,
-      log: 'Input file unggahan Instagram tidak ditemukan otomatis. Tab tetap dibuka.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary: `Input file upload Instagram tidak ditemukan. Silakan pilih ${videoFileName} secara manual di tab Instagram.`,
-    };
-  }
-
-  onProgress({
-    step: `Mengunggah video ${videoFileName} ke Instagram`,
-    progressPercent: 45,
-    log: `Memasukkan file ${videoFileName} ke Instagram.`,
-    level: 'info',
-  });
-
-  await fileInput.setInputFiles(videoPath);
-  await humanDelay(2200, 3500, signal);
-
-  // Dismiss optional "Video posts are now shared as reels" popup
-  await tryClickAny(
-    page,
-    ['button:has-text("OK")', 'button:has-text("Oke")'],
-    2500,
-    signal
-  );
-
-  onProgress({
-    step: 'Melewati tahap crop dan edit Reels',
-    progressPercent: 60,
-    log: 'Menekan tombol Next / Selanjutnya menuju form caption Instagram.',
-    level: 'info',
-  });
-
-  for (let stepIdx = 0; stepIdx < 2; stepIdx += 1) {
-    const nextClicked = await tryClickAny(
-      page,
-      [
-        'div[role="button"]:has-text("Next")',
-        'button:has-text("Next")',
-        'div[role="button"]:has-text("Selanjutnya")',
-        'button:has-text("Selanjutnya")',
-      ],
-      6000,
-      signal
-    );
-    if (!nextClicked) break;
-    await humanDelay(1100, 1800, signal);
-  }
-
-  const caption = getCaptionForItem(item);
-  const captionBox = await findFirstVisibleLocator(
-    page,
-    [
-      'div[aria-label*="Write a caption" i]',
-      'div[aria-label*="caption" i]',
-      'div[aria-label*="keterangan" i]',
-      'div[role="textbox"][contenteditable="true"]',
-      'textarea[aria-label*="caption" i]',
-      'textarea',
-    ],
-    10000,
-    signal
-  );
-
-  if (captionBox) {
-    onProgress({
-      step: 'Mengisi caption Instagram Reels',
-      progressPercent: 75,
-      log: `Mengisi caption Instagram (${caption.length} karakter).`,
-      level: 'info',
-    });
-    await fillEditableField(page, captionBox, caption, signal);
-    await humanDelay(600, 1100, signal);
-  } else {
-    onProgress({
-      step: 'Kolom caption Instagram belum terlihat',
-      progressPercent: 75,
-      log: 'Kolom caption Instagram tidak ditemukan otomatis. Tab tetap dibuka agar Anda bisa menempelkan caption.',
-      level: 'warning',
-    });
-  }
-
-  if (mode === 'review') {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Siap direview di Instagram Reels',
-      progressPercent: 85,
-      log: 'Video dan caption Instagram Reels sudah siap. Silakan review lalu klik Share / Bagikan.',
-      level: 'success',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Video dan caption sudah disiapkan di Instagram Reels. Cek tab browser untuk konfirmasi akhir.',
-    };
-  }
-
-  onProgress({
-    step: 'Membagikan Instagram Reels',
-    progressPercent: 90,
-    log: 'Menekan tombol Share / Bagikan di Instagram.',
-    level: 'info',
-  });
-
-  const shared = await tryClickAny(
-    page,
-    [
-      'div[role="button"]:has-text("Share")',
-      'button:has-text("Share")',
-      'div[role="button"]:has-text("Bagikan")',
-      'button:has-text("Bagikan")',
-    ],
-    8000,
-    signal
-  );
-
-  if (!shared) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Tombol Share Instagram tidak ditemukan',
-      progressPercent: 85,
-      log: 'Tombol Share / Bagikan tidak ditemukan otomatis. Tab dibiarkan terbuka untuk review manual.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Tombol Share Instagram tidak ditemukan otomatis. Video dan caption tetap terbuka di tab browser.',
-    };
-  }
-
-  await humanDelay(3000, 5000, signal);
-  onProgress({
-    step: 'Instagram Reels dibagikan',
-    progressPercent: 100,
-    log: 'Tombol Share Instagram Reels telah diklik.',
-    level: 'success',
-  });
-
-  return {
-    status: 'completed',
-    publishedUrl: null,
-    summary: 'Berhasil klik Share di Instagram Reels.',
-  };
-}
-
-async function publishFacebookReels(
-  page: Page,
-  item: ContentPlannerItem,
-  videoPath: string,
-  videoFileName: string,
-  mode: AutoPostMode,
-  signal: AbortSignal,
-  onProgress: (update: BrowserPublishProgressUpdate) => void
-): Promise<BrowserPublishResult> {
-  onProgress({
-    step: 'Membuka Meta Business Suite (Facebook Reels)',
-    progressPercent: 12,
-    log: 'Membuka halaman Facebook Reels Composer di Meta Business Suite.',
-    level: 'info',
-  });
-
-  await page.goto(PLATFORM_STUDIO_URLS.fb_reels, {
-    waitUntil: 'domcontentloaded',
-    timeout: 45000,
-  });
-  await humanDelay(2500, 3800, signal);
-
-  if (await isFacebookLoginRequired(page)) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Menunggu login Facebook / Meta Business Suite',
-      progressPercent: 25,
-      log: 'Silakan login Meta Business Suite (Facebook) di tab Chrome yang terbuka',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Sesi login Facebook / Meta Business Suite diperlukan. Silakan login di tab browser yang terbuka.',
-    };
-  }
-
-  onProgress({
-    step: 'Mencari input upload Facebook Reels',
-    progressPercent: 28,
-    log: 'Mencari input file video di Meta Business Suite.',
-    level: 'info',
-  });
-
-  let fileInput = await findFileInputAcrossFrames(
-    page,
-    ['input[type="file"][accept*="video"]', 'input[type="file"]'],
-    14000,
-    signal
-  );
-
-  if (!fileInput) {
-    await tryClickAny(
-      page,
-      [
-        'div[role="button"]:has-text("Add video")',
-        'button:has-text("Add video")',
-        'div[role="button"]:has-text("Tambahkan video")',
-        'button:has-text("Tambahkan video")',
-      ],
-      5000,
-      signal
-    );
-    await humanDelay(700, 1200, signal);
-    fileInput = await findFileInputAcrossFrames(
-      page,
-      ['input[type="file"][accept*="video"]', 'input[type="file"]'],
-      8000,
-      signal
-    );
-  }
-
-  if (!fileInput) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Input video Facebook Reels tidak ditemukan',
-      progressPercent: 35,
-      log: 'Input file video Facebook Reels tidak ditemukan otomatis. Tab dibiarkan terbuka untuk upload manual.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary: `Input file Facebook Reels tidak ditemukan otomatis. Silakan pilih ${videoFileName} di tab Meta Business Suite.`,
-    };
-  }
-
-  onProgress({
-    step: `Mengunggah video ${videoFileName} ke Facebook Reels`,
-    progressPercent: 45,
-    log: `Memasukkan file ${videoFileName} ke Facebook Reels Composer.`,
-    level: 'info',
-  });
-
-  await fileInput.setInputFiles(videoPath);
-  await humanDelay(3000, 4500, signal);
-
-  const caption = getCaptionForItem(item);
-  const captionBox = await findFirstVisibleLocator(
-    page,
-    [
-      'div[role="textbox"][contenteditable="true"]',
-      'div[role="textbox"]',
-      'textarea',
-    ],
-    15000,
-    signal
-  );
-
-  if (captionBox) {
-    onProgress({
-      step: 'Mengisi deskripsi Facebook Reels',
-      progressPercent: 72,
-      log: `Mengisi deskripsi Facebook Reels (${caption.length} karakter).`,
-      level: 'info',
-    });
-    await fillEditableField(page, captionBox, caption, signal);
-    await humanDelay(700, 1200, signal);
-  } else {
-    onProgress({
-      step: 'Kolom deskripsi Facebook belum terlihat',
-      progressPercent: 72,
-      log: 'Kolom deskripsi Facebook Reels tidak ditemukan otomatis. Video sudah diunggah, silakan cek tab browser.',
-      level: 'warning',
-    });
-  }
-
-  if (mode === 'review') {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Siap direview di Facebook Reels',
-      progressPercent: 85,
-      log: 'Video dan deskripsi Facebook Reels sudah siap. Silakan review lalu klik Terbitkan / Publish.',
-      level: 'success',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Video dan deskripsi sudah disiapkan di Meta Business Suite. Cek tab browser untuk konfirmasi akhir.',
-    };
-  }
-
-  onProgress({
-    step: 'Melanjutkan ke tahap publikasi Facebook Reels',
-    progressPercent: 84,
-    log: 'Menekan tombol Next / Selanjutnya di Facebook Reels Composer.',
-    level: 'info',
-  });
-
-  for (let stepIdx = 0; stepIdx < 2; stepIdx += 1) {
-    const clickedNext = await tryClickAny(
-      page,
-      [
-        'div[role="button"]:has-text("Next")',
-        'button:has-text("Next")',
-        'div[role="button"]:has-text("Selanjutnya")',
-        'button:has-text("Selanjutnya")',
-      ],
-      6000,
-      signal
-    );
-    if (!clickedNext) break;
-    await humanDelay(1200, 2000, signal);
-  }
-
-  const published = await tryClickAny(
-    page,
-    [
-      'div[role="button"]:has-text("Publish")',
-      'button:has-text("Publish")',
-      'div[role="button"]:has-text("Terbitkan")',
-      'button:has-text("Terbitkan")',
-      'div[role="button"]:has-text("Share")',
-      'button:has-text("Share")',
-      'div[role="button"]:has-text("Bagikan")',
-      'button:has-text("Bagikan")',
-    ],
-    10000,
-    signal
-  );
-
-  if (!published) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Tombol Publish Facebook belum siap',
-      progressPercent: 85,
-      log: 'Tombol Publish / Terbitkan Facebook belum bisa diklik (video mungkin masih diproses). Tab dibiarkan terbuka.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Tombol Publish Facebook belum siap diklik otomatis. Video dan deskripsi tetap terbuka di tab browser.',
-    };
-  }
-
-  await humanDelay(3000, 4500, signal);
-  onProgress({
-    step: 'Terpublikasi di Facebook Reels',
-    progressPercent: 100,
-    log: 'Tombol Publish / Terbitkan Facebook Reels telah diklik.',
-    level: 'success',
-  });
-
-  return {
-    status: 'completed',
-    publishedUrl: null,
-    summary: 'Berhasil klik Publish di Facebook Reels.',
+    publishedUrl,
+    summary: publishedUrl
+      ? `Berhasil publish di TikTok Studio: ${publishedUrl}`
+      : 'Berhasil publish di TikTok Studio.',
   };
 }
 
@@ -1354,7 +1751,7 @@ export async function publishViaBrowser(
 
   try {
     if (platform === 'yt_shorts') {
-      return await publishYouTubeStudio(
+      return await publishYouTubeViaBrowser(
         page,
         item,
         videoPath,
@@ -1365,7 +1762,7 @@ export async function publishViaBrowser(
       );
     }
     if (platform === 'tiktok') {
-      return await publishTikTokStudio(
+      return await publishTikTokViaBrowser(
         page,
         item,
         videoPath,
@@ -1376,7 +1773,7 @@ export async function publishViaBrowser(
       );
     }
     if (platform === 'ig_reels') {
-      return await publishInstagramReels(
+      return await publishInstagramViaBrowser(
         page,
         item,
         videoPath,
@@ -1386,7 +1783,7 @@ export async function publishViaBrowser(
         onProgress
       );
     }
-    return await publishFacebookReels(
+    return await publishFacebookViaBrowser(
       page,
       item,
       videoPath,
@@ -1396,7 +1793,10 @@ export async function publishViaBrowser(
       onProgress
     );
   } catch (error) {
-    if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+    if (
+      signal.aborted ||
+      (error instanceof Error && error.name === 'AbortError')
+    ) {
       throw createAbortError();
     }
 
