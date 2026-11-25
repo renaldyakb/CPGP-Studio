@@ -4,6 +4,20 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.6.4] - 2026-11-25 (100% Background Silent MotionProvit Downloads & Sync — Zero Browser Popups)
+
+### Peningkatan (Improved)
+- **Unduh & Sinkron 100% di Belakang Layar Tanpa Membuka Chrome (`server/addons/motionprovitScraper.ts`)**:
+  - **Batch Download Video MP4 + Cover 9:16 + Caption**: Menggunakan Node.js HTTP streaming (`Readable.fromWeb` -> disk) memakai cookies sesi tersimpan di workspace (`motionprovit-session.json`) langsung ke endpoint resmi MotionProvit:
+    - Video MP4: `/api/jobs/{id}/download?ratio={aspect}` -> `motionprovit-{shortId}.mp4`
+    - Cover 9:16 Artwork JPG: `/api/jobs/{id}/cover?ratio={aspect}&art=1` (dengan fallback `format=jpg` & thumbnail) -> `cover-{shortId}-{aspect}.jpg`
+    - Caption: `/api/jobs/{id}/kit?download=caption&opener=1` -> `caption.txt`
+  - **Cek Sesi & Sinkron Daftar (`Cek Baru` / `Sinkron Semua`)**: Kini juga berjalan 100% di belakang layar lewat HTTP SSR parsing tanpa membuka jendela Chrome (browser hanya dibuka apabila sesi kedaluwarsa dan perlu login ulang).
+- **Opsi Unduh Semua vs Unduh Terpilih (`MotionProvitPage.tsx`)**:
+  - Menambahkan tombol **`Unduh Semua Baru (N)`** berdampingan dengan **`Unduh Terpilih (M)`** (mengikuti checklist kartu & pilihan berkas `Video MP4`, `Cover 9:16`, `Caption`) beserta keterangan berjalan di belakang layar.
+
+---
+
 ## [v2.6.3] - 2026-11-25 (MotionProvit Root Disk Cache, Incremental Sync, Anti-Burst Rate Limiter & Human Jitter)
 
 ### Peningkatan (Improved)

@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { ReadableStream as NodeWebReadableStream } from 'node:stream/web';
 import PQueue from 'p-queue';
 import type { BrowserContext, Page } from 'patchright';
 import { DEFAULT_TIME_SLOTS } from '../../shared/rulePresets.ts';
@@ -630,6 +633,255 @@ export async function loginMotionProvit(
   }
 }
 
+const DEFAULT_BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&middot;|&#183;/g, '·')
+    .replace(/&ndash;|&#8211;/g, '-')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    )
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)));
+}
+
+function stripHtmlTags(html: string): string {
+  return decodeHtmlEntities(html.replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseJobsPageHtml(
+  html: string,
+  baseUrl: string
+): {
+  parsedTotal: number;
+  maxPageLink: number;
+  items: MotionProvitJobSummary[];
+} {
+  let parsedTotal = 0;
+  let maxPageLink = 1;
+
+  const navMatch = html.match(
+    /<nav[^>]*aria-label="Halaman daftar render"[^>]*>([\s\S]*?)<\/nav>/i
+  );
+  if (navMatch?.[1]) {
+    const navHtml = navMatch[1];
+    const navText = stripHtmlTags(navHtml);
+    const totalMatch = navText.match(/dari\s+(\d+)\s+render/i);
+    if (totalMatch?.[1]) {
+      parsedTotal = Number(totalMatch[1]);
+    }
+    const halMatches = navHtml.matchAll(/[?&](?:amp;)?hal=(\d+)/gi);
+    for (const m of halMatches) {
+      const n = Number(m[1]);
+      if (n > maxPageLink) maxPageLink = n;
+    }
+  }
+
+  const items: MotionProvitJobSummary[] = [];
+  const seenIds = new Set<string>();
+  const articleMatches = html.matchAll(/<article\b[^>]*>([\s\S]*?)<\/article>/gi);
+
+  for (const match of articleMatches) {
+    const cardHtml = match[1];
+    const idMatch =
+      cardHtml.match(/href="\/app\/jobs\/([^"?#]+)"/i) ??
+      cardHtml.match(/href="\/api\/jobs\/([^"?#]+)\//i);
+    if (!idMatch?.[1]) continue;
+
+    const jobId = decodeURIComponent(idMatch[1]).trim();
+    if (!jobId || seenIds.has(jobId)) continue;
+    seenIds.add(jobId);
+
+    const uuidFirst = jobId.split('-')[0];
+    const shortId =
+      uuidFirst && uuidFirst.length >= 6
+        ? uuidFirst.slice(0, 8).toLowerCase()
+        : jobId.slice(0, 8).toLowerCase();
+
+    const h2Match = cardHtml.match(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/i);
+    const title = h2Match?.[1]
+      ? stripHtmlTags(h2Match[1]) || `Video #${shortId}`
+      : `Video #${shortId}`;
+
+    const rawText = stripHtmlTags(cardHtml);
+    let statusText = 'Selesai';
+    if (/\bgagal\b|\bfailed\b/i.test(rawText)) {
+      statusText = 'Gagal';
+    } else if (/\bdiproses\b|\bprocessing\b|\brendering\b/i.test(rawText)) {
+      statusText = 'Diproses';
+    } else if (/\bselesai\b|\bcompleted\b/i.test(rawText)) {
+      statusText = 'Selesai';
+    }
+    const statusInfo = normalizeJobStatus(statusText);
+
+    // First rounded-full pill that is not the status pill = style name
+    let style = 'MotionProvit';
+    const pillMatches = cardHtml.matchAll(
+      /<span[^>]*class="[^"]*rounded-full[^"]*"[^>]*>([\s\S]*?)<\/span>/gi
+    );
+    for (const pm of pillMatches) {
+      const pText = stripHtmlTags(pm[1]);
+      if (!pText || pText.length > 48) continue;
+      if (/^(?:selesai|diproses|gagal|completed|processing|failed)$/i.test(pText)) {
+        continue;
+      }
+      style = pText;
+      break;
+    }
+
+    const ratioMatch = rawText.match(/\b(\d{1,2}:\d{1,2})\b/);
+    const aspectRatio = ratioMatch?.[1] ?? '9:16';
+    const ratioTag = aspectRatio.replace(':', 'x');
+
+    const durMatch = rawText.match(/(\d+)\s*(?:detik|sec|s\b)/i);
+    const durationSec = durMatch?.[1] ? Number(durMatch[1]) : null;
+
+    const dateMatch = rawText.match(
+      /\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}(?:,\s*\d{1,2}[.:]\d{2})?/
+    );
+    const createdAtText = dateMatch?.[0] ?? '';
+
+    const imgMatch = cardHtml.match(/<img[^>]*src="([^"]+)"/i);
+    const rawImgSrc = imgMatch?.[1] ? decodeHtmlEntities(imgMatch[1]) : null;
+    const thumbnailUrl = !rawImgSrc
+      ? `${baseUrl}/api/jobs/${encodeURIComponent(jobId)}/cover?thumb=1`
+      : rawImgSrc.startsWith('http')
+        ? rawImgSrc
+        : rawImgSrc.startsWith('/')
+          ? `${baseUrl}${rawImgSrc}`
+          : null;
+
+    items.push({
+      id: jobId,
+      shortId,
+      title,
+      style,
+      status: statusInfo.status,
+      statusLabel: statusInfo.label,
+      aspectRatio,
+      durationSec,
+      createdAtText,
+      createdAtIso: null,
+      thumbnailUrl,
+      detailUrl: `${baseUrl}/app/jobs/${encodeURIComponent(jobId)}`,
+      videoUrl: `${baseUrl}/api/jobs/${encodeURIComponent(jobId)}/download?ratio=${ratioTag}`,
+      coverUrl: `${baseUrl}/api/jobs/${encodeURIComponent(jobId)}/cover?ratio=${ratioTag}&art=1`,
+      captionPreview: null,
+      alreadyImported: false,
+      importedItemId: null,
+      importedFolderCode: null,
+    });
+  }
+
+  return { parsedTotal, maxPageLink, items };
+}
+
+async function fetchSessionViaHttp(
+  baseUrl: string,
+  cookieHeader: string
+): Promise<{ authenticated: boolean; name: string | null; email: string | null }> {
+  if (!cookieHeader) {
+    return { authenticated: false, name: null, email: null };
+  }
+  try {
+    const res = await fetch(`${baseUrl}/api/auth/session`, {
+      headers: {
+        Cookie: cookieHeader,
+        'User-Agent': DEFAULT_BROWSER_UA,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return { authenticated: false, name: null, email: null };
+    const data = (await res.json()) as {
+      user?: { name?: string | null; email?: string | null };
+    };
+    if (data?.user && (data.user.email || data.user.name)) {
+      return {
+        authenticated: true,
+        name:
+          typeof data.user.name === 'string' && data.user.name.trim()
+            ? data.user.name.trim()
+            : null,
+        email:
+          typeof data.user.email === 'string' && data.user.email.trim()
+            ? data.user.email.trim()
+            : null,
+      };
+    }
+  } catch {
+    // ignore HTTP session check error
+  }
+  return { authenticated: false, name: null, email: null };
+}
+
+async function streamUrlToDiskWithCookies(
+  url: string,
+  destPath: string,
+  cookieHeader: string,
+  referer: string,
+  signal: AbortSignal,
+  minBytes = 256
+): Promise<{ ok: boolean; status: number }> {
+  const tmpPath = `${destPath}.part`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Cookie: cookieHeader,
+        Referer: referer,
+        'User-Agent': DEFAULT_BROWSER_UA,
+      },
+      redirect: 'follow',
+      signal,
+    });
+
+    if (!res.ok || !res.body) {
+      return { ok: false, status: res.status };
+    }
+
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (contentType.includes('text/html')) {
+      // Redirected to login HTML page instead of binary media
+      await res.body.cancel().catch(() => {});
+      return { ok: false, status: 401 };
+    }
+
+    const nodeReadable = Readable.fromWeb(
+      res.body as unknown as NodeWebReadableStream
+    );
+    const writeStream = fs.createWriteStream(tmpPath);
+    await pipeline(nodeReadable, writeStream, { signal });
+
+    const size = fs.existsSync(tmpPath) ? fs.statSync(tmpPath).size : 0;
+    if (size < minBytes) {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      return { ok: false, status: res.status };
+    }
+
+    fs.renameSync(tmpPath, destPath);
+    return { ok: true, status: res.status };
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {
+      // ignore cleanup error
+    }
+    if (signal.aborted) {
+      throw err;
+    }
+    return { ok: false, status: 0 };
+  }
+}
+
 export async function checkMotionProvitSession(
   workspaceId?: string
 ): Promise<{
@@ -639,6 +891,36 @@ export async function checkMotionProvitSession(
   config: MotionProvitConfigPublic;
 }> {
   const current = getInternalMotionProvitConfig(workspaceId);
+  const resolvedWsId =
+    workspaceId && workspaceId.trim()
+      ? workspaceId.trim()
+      : getActiveWorkspace().id;
+
+  // Fast silent check via saved HTTP cookies first (ZERO Chrome launched!)
+  const savedCookie = buildSavedMotionProvitCookieHeader(resolvedWsId);
+  if (savedCookie) {
+    const httpSession = await fetchSessionViaHttp(current.baseUrl, savedCookie);
+    if (httpSession.authenticated) {
+      const updated = updateMotionProvitConfig(
+        {
+          connected: true,
+          accountName: httpSession.name ?? current.accountName,
+          accountEmail:
+            httpSession.email ?? current.accountEmail ?? (current.email || null),
+          lastVerifiedAt: new Date().toISOString(),
+        },
+        workspaceId
+      );
+      return {
+        ok: true,
+        connected: true,
+        message: 'Sesi MotionProvit aktif.',
+        config: toPublicMotionProvitConfig(updated, workspaceId),
+      };
+    }
+  }
+
+  // Fallback to browser profile check (e.g. right after user logged in via "Login Browser")
   const context = await getOrLaunchBrowserContext(undefined, workspaceId);
   await restoreCookiesIfNeeded(context, workspaceId);
   const page = await context.newPage();
@@ -790,6 +1072,142 @@ export async function scrapeMotionProvitJobs(
     options?.mode === 'full' || current.cachedJobs.length === 0
       ? 'full'
       : 'incremental';
+
+  // Fast silent background scrape via HTTP SSR HTML using saved workspace cookies (ZERO Chrome launched!)
+  const savedCookieHeader = buildSavedMotionProvitCookieHeader(resolvedWsId);
+  if (savedCookieHeader) {
+    try {
+      const PER_PAGE = syncMode === 'incremental' ? 24 : 48;
+      const MAX_PAGES = syncMode === 'incremental' ? 3 : 20;
+      const existingIds = new Set(current.cachedJobs.map((j) => j.id));
+      const freshOrderMap = new Map<string, MotionProvitJobSummary>();
+      let totalRemoteCount = current.totalRemoteCount;
+      let totalPages = 1;
+      let pagesScanned = 0;
+      let newFoundCount = 0;
+      let httpAuthValid = true;
+
+      for (
+        let currentPage = 1;
+        currentPage <= Math.min(totalPages, MAX_PAGES);
+        currentPage += 1
+      ) {
+        if (currentPage > 1) {
+          await randomJitter(1800, 3400);
+        }
+
+        const targetUrl = `${current.baseUrl}/app/jobs?hal=${currentPage}&per=${PER_PAGE}`;
+        const res = await fetch(targetUrl, {
+          headers: {
+            Cookie: savedCookieHeader,
+            Referer: `${current.baseUrl}/app/jobs`,
+            'User-Agent': DEFAULT_BROWSER_UA,
+            Accept: 'text/html,application/xhtml+xml',
+          },
+          redirect: 'manual',
+          signal: AbortSignal.timeout(30_000),
+        });
+
+        if (
+          res.status === 401 ||
+          res.status === 403 ||
+          (res.status >= 300 &&
+            res.status < 400 &&
+            (res.headers.get('location') ?? '').includes('/login'))
+        ) {
+          httpAuthValid = false;
+          break;
+        }
+        if (!res.ok) {
+          httpAuthValid = false;
+          break;
+        }
+
+        const html = await res.text();
+        if (html.includes('/login?callbackUrl') && !html.includes('<article')) {
+          httpAuthValid = false;
+          break;
+        }
+
+        pagesScanned += 1;
+        const pageData = parseJobsPageHtml(html, current.baseUrl);
+        if (pageData.parsedTotal > 0) {
+          totalRemoteCount = pageData.parsedTotal;
+        }
+        const computedPages =
+          totalRemoteCount > 0 ? Math.ceil(totalRemoteCount / PER_PAGE) : 1;
+        totalPages = Math.max(
+          totalPages,
+          pageData.maxPageLink,
+          computedPages
+        );
+
+        let addedThisPage = 0;
+        let hitExistingCachedItem = false;
+
+        for (const item of pageData.items) {
+          if (existingIds.has(item.id)) {
+            hitExistingCachedItem = true;
+          } else {
+            newFoundCount += 1;
+          }
+          if (!freshOrderMap.has(item.id)) {
+            addedThisPage += 1;
+          }
+          freshOrderMap.set(item.id, item);
+        }
+
+        if (addedThisPage === 0) break;
+        if (syncMode === 'incremental' && hitExistingCachedItem) break;
+      }
+
+      if (httpAuthValid && freshOrderMap.size > 0) {
+        const mergedMap = new Map<string, MotionProvitJobSummary>(freshOrderMap);
+        if (syncMode === 'incremental') {
+          for (const cachedJob of current.cachedJobs) {
+            if (!mergedMap.has(cachedJob.id)) {
+              mergedMap.set(cachedJob.id, cachedJob);
+            }
+          }
+        }
+
+        const httpSession = await fetchSessionViaHttp(
+          current.baseUrl,
+          savedCookieHeader
+        );
+        const mergedList = Array.from(mergedMap.values());
+        const nowIso = new Date().toISOString();
+        lastSyncTimestampByWorkspace.set(resolvedWsId, Date.now());
+
+        const updatedConfig = updateMotionProvitConfig(
+          {
+            connected: true,
+            accountName: httpSession.name ?? current.accountName,
+            accountEmail:
+              httpSession.email ??
+              current.accountEmail ??
+              (current.email || null),
+            lastVerifiedAt: nowIso,
+            lastSyncedAt: nowIso,
+            totalRemoteCount: Math.max(totalRemoteCount, mergedList.length),
+            cachedJobs: mergedList,
+          },
+          workspaceId
+        );
+
+        const enriched = enrichJobsWithWorkspaceStatus(mergedList, workspaceId);
+        return {
+          jobs: enriched,
+          config: toPublicMotionProvitConfig(updatedConfig, workspaceId),
+          syncMode,
+          newFoundCount,
+          pagesScanned,
+        };
+      }
+    } catch {
+      // Fall through cleanly to browser fallback if HTTP scrape failed
+    }
+  }
 
   const context = await getOrLaunchBrowserContext(undefined, workspaceId);
   const page = await context.newPage();
@@ -1514,44 +1932,6 @@ function buildFallbackCaption(
   return `${hook}\n\nMenurut kamu bagaimana? Tulis di komentar.\n\n${defaultHashtags}`;
 }
 
-async function downloadFileFromUrl(
-  context: BrowserContext,
-  url: string,
-  destPath: string
-): Promise<boolean> {
-  try {
-    const res = await context.request.get(url, { timeout: 180_000 });
-    if (!res.ok()) return false;
-    const body = await res.body();
-    if (!body || body.length < 256) return false;
-    fs.writeFileSync(destPath, body);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function downloadViaButtonClick(
-  page: Page,
-  buttonLocator: ReturnType<Page['locator']>,
-  destPath: string,
-  timeoutMs = 120_000
-): Promise<boolean> {
-  try {
-    if (!(await buttonLocator.isVisible({ timeout: 3000 }).catch(() => false))) {
-      return false;
-    }
-    const [download] = await Promise.all([
-      page.waitForEvent('download', { timeout: timeoutMs }),
-      buttonLocator.click({ timeout: 8000 }),
-    ]);
-    await download.saveAs(destPath);
-    return fs.existsSync(destPath) && fs.statSync(destPath).size > 256;
-  } catch {
-    return false;
-  }
-}
-
 export function getMotionProvitImportProgress(
   workspaceId?: string
 ): MotionProvitImportProgress | null {
@@ -1680,18 +2060,31 @@ export async function startMotionProvitBatchImport(
   const controller = new AbortController();
   activeImportControllers.set(wsId, controller);
 
-  // Execute batch import asynchronously so HTTP endpoint returns immediately and UI polls live progress
+  // Execute batch import 100% silently in the background via HTTP streaming using saved workspace cookies
+  // (ZERO Chrome windows opened! Only falls back to browser login if session cookies expired).
   void (async () => {
-    let page: Page | null = null;
     try {
-      const context = await getOrLaunchBrowserContext(undefined, wsId);
-      page = await context.newPage();
+      let cookieHeader = buildSavedMotionProvitCookieHeader(wsId);
 
-      const authed = await ensureAuthenticatedOnPage(page, context, wsId);
-      if (!authed) {
-        throw new Error(
-          'Sesi MotionProvit tidak aktif. Silakan login terlebih dahulu.'
-        );
+      // Verify saved session silently before downloading
+      const sessionCheck = await fetchSessionViaHttp(config.baseUrl, cookieHeader);
+      if (!sessionCheck.authenticated) {
+        // Attempt silent cookie refresh if saved credentials exist, otherwise stop cleanly
+        const context = await getOrLaunchBrowserContext(undefined, wsId);
+        const authPage = await context.newPage();
+        try {
+          const authed = await ensureAuthenticatedOnPage(authPage, context, wsId);
+          if (!authed) {
+            throw new Error(
+              'Sesi MotionProvit tidak aktif. Silakan login terlebih dahulu.'
+            );
+          }
+          cookieHeader = buildSavedMotionProvitCookieHeader(wsId);
+        } finally {
+          if (!authPage.isClosed()) {
+            await authPage.close().catch(() => {});
+          }
+        }
       }
 
       for (let i = 0; i < selectedJobs.length; i += 1) {
@@ -1705,7 +2098,7 @@ export async function startMotionProvitBatchImport(
         // Human-paced pause between consecutive downloads to stay well below rate limits
         if (i > 0) {
           runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Menunggu jeda aman sebelum video berikutnya...`;
-          await randomJitter(2800, 5200);
+          await randomJitter(2200, 4200);
           if (controller.signal.aborted) {
             runProgress.status = 'cancelled';
             runProgress.currentStep = 'Dibatalkan oleh pengguna.';
@@ -1718,7 +2111,7 @@ export async function startMotionProvitBatchImport(
         const slot = allocations[i];
         const itemState = itemsProgress[i];
         itemState.status = 'downloading';
-        runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Membuka detail "${job.title}" (#${job.shortId})...`;
+        runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Menyiapkan "${job.title}" (#${job.shortId}) ke ${slot?.folderCode ?? '-'}...`;
         runProgress.progressPercent = Math.max(
           5,
           Math.round((i / selectedJobs.length) * 100)
@@ -1729,236 +2122,43 @@ export async function startMotionProvitBatchImport(
             throw new Error('Tidak ada slot tanggal kosong yang tersedia.');
           }
 
-          // Collect detail JSON payloads while opening /app/jobs/{id}
-          const detailPayloads: unknown[] = [];
-          const onResp = async (res: import('patchright').Response) => {
-            try {
-              const u = res.url();
-              if (!u.includes('clipprovit.com')) return;
-              const ct = res.headers()['content-type'] ?? '';
-              if (!ct.includes('application/json')) return;
-              if (u.includes('/api/sec/') || u.includes('/api/auth/')) return;
-              detailPayloads.push(await res.json());
-            } catch {
-              // ignore
-            }
-          };
-          page.on('response', onResp);
-
-          try {
-            await page.goto(job.detailUrl, {
-              waitUntil: 'domcontentloaded',
-              timeout: 60_000,
-            });
-            await page.waitForTimeout(2500);
-          } finally {
-            page.off('response', onResp);
-          }
-
-          if (page.url().toLowerCase().includes('/login')) {
-            throw new Error('Sesi login MotionProvit kedaluwarsa di tengah proses.');
-          }
-
-          // Inspect DOM of /app/jobs/{id} (inline only, no inner helper functions!)
-          const domDetail = await page.evaluate((baseUrl) => {
-            const videoEl = document.querySelector<HTMLVideoElement>('video');
-            const sourceEl = document.querySelector<HTMLSourceElement>('video source');
-            const rawVideoSrc =
-              videoEl?.currentSrc ||
-              videoEl?.getAttribute('src') ||
-              sourceEl?.getAttribute('src') ||
-              null;
-
-            const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]')).map(
-              (a) => ({
-                href: a.getAttribute('href') ?? '',
-                text: (a.textContent ?? '').trim(),
-                download: a.hasAttribute('download'),
-              })
-            );
-
-            let videoHref: string | null = rawVideoSrc;
-            let coverHref: string | null = null;
-            let thumbHref: string | null = null;
-
-            for (const a of anchors) {
-              const hrefLower = a.href.toLowerCase();
-              const textLower = a.text.toLowerCase();
-              if (
-                !videoHref &&
-                (hrefLower.includes('.mp4') ||
-                  hrefLower.includes('download') ||
-                  /unduh\s*\d+:\d+/i.test(a.text))
-              ) {
-                videoHref = a.href;
-              }
-              if (
-                !coverHref &&
-                (hrefLower.includes('cover') || textLower.includes('unduh jpg'))
-              ) {
-                coverHref = a.href;
-              }
-              if (
-                !thumbHref &&
-                (hrefLower.includes('thumb') ||
-                  hrefLower.endsWith('.jpg') ||
-                  hrefLower.endsWith('.jpeg'))
-              ) {
-                thumbHref = a.href;
-              }
-            }
-
-            // Look for cover preview <img> inside Cover section
-            const imgs = Array.from(document.querySelectorAll<HTMLImageElement>('img'));
-            for (const img of imgs) {
-              const src = img.currentSrc || img.getAttribute('src') || '';
-              if (!src) continue;
-              if (!coverHref && src.toLowerCase().includes('cover')) {
-                coverHref = src;
-              } else if (!thumbHref && (src.includes('.jpg') || src.includes('.png') || src.includes('thumb'))) {
-                thumbHref = src;
-              }
-            }
-
-            // Try to extract caption / hook / hashtags if displayed on detail page
-            let captionText: string | null = null;
-            const captionCandidates = Array.from(
-              document.querySelectorAll('textarea, pre, [data-caption], [class*="caption" i]')
-            );
-            for (const el of captionCandidates) {
-              const val =
-                el instanceof HTMLTextAreaElement
-                  ? el.value.trim()
-                  : (el.textContent ?? '').trim();
-              if (val.length >= 20 && val.length <= 2200) {
-                captionText = val;
-                break;
-              }
-            }
-
-            const titleEl = document.querySelector('h1');
-            const headingTitle = (titleEl?.textContent ?? '').trim();
-
-            const normalizedVideoUrl = !videoHref
-              ? null
-              : videoHref.startsWith('http://') || videoHref.startsWith('https://')
-                ? videoHref
-                : videoHref.startsWith('//')
-                  ? `https:${videoHref}`
-                  : videoHref.startsWith('/')
-                    ? `${baseUrl}${videoHref}`
-                    : null;
-
-            const normalizedCoverUrl = !coverHref
-              ? null
-              : coverHref.startsWith('http://') || coverHref.startsWith('https://')
-                ? coverHref
-                : coverHref.startsWith('//')
-                  ? `https:${coverHref}`
-                  : coverHref.startsWith('/')
-                    ? `${baseUrl}${coverHref}`
-                    : null;
-
-            const normalizedThumbUrl = !thumbHref
-              ? null
-              : thumbHref.startsWith('http://') || thumbHref.startsWith('https://')
-                ? thumbHref
-                : thumbHref.startsWith('//')
-                  ? `https:${thumbHref}`
-                  : thumbHref.startsWith('/')
-                    ? `${baseUrl}${thumbHref}`
-                    : null;
-
-            return {
-              headingTitle,
-              videoUrl: normalizedVideoUrl,
-              coverUrl: normalizedCoverUrl,
-              thumbUrl: normalizedThumbUrl,
-              captionText,
-            };
-          }, config.baseUrl);
-
-          // Also scan intercepted detail JSON payloads for videoUrl / coverUrl / caption
-          let jsonVideoUrl: string | null = null;
-          let jsonCoverUrl: string | null = null;
-          let jsonCaption: string | null = null;
-          for (const payload of detailPayloads) {
-            if (!payload || typeof payload !== 'object') continue;
-            const str = JSON.stringify(payload);
-            const rec = payload as Record<string, unknown>;
-            const inner =
-              (rec.job && typeof rec.job === 'object'
-                ? (rec.job as Record<string, unknown>)
-                : rec.data && typeof rec.data === 'object'
-                  ? (rec.data as Record<string, unknown>)
-                  : rec);
-
-            const cap =
-              (typeof inner.caption === 'string' && inner.caption.trim()) ||
-              (typeof inner.socialCaption === 'string' && inner.socialCaption.trim()) ||
-              (typeof inner.description === 'string' && inner.description.trim()) ||
-              null;
-            if (cap && !jsonCaption) jsonCaption = cap;
-
-            const vid =
-              (typeof inner.videoUrl === 'string' && inner.videoUrl) ||
-              (typeof inner.video_url === 'string' && inner.video_url) ||
-              (typeof inner.outputUrl === 'string' && inner.outputUrl) ||
-              null;
-            if (vid && !jsonVideoUrl) {
-              jsonVideoUrl = resolveAbsoluteUrl(vid, config.baseUrl);
-            }
-
-            const cov =
-              (typeof inner.coverUrl === 'string' && inner.coverUrl) ||
-              (typeof inner.cover_url === 'string' && inner.cover_url) ||
-              null;
-            if (cov && !jsonCoverUrl) {
-              jsonCoverUrl = resolveAbsoluteUrl(cov, config.baseUrl);
-            }
-
-            // Fallback regex for signed mp4/jpg URLs inside JSON payload
-            if (!jsonVideoUrl) {
-              const mp4Match = str.match(/https?:\/\/[^"\\]+\.mp4(?:[^"\\]*)?/i);
-              if (mp4Match?.[0]) jsonVideoUrl = mp4Match[0];
-            }
-            if (!jsonCoverUrl) {
-              const covMatch = str.match(/https?:\/\/[^"\\]*cover[^"\\]*\.(?:jpg|jpeg|png)(?:[^"\\]*)?/i);
-              if (covMatch?.[0]) jsonCoverUrl = covMatch[0];
-            }
-          }
-
           const aspectFileTag = normalizeAspectForFile(job.aspectRatio);
-          const finalTitle = domDetail.headingTitle || job.title;
+          const finalTitle = job.title;
+          const referer = job.detailUrl;
 
-          // Fetch official MotionProvit caption.txt directly from /api/jobs/{id}/kit?download=caption&opener=1
+          // 1. Fetch official MotionProvit caption.txt directly in the background
           let officialKitCaption: string | null = null;
           if (input.assets.caption) {
+            runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Mengambil caption "${finalTitle}"...`;
             try {
-              const kitRes = await context.request.get(
+              const kitRes = await fetch(
                 `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/kit?download=caption&opener=1`,
                 {
-                  headers: { Referer: job.detailUrl },
-                  timeout: 20_000,
+                  headers: {
+                    Cookie: cookieHeader,
+                    Referer: referer,
+                    'User-Agent': DEFAULT_BROWSER_UA,
+                  },
+                  signal: controller.signal,
                 }
               );
-              if (kitRes.ok()) {
-                const rawKit = (await kitRes.text()).trim();
-                if (rawKit.length >= 10) {
-                  officialKitCaption = rawKit;
+              if (kitRes.ok) {
+                const ct = (kitRes.headers.get('content-type') ?? '').toLowerCase();
+                if (!ct.includes('text/html')) {
+                  const rawKit = (await kitRes.text()).trim();
+                  if (rawKit.length >= 10) {
+                    officialKitCaption = rawKit;
+                  }
                 }
               }
-            } catch {
-              // fallback to DOM/template caption below
+            } catch (err) {
+              if (controller.signal.aborted) throw err;
             }
           }
 
           const finalCaption = buildFallbackCaption(
             finalTitle,
-            officialKitCaption ??
-              jsonCaption ??
-              domDetail.captionText ??
-              job.captionPreview,
+            officialKitCaption ?? job.captionPreview,
             workspace
           );
 
@@ -1974,50 +2174,69 @@ export async function startMotionProvitBatchImport(
           if (input.assets.caption && fs.existsSync(created.captionPath)) {
             downloadedFiles.push(path.basename(created.captionPath));
           } else if (!input.assets.caption && fs.existsSync(created.captionPath)) {
-            // Remove auto-created empty caption if user opted out of caption
             fs.unlinkSync(created.captionPath);
           }
 
-          // 1. Download Video MP4 -> motionprovit-{shortId}.mp4
+          // 2. Download Cover 9:16 JPG in the background -> cover-{shortId}-9x16.jpg
+          if (input.assets.cover) {
+            runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Mengunduh cover "${finalTitle}" ke ${slot.folderCode}...`;
+            const coverFileName = `cover-${job.shortId}-${aspectFileTag}.jpg`;
+            const coverDest = path.join(created.folderPath, coverFileName);
+
+            const coverCandidates = [
+              `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/cover?ratio=${aspectFileTag}&art=1`,
+              `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/cover?ratio=${aspectFileTag}&format=jpg`,
+              `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/cover?ratio=${aspectFileTag}`,
+              job.coverUrl,
+              job.thumbnailUrl,
+            ].filter((u): u is string => Boolean(u));
+
+            let coverSaved = false;
+            for (const coverUrl of coverCandidates) {
+              const dl = await streamUrlToDiskWithCookies(
+                coverUrl,
+                coverDest,
+                cookieHeader,
+                referer,
+                controller.signal,
+                512
+              );
+              if (dl.ok) {
+                coverSaved = true;
+                break;
+              }
+            }
+
+            if (coverSaved) {
+              downloadedFiles.push(coverFileName);
+            }
+          }
+
+          // 3. Stream Video MP4 directly in the background -> motionprovit-{shortId}.mp4
           if (input.assets.video) {
             runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Mengunduh video "${finalTitle}" ke ${slot.folderCode}...`;
             const videoFileName = `motionprovit-${job.shortId}.mp4`;
             const videoDest = path.join(created.folderPath, videoFileName);
 
-            let videoSaved = false;
-            // Priority A: Click the yellow "Unduh 9:16" / download anchor to capture native browser download
-            const videoDownloadBtn = page
-              .locator('a[href*="/download"]')
-              .filter({ hasText: /^Unduh/i })
-              .first();
-            videoSaved = await downloadViaButtonClick(
-              page,
-              videoDownloadBtn,
-              videoDest,
-              180_000
-            );
+            const videoCandidates = [
+              `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/download?ratio=${aspectFileTag}`,
+              `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/download`,
+              job.videoUrl,
+            ].filter((u): u is string => Boolean(u));
 
-            // Priority B: Direct authenticated GET with Referer header
-            if (!videoSaved) {
-              const candidateVideoUrl =
-                domDetail.videoUrl ??
-                jsonVideoUrl ??
-                job.videoUrl ??
-                `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/download?ratio=${aspectFileTag}`;
-              try {
-                const res = await context.request.get(candidateVideoUrl, {
-                  headers: { Referer: job.detailUrl },
-                  timeout: 180_000,
-                });
-                if (res.ok()) {
-                  const buf = await res.body();
-                  if (buf && buf.length > 1024) {
-                    fs.writeFileSync(videoDest, buf);
-                    videoSaved = true;
-                  }
-                }
-              } catch {
-                videoSaved = false;
+            let videoSaved = false;
+            for (const videoUrl of videoCandidates) {
+              const dl = await streamUrlToDiskWithCookies(
+                videoUrl,
+                videoDest,
+                cookieHeader,
+                referer,
+                controller.signal,
+                4096
+              );
+              if (dl.ok) {
+                videoSaved = true;
+                break;
               }
             }
 
@@ -2025,69 +2244,8 @@ export async function startMotionProvitBatchImport(
               downloadedFiles.push(videoFileName);
             } else {
               throw new Error(
-                `Gagal mengunduh file MP4 untuk "${finalTitle}" (#${job.shortId}).`
+                `Gagal mengunduh video MP4 untuk "${finalTitle}" (#${job.shortId}). Pastikan sesi MotionProvit masih aktif.`
               );
-            }
-          }
-
-          // 2. Download Cover 9:16 JPG -> cover-{shortId}-9x16.jpg
-          if (input.assets.cover) {
-            runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Mengunduh cover "${finalTitle}" ke ${slot.folderCode}...`;
-            const coverFileName = `cover-${job.shortId}-${aspectFileTag}.jpg`;
-            const coverDest = path.join(created.folderPath, coverFileName);
-
-            let coverSaved = false;
-            // Priority A: Official artwork Cover JPG endpoint (/cover?ratio=9x16&art=1)
-            const officialArtCoverUrl = `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/cover?ratio=${aspectFileTag}&art=1`;
-            coverSaved = await downloadFileFromUrl(
-              context,
-              officialArtCoverUrl,
-              coverDest
-            );
-
-            // Priority B: Click "Unduh JPG" inside Cover card
-            if (!coverSaved) {
-              const coverDownloadBtn = page
-                .locator('a, button, [role="button"]')
-                .filter({ hasText: /^Unduh\s*JPG$/i })
-                .first();
-              coverSaved = await downloadViaButtonClick(
-                page,
-                coverDownloadBtn,
-                coverDest,
-                45_000
-              );
-            }
-
-            // Priority C: Fallback to Thumbnail JPG endpoint (/cover?ratio=9x16&format=jpg)
-            if (!coverSaved) {
-              const thumbFallbackUrl = `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/cover?ratio=${aspectFileTag}&format=jpg`;
-              coverSaved = await downloadFileFromUrl(
-                context,
-                thumbFallbackUrl,
-                coverDest
-              );
-            }
-
-            // Priority D: Direct fetch from scraped cover/thumbnail URL
-            if (!coverSaved) {
-              const candidateCoverUrl =
-                jsonCoverUrl ??
-                domDetail.coverUrl ??
-                job.coverUrl ??
-                domDetail.thumbUrl ??
-                job.thumbnailUrl;
-              if (candidateCoverUrl) {
-                coverSaved = await downloadFileFromUrl(
-                  context,
-                  candidateCoverUrl,
-                  coverDest
-                );
-              }
-            }
-
-            if (coverSaved) {
-              downloadedFiles.push(coverFileName);
             }
           }
 
@@ -2109,6 +2267,12 @@ export async function startMotionProvitBatchImport(
           itemState.downloadedFiles = downloadedFiles;
           runProgress.completedCount += 1;
         } catch (itemErr) {
+          if (controller.signal.aborted) {
+            runProgress.status = 'cancelled';
+            runProgress.currentStep = 'Dibatalkan oleh pengguna.';
+            runProgress.finishedAt = new Date().toISOString();
+            return;
+          }
           itemState.status = 'failed';
           itemState.error =
             itemErr instanceof Error ? itemErr.message : String(itemErr);
@@ -2129,15 +2293,17 @@ export async function startMotionProvitBatchImport(
       runProgress.currentStep = `Selesai: ${runProgress.completedCount} diunduh${runProgress.failedCount > 0 ? `, ${runProgress.failedCount} gagal` : ''}.`;
       runProgress.finishedAt = new Date().toISOString();
     } catch (fatalErr) {
-      runProgress.status = 'failed';
-      runProgress.currentStep =
-        fatalErr instanceof Error ? fatalErr.message : String(fatalErr);
+      if (controller.signal.aborted) {
+        runProgress.status = 'cancelled';
+        runProgress.currentStep = 'Dibatalkan oleh pengguna.';
+      } else {
+        runProgress.status = 'failed';
+        runProgress.currentStep =
+          fatalErr instanceof Error ? fatalErr.message : String(fatalErr);
+      }
       runProgress.finishedAt = new Date().toISOString();
     } finally {
       activeImportControllers.delete(wsId);
-      if (page && !page.isClosed()) {
-        await page.close().catch(() => {});
-      }
     }
   })();
 

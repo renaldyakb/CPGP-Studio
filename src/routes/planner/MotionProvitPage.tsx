@@ -308,8 +308,9 @@ export function MotionProvitPage() {
     }
   };
 
-  const handleStartImport = async () => {
-    if (selectedIds.length === 0) {
+  const handleStartImport = async (overrideJobIds?: string[]) => {
+    const targetIds = overrideJobIds ?? selectedIds;
+    if (targetIds.length === 0) {
       showToast('Pilih minimal satu video untuk diunduh.', 'error');
       return;
     }
@@ -321,14 +322,14 @@ export function MotionProvitPage() {
     setBusyAction('import');
     try {
       const res = await motionprovitApi.startImport({
-        jobIds: selectedIds,
+        jobIds: targetIds,
         assets,
         startDateIso: startDateIso || undefined,
         startSlotCode: startSlotCode || undefined,
       });
       setImportProgress(res.importProgress);
       showToast(
-        `Mengunduh ${selectedIds.length} video ke slot kosong workspace...`,
+        `Mengunduh ${targetIds.length} video di belakang layar (tanpa membuka browser)...`,
         'info'
       );
     } catch (error) {
@@ -339,6 +340,22 @@ export function MotionProvitPage() {
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const handleDownloadAllNew = () => {
+    const newIds = jobs
+      .filter(
+        (j) =>
+          !j.alreadyImported &&
+          (j.status === 'completed' || j.status === 'unknown')
+      )
+      .map((j) => j.id);
+    if (newIds.length === 0) {
+      showToast('Semua video MotionProvit sudah diunduh di workspace ini.', 'info');
+      return;
+    }
+    setSelectedIds(newIds);
+    void handleStartImport(newIds);
   };
 
   const handleCancelImport = async () => {
@@ -860,23 +877,43 @@ export function MotionProvitPage() {
                 ) : null}
               </div>
 
-              <Button
-                type="button"
-                variant="editorial"
-                size="sm"
-                disabled={
-                  selectedIds.length === 0 || isImporting || busyAction === 'import'
-                }
-                onClick={() => void handleStartImport()}
-              >
-                {busyAction === 'import' || isImporting ? (
-                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                ) : (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    newJobsCount === 0 || isImporting || busyAction === 'import'
+                  }
+                  onClick={handleDownloadAllNew}
+                >
                   <CloudDownload className="size-3.5" aria-hidden="true" />
-                )}
-                Unduh &amp; Assign ({selectedIds.length})
-              </Button>
+                  Unduh Semua Baru ({newJobsCount})
+                </Button>
+                <Button
+                  type="button"
+                  variant="editorial"
+                  size="sm"
+                  disabled={
+                    selectedIds.length === 0 ||
+                    isImporting ||
+                    busyAction === 'import'
+                  }
+                  onClick={() => void handleStartImport()}
+                >
+                  {busyAction === 'import' || isImporting ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <CloudDownload className="size-3.5" aria-hidden="true" />
+                  )}
+                  Unduh Terpilih ({selectedIds.length})
+                </Button>
+              </div>
             </div>
+            <p className="text-[11px] font-light text-muted-foreground/75">
+              Unduhan (Video MP4, Cover 9:16, Caption) berjalan otomatis di
+              belakang layar tanpa membuka browser Chrome.
+            </p>
           </CardContent>
         </Card>
       ) : null}
