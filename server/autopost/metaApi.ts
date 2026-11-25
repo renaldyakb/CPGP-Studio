@@ -2,20 +2,47 @@ import fs from 'node:fs';
 import type { WorkspaceMetadata } from '../../shared/types/workspace.ts';
 import type {
   AutoPostMode,
+  MetaConnectionTestResult,
   MetaDiscoveredPage,
+  MetaTokenExchangeResult,
 } from '../../src/types/autopost.ts';
 import type { ContentPlannerItem } from '../../src/types/planner.ts';
 import {
   detectAutoPostCapabilities,
   getInternalAutoPostConfig,
+  updateAutoPostSettings,
+  type UpdateAutoPostSettingsPatch,
 } from './config.ts';
 import { resolveUploadVideoForItem } from './contentHelpers.ts';
 
 const META_GRAPH_BASE = 'https://graph.facebook.com';
+const META_OAUTH_DIALOG_BASE = 'https://www.facebook.com';
 const META_RUPLOAD_BASE = 'https://rupload.facebook.com';
 const DEFAULT_GRAPH_VERSION = 'v25.0';
 const IG_POLL_INTERVAL_MS = 3000;
 const IG_POLL_MAX_ATTEMPTS = 50;
+
+export const META_REQUIRED_IG_PERMISSIONS = [
+  'instagram_basic',
+  'instagram_content_publish',
+] as const;
+
+export const META_REQUIRED_FB_PERMISSIONS = [
+  'pages_show_list',
+  'pages_read_engagement',
+  'pages_manage_posts',
+  'publish_video',
+] as const;
+
+export const META_OAUTH_SCOPES = [
+  'instagram_basic',
+  'instagram_content_publish',
+  'pages_show_list',
+  'pages_read_engagement',
+  'pages_manage_posts',
+  'pages_manage_metadata',
+  'publish_video',
+] as const;
 
 const discoveredPageTokens = new Map<string, string>();
 
@@ -194,6 +221,48 @@ function toMetaDiscoveredPage(
   };
 }
 
+function resolveMetaRedirectUri(configuredUri: string, origin?: string): string {
+  if (configuredUri.trim()) {
+    return configuredUri.trim();
+  }
+  const normalizedOrigin = (origin || 'http://localhost:5173').replace(
+    /\/+$/,
+    ''
+  );
+  return `${normalizedOrigin}/api/autopost/meta/callback`;
+}
+
+async function fetchPageInstagramBusinessAccount(
+  pageId: string,
+  pageToken: string,
+  ver: string
+): Promise<{ id?: string; username?: string } | null> {
+  if (!pageId || !pageToken) return null;
+  try {
+    const pageUrl = new URL(
+      `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(pageId)}`
+    );
+    pageUrl.searchParams.set('fields', 'instagram_business_account{id,username}');
+    pageUrl.searchParams.set('access_token', pageToken);
+
+    const res = await fetch(pageUrl.toString(), { method: 'GET' });
+    const payload = (await parseJsonSafe(res)) as RawMetaPageNode &
+      MetaGraphErrorPayload;
+
+    if (
+      res.ok &&
+      !payload.error &&
+      payload.instagram_business_account &&
+      payload.instagram_business_account.id
+    ) {
+      return payload.instagram_business_account;
+    }
+  } catch {
+    // Fallback lookup is best-effort
+  }
+  return null;
+}
+
 export async function discoverMetaAccounts(
   inputToken?: string,
   graphVersion?: string
@@ -236,13 +305,37 @@ export async function discoverMetaAccounts(
       );
 
       if (validNodes.length > 0) {
-        const pages = validNodes.map((node) => {
-          const pageId = String(node.id).trim();
-          if (typeof node.access_token === 'string' && node.access_token.trim()) {
-            discoveredPageTokens.set(pageId, node.access_token.trim());
-          }
-          return toMetaDiscoveredPage(node, false);
-        });
+        const enrichedNodes = await Promise.all(
+          validNodes.map(async (node) => {
+            const pageId = String(node.id).trim();
+            const pageToken =
+              typeof node.access_token === 'string' && node.access_token.trim()
+                ? node.access_token.trim()
+                : token;
+            if (typeof node.access_token === 'string' && node.access_token.trim()) {
+              discoveredPageTokens.set(pageId, node.access_token.trim());
+            }
+
+            if (!node.instagram_business_account?.id) {
+              const fallbackIg = await fetchPageInstagramBusinessAccount(
+                pageId,
+                pageToken,
+                ver
+              );
+              if (fallbackIg) {
+                return {
+                  ...node,
+                  instagram_business_account: fallbackIg,
+                };
+              }
+            }
+            return node;
+          })
+        );
+
+        const pages = enrichedNodes.map((node) =>
+          toMetaDiscoveredPage(node, false)
+        );
 
         return {
           pages,
@@ -278,8 +371,23 @@ export async function discoverMetaAccounts(
     const pageId = mePayload.id.trim();
     discoveredPageTokens.set(pageId, token);
 
+    let enrichedMeNode: RawMetaPageNode = mePayload;
+    if (!mePayload.instagram_business_account?.id) {
+      const fallbackIg = await fetchPageInstagramBusinessAccount(
+        pageId,
+        token,
+        ver
+      );
+      if (fallbackIg) {
+        enrichedMeNode = {
+          ...mePayload,
+          instagram_business_account: fallbackIg,
+        };
+      }
+    }
+
     return {
-      pages: [toMetaDiscoveredPage(mePayload, true)],
+      pages: [toMetaDiscoveredPage(enrichedMeNode, true)],
       tokenType: 'page',
       graphApiVersion: ver,
     };
@@ -300,6 +408,504 @@ export async function discoverMetaAccounts(
   throw new Error(
     `Token Meta Graph API tidak valid atau sudah kedaluwarsa: ${combinedDetail}`
   );
+}
+
+export async function exchangeShortLivedMetaToken(params: {
+  appId?: string;
+  appSecret?: string;
+  shortLivedToken: string;
+  graphApiVersion?: string;
+}): Promise<MetaTokenExchangeResult> {
+  const config = getInternalAutoPostConfig();
+  const appId = (params.appId ?? '').trim() || config.metaApi.appId.trim();
+  const appSecret =
+    (params.appSecret ?? '').trim() || config.metaApi.appSecret.trim();
+  const shortLivedToken = (params.shortLivedToken ?? '').trim();
+  const ver = normalizeGraphVersion(
+    params.graphApiVersion || config.metaApi.graphApiVersion
+  );
+
+  if (!appId) {
+    throw new Error(
+      'App ID Meta belum diisi. Masukkan App ID dari Meta for Developers terlebih dahulu.'
+    );
+  }
+  if (!appSecret) {
+    throw new Error(
+      'App Secret Meta belum diisi. Masukkan App Secret di pengaturan backend terlebih dahulu.'
+    );
+  }
+  if (!shortLivedToken) {
+    throw new Error(
+      'Short-Lived Access Token wajib diisi untuk ditukar menjadi Long-Lived Token.'
+    );
+  }
+
+  // Step 6A: Exchange Short-Lived Token -> Long-Lived User Token (~60 days)
+  const exchangeUrl = new URL(`${META_GRAPH_BASE}/${ver}/oauth/access_token`);
+  exchangeUrl.searchParams.set('grant_type', 'fb_exchange_token');
+  exchangeUrl.searchParams.set('client_id', appId);
+  exchangeUrl.searchParams.set('client_secret', appSecret);
+  exchangeUrl.searchParams.set('fb_exchange_token', shortLivedToken);
+
+  const exchangeRes = await fetch(exchangeUrl.toString(), { method: 'GET' });
+  const exchangePayload = (await parseJsonSafe(exchangeRes)) as {
+    access_token?: string;
+    token_type?: string;
+    expires_in?: number | string;
+  } & MetaGraphErrorPayload;
+
+  if (!exchangeRes.ok || exchangePayload.error) {
+    const detail = extractMetaErrorMessage(
+      exchangePayload,
+      `HTTP ${exchangeRes.status}`
+    );
+    throw new Error(
+      `Gagal menukar Short-Lived Token menjadi Long-Lived Token: ${detail}`
+    );
+  }
+
+  const longLivedToken =
+    typeof exchangePayload.access_token === 'string'
+      ? exchangePayload.access_token.trim()
+      : '';
+  if (!longLivedToken) {
+    throw new Error(
+      'Meta Graph API tidak mengembalikan access_token baru saat proses tukar token.'
+    );
+  }
+
+  const rawExpiresIn =
+    typeof exchangePayload.expires_in === 'number'
+      ? exchangePayload.expires_in
+      : typeof exchangePayload.expires_in === 'string'
+        ? Number(exchangePayload.expires_in)
+        : NaN;
+
+  let longLivedTokenExpiresAt: string | null = null;
+  let expiresInDays: number | null = null;
+  if (Number.isFinite(rawExpiresIn) && rawExpiresIn > 0) {
+    longLivedTokenExpiresAt = new Date(
+      Date.now() + rawExpiresIn * 1000
+    ).toISOString();
+    expiresInDays = Math.max(1, Math.round(rawExpiresIn / 86400));
+  }
+
+  // Step 6B: Discover Pages & Permanent Page Tokens using the new Long-Lived Token
+  let pages: MetaDiscoveredPage[] = [];
+  try {
+    const discovered = await discoverMetaAccounts(longLivedToken, ver);
+    pages = discovered.pages;
+  } catch {
+    pages = [];
+  }
+
+  const currentPageId = config.metaApi.pageId.trim();
+  const matchedExistingPage = currentPageId
+    ? pages.find((page) => page.pageId === currentPageId) ?? null
+    : null;
+  const autoSelectedPage =
+    pages.length === 1 ? pages[0] : matchedExistingPage;
+
+  const metaPatch: NonNullable<UpdateAutoPostSettingsPatch['metaApi']> = {
+    appId,
+    appSecret,
+    graphApiVersion: ver,
+    accessToken: longLivedToken,
+    tokenType: pages.length > 0 ? 'page_permanent' : 'long_lived',
+    tokenExpiresAt: longLivedTokenExpiresAt,
+  };
+
+  if (autoSelectedPage) {
+    const permanentPageToken = getCachedPageToken(autoSelectedPage.pageId);
+    metaPatch.pageId = autoSelectedPage.pageId;
+    metaPatch.pageName = autoSelectedPage.pageName;
+    if (permanentPageToken) {
+      metaPatch.pageAccessToken = permanentPageToken;
+    }
+    metaPatch.igUserId = autoSelectedPage.igUserId ?? '';
+    metaPatch.igUsername = autoSelectedPage.igUsername ?? null;
+    metaPatch.enabled = true;
+  }
+
+  const settings = updateAutoPostSettings({ metaApi: metaPatch });
+  const capabilities = detectAutoPostCapabilities();
+
+  return {
+    ok: true,
+    longLivedTokenExpiresAt,
+    expiresInDays,
+    pages,
+    autoSelectedPage,
+    settings,
+    capabilities,
+  };
+}
+
+export function createMetaOAuthUrl(origin: string): string {
+  const config = getInternalAutoPostConfig();
+  const appId = config.metaApi.appId.trim();
+  const appSecret = config.metaApi.appSecret.trim();
+
+  if (!appId || !appSecret) {
+    throw new Error(
+      'Meta App ID dan App Secret belum dikonfigurasi di pengaturan Auto-Post.'
+    );
+  }
+
+  const ver = normalizeGraphVersion(config.metaApi.graphApiVersion);
+  const redirectUri = resolveMetaRedirectUri(config.metaApi.redirectUri, origin);
+
+  const authUrl = new URL(`${META_OAUTH_DIALOG_BASE}/${ver}/dialog/oauth`);
+  authUrl.searchParams.set('client_id', appId);
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('scope', META_OAUTH_SCOPES.join(','));
+
+  return authUrl.toString();
+}
+
+export async function exchangeMetaOAuthCode(
+  code: string,
+  origin: string
+): Promise<MetaTokenExchangeResult> {
+  const cleanCode = code.trim();
+  if (!cleanCode) {
+    throw new Error('Parameter code dari Meta OAuth tidak valid.');
+  }
+
+  const config = getInternalAutoPostConfig();
+  const appId = config.metaApi.appId.trim();
+  const appSecret = config.metaApi.appSecret.trim();
+
+  if (!appId || !appSecret) {
+    throw new Error(
+      'Meta App ID dan App Secret belum dikonfigurasi di pengaturan Auto-Post.'
+    );
+  }
+
+  const ver = normalizeGraphVersion(config.metaApi.graphApiVersion);
+  const redirectUri = resolveMetaRedirectUri(config.metaApi.redirectUri, origin);
+
+  const tokenUrl = new URL(`${META_GRAPH_BASE}/${ver}/oauth/access_token`);
+  tokenUrl.searchParams.set('client_id', appId);
+  tokenUrl.searchParams.set('client_secret', appSecret);
+  tokenUrl.searchParams.set('redirect_uri', redirectUri);
+  tokenUrl.searchParams.set('code', cleanCode);
+
+  const tokenRes = await fetch(tokenUrl.toString(), { method: 'GET' });
+  const tokenPayload = (await parseJsonSafe(tokenRes)) as {
+    access_token?: string;
+  } & MetaGraphErrorPayload;
+
+  if (!tokenRes.ok || tokenPayload.error) {
+    const detail = extractMetaErrorMessage(
+      tokenPayload,
+      `HTTP ${tokenRes.status}`
+    );
+    throw new Error(`Gagal menukar kode Meta OAuth menjadi token: ${detail}`);
+  }
+
+  const shortLivedToken =
+    typeof tokenPayload.access_token === 'string'
+      ? tokenPayload.access_token.trim()
+      : '';
+  if (!shortLivedToken) {
+    throw new Error(
+      'Meta OAuth tidak mengembalikan access_token yang valid.'
+    );
+  }
+
+  return exchangeShortLivedMetaToken({
+    appId,
+    appSecret,
+    shortLivedToken,
+    graphApiVersion: ver,
+  });
+}
+
+interface DebugTokenPayload {
+  data?: {
+    is_valid?: boolean;
+    type?: string;
+    expires_at?: number;
+    scopes?: string[];
+  };
+}
+
+async function fetchGrantedPermissionsViaMePermissions(
+  ver: string,
+  token: string
+): Promise<string[]> {
+  if (!token) return [];
+  try {
+    const permUrl = new URL(`${META_GRAPH_BASE}/${ver}/me/permissions`);
+    permUrl.searchParams.set('access_token', token);
+    const res = await fetch(permUrl.toString(), { method: 'GET' });
+    const payload = (await parseJsonSafe(res)) as {
+      data?: Array<{ permission?: string; status?: string }>;
+    } & MetaGraphErrorPayload;
+
+    if (res.ok && !payload.error && Array.isArray(payload.data)) {
+      return payload.data
+        .filter(
+          (entry) =>
+            entry &&
+            entry.status === 'granted' &&
+            typeof entry.permission === 'string' &&
+            entry.permission.trim().length > 0
+        )
+        .map((entry) => String(entry.permission).trim());
+    }
+  } catch {
+    // Best-effort permissions lookup
+  }
+  return [];
+}
+
+export async function testMetaConnection(): Promise<MetaConnectionTestResult> {
+  const config = getInternalAutoPostConfig();
+  const ver = normalizeGraphVersion(config.metaApi.graphApiVersion);
+  const checkedAt = new Date().toISOString();
+
+  const appId = config.metaApi.appId.trim();
+  const appSecret = config.metaApi.appSecret.trim();
+  const userToken = config.metaApi.accessToken.trim();
+  const storedPageToken = config.metaApi.pageAccessToken.trim();
+  const pageToken = storedPageToken || userToken;
+  const igToken = userToken || storedPageToken;
+  const pageId = config.metaApi.pageId.trim();
+  const igUserId = config.metaApi.igUserId.trim();
+
+  const checkFbPage = async (): Promise<MetaConnectionTestResult['fbPage']> => {
+    if (!pageId) {
+      return {
+        ok: false,
+        pageId: '',
+        pageName: null,
+        error: 'Facebook Page ID belum diisi.',
+      };
+    }
+    if (!pageToken) {
+      return {
+        ok: false,
+        pageId,
+        pageName: config.metaApi.pageName,
+        error: 'Access Token Meta belum diisi.',
+      };
+    }
+
+    try {
+      const pageUrl = new URL(
+        `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(pageId)}`
+      );
+      pageUrl.searchParams.set(
+        'fields',
+        'id,name,instagram_business_account{id,username}'
+      );
+      pageUrl.searchParams.set('access_token', pageToken);
+
+      const res = await fetch(pageUrl.toString(), { method: 'GET' });
+      const payload = (await parseJsonSafe(res)) as RawMetaPageNode &
+        MetaGraphErrorPayload;
+
+      if (res.ok && !payload.error && typeof payload.id === 'string' && payload.id.trim()) {
+        const resolvedName =
+          typeof payload.name === 'string' && payload.name.trim()
+            ? payload.name.trim()
+            : config.metaApi.pageName;
+        return {
+          ok: true,
+          pageId: payload.id.trim(),
+          pageName: resolvedName,
+          error: null,
+        };
+      }
+
+      return {
+        ok: false,
+        pageId,
+        pageName: config.metaApi.pageName,
+        error: extractMetaErrorMessage(payload, `HTTP ${res.status}`),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        pageId,
+        pageName: config.metaApi.pageName,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+
+  const checkIgAccount = async (): Promise<
+    MetaConnectionTestResult['igAccount']
+  > => {
+    if (!igUserId) {
+      return {
+        ok: false,
+        igUserId: '',
+        username: null,
+        mediaCount: null,
+        error: 'Instagram Business User ID belum diisi.',
+      };
+    }
+    if (!igToken) {
+      return {
+        ok: false,
+        igUserId,
+        username: config.metaApi.igUsername,
+        mediaCount: null,
+        error: 'Access Token Meta belum diisi.',
+      };
+    }
+
+    try {
+      const igUrl = new URL(
+        `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(igUserId)}`
+      );
+      igUrl.searchParams.set('fields', 'id,username,media_count');
+      igUrl.searchParams.set('access_token', igToken);
+
+      const res = await fetch(igUrl.toString(), { method: 'GET' });
+      const payload = (await parseJsonSafe(res)) as {
+        id?: string;
+        username?: string;
+        media_count?: number;
+      } & MetaGraphErrorPayload;
+
+      if (res.ok && !payload.error && typeof payload.id === 'string' && payload.id.trim()) {
+        const username =
+          typeof payload.username === 'string' && payload.username.trim()
+            ? payload.username.trim()
+            : config.metaApi.igUsername;
+        const mediaCount =
+          typeof payload.media_count === 'number' &&
+          Number.isFinite(payload.media_count)
+            ? payload.media_count
+            : null;
+        return {
+          ok: true,
+          igUserId: payload.id.trim(),
+          username,
+          mediaCount,
+          error: null,
+        };
+      }
+
+      return {
+        ok: false,
+        igUserId,
+        username: config.metaApi.igUsername,
+        mediaCount: null,
+        error: extractMetaErrorMessage(payload, `HTTP ${res.status}`),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        igUserId,
+        username: config.metaApi.igUsername,
+        mediaCount: null,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+
+  const checkPermissions = async (): Promise<
+    MetaConnectionTestResult['permissions']
+  > => {
+    let granted: string[] = [];
+    let tokenExpiresAt: string | null = config.metaApi.tokenExpiresAt;
+    let isNeverExpiring =
+      config.metaApi.tokenType === 'page_permanent' && Boolean(storedPageToken);
+
+    const tokenToInspect = storedPageToken || userToken;
+
+    if (appId && appSecret && tokenToInspect) {
+      try {
+        const debugUrl = new URL(`${META_GRAPH_BASE}/${ver}/debug_token`);
+        debugUrl.searchParams.set('input_token', tokenToInspect);
+        debugUrl.searchParams.set('access_token', `${appId}|${appSecret}`);
+
+        const res = await fetch(debugUrl.toString(), { method: 'GET' });
+        const payload = (await parseJsonSafe(res)) as DebugTokenPayload &
+          MetaGraphErrorPayload;
+
+        if (res.ok && !payload.error && payload.data) {
+          if (Array.isArray(payload.data.scopes)) {
+            granted = payload.data.scopes
+              .filter(
+                (scope): scope is string =>
+                  typeof scope === 'string' && scope.trim().length > 0
+              )
+              .map((scope) => scope.trim());
+          }
+
+          if (
+            typeof payload.data.expires_at === 'number' &&
+            Number.isFinite(payload.data.expires_at)
+          ) {
+            if (payload.data.expires_at === 0) {
+              isNeverExpiring = true;
+              tokenExpiresAt = null;
+            } else if (payload.data.expires_at > 0) {
+              isNeverExpiring = false;
+              tokenExpiresAt = new Date(
+                payload.data.expires_at * 1000
+              ).toISOString();
+            }
+          }
+        }
+      } catch {
+        // Fallback to /me/permissions below
+      }
+    }
+
+    if (granted.length === 0 && (userToken || storedPageToken)) {
+      granted = await fetchGrantedPermissionsViaMePermissions(
+        ver,
+        userToken || storedPageToken
+      );
+    }
+
+    const uniqueGranted = Array.from(new Set(granted));
+    const grantedSet = new Set(uniqueGranted);
+
+    const missingIg = META_REQUIRED_IG_PERMISSIONS.filter(
+      (perm) => !grantedSet.has(perm)
+    );
+    const missingFb = META_REQUIRED_FB_PERMISSIONS.filter(
+      (perm) => !grantedSet.has(perm)
+    );
+
+    return {
+      granted: uniqueGranted,
+      missingIg,
+      missingFb,
+      tokenExpiresAt,
+      isNeverExpiring,
+    };
+  };
+
+  const [fbPage, igAccount, permissions] = await Promise.all([
+    checkFbPage(),
+    checkIgAccount(),
+    checkPermissions(),
+  ]);
+
+  const ok =
+    (fbPage.ok || igAccount.ok) &&
+    (!pageId || fbPage.ok) &&
+    (!igUserId || igAccount.ok);
+
+  return {
+    ok,
+    checkedAt,
+    graphApiVersion: ver,
+    fbPage,
+    igAccount,
+    permissions,
+  };
 }
 
 export async function publishFacebookReelViaMetaApi(

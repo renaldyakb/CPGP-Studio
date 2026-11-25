@@ -5,7 +5,9 @@ import type {
   AutoPostJob,
   AutoPostMode,
   AutoPostSettings,
+  MetaConnectionTestResult,
   MetaDiscoveredPage,
+  MetaTokenExchangeResult,
 } from '@/types/autopost';
 import type { ContentPlannerItem, PlatformKey } from '@/types/planner';
 
@@ -26,6 +28,10 @@ export interface AutoPostSettingsPatch {
   };
   metaApi?: {
     enabled?: boolean;
+    appId?: string;
+    appSecret?: string;
+    clearAppSecret?: boolean;
+    redirectUri?: string;
     graphApiVersion?: string;
     accessToken?: string;
     clearAccessToken?: boolean;
@@ -79,8 +85,14 @@ const EMPTY_SETTINGS: AutoPostSettings = {
   },
   metaApi: {
     enabled: false,
+    appId: '',
+    appSecretConfigured: false,
+    redirectUri: 'http://localhost:5173/api/autopost/meta/callback',
     graphApiVersion: 'v25.0',
     accessTokenConfigured: false,
+    pageAccessTokenConfigured: false,
+    tokenType: 'unknown',
+    tokenExpiresAt: null,
     pageId: '',
     pageName: null,
     igUserId: '',
@@ -154,6 +166,13 @@ export interface UseAutoPostDataResult {
   openProfile: (platforms?: PlatformKey[]) => Promise<void>;
   closeProfile: () => Promise<void>;
   discoverMeta: (accessToken?: string) => Promise<MetaDiscoveredPage[] | null>;
+  exchangeMetaToken: (input: {
+    appId?: string;
+    appSecret?: string;
+    shortLivedToken: string;
+  }) => Promise<MetaTokenExchangeResult | null>;
+  testMetaConnection: () => Promise<MetaConnectionTestResult | null>;
+  getMetaAuthUrl: () => Promise<string | null>;
   disconnectMeta: () => Promise<void>;
   getYouTubeAuthUrl: () => Promise<string | null>;
   disconnectYouTube: () => Promise<void>;
@@ -485,6 +504,133 @@ export function useAutoPostData(
     [onToast, settings.metaApi.graphApiVersion]
   );
 
+  const exchangeMetaToken = useCallback(
+    async (input: {
+      appId?: string;
+      appSecret?: string;
+      shortLivedToken: string;
+    }): Promise<MetaTokenExchangeResult | null> => {
+      setBusyKey('meta-exchange');
+      try {
+        const res = await requestJson<MetaTokenExchangeResult>(
+          '/api/autopost/meta/exchange-token',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              appId: input.appId?.trim() || undefined,
+              appSecret: input.appSecret?.trim() || undefined,
+              shortLivedToken: input.shortLivedToken.trim(),
+              graphApiVersion: settings.metaApi.graphApiVersion,
+            }),
+          }
+        );
+
+        if (res.settings) setSettings(res.settings);
+        if (res.capabilities) {
+          setCapabilities(res.capabilities);
+          if (res.capabilities.browserSession) {
+            setBrowserSession(res.capabilities.browserSession);
+          }
+        }
+
+        const pageCount = Array.isArray(res.pages) ? res.pages.length : 0;
+        if (res.autoSelectedPage) {
+          onToast?.(
+            `Token ditukar ke Long-Lived dan Page "${res.autoSelectedPage.pageName}" siap dipakai.`,
+            'success'
+          );
+        } else if (pageCount > 0) {
+          onToast?.(
+            `Token ditukar ke Long-Lived. ${pageCount} Page ditemukan, silakan pilih satu.`,
+            'success'
+          );
+        } else {
+          onToast?.(
+            'Token ditukar ke Long-Lived, namun belum ada Facebook Page ditemukan.',
+            'info'
+          );
+        }
+
+        return res;
+      } catch (error) {
+        onToast?.(
+          error instanceof Error
+            ? error.message
+            : 'Gagal menukar token ke Long-Lived.',
+          'error'
+        );
+        return null;
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [onToast, settings.metaApi.graphApiVersion]
+  );
+
+  const testMetaConnection = useCallback(async (): Promise<MetaConnectionTestResult | null> => {
+    setBusyKey('meta-test');
+    try {
+      const res = await requestJson<MetaConnectionTestResult>(
+        '/api/autopost/meta/test-connection',
+        { method: 'POST' }
+      );
+
+      if (res.fbPage.ok && res.igAccount.ok) {
+        onToast?.(
+          'Tes koneksi berhasil: Facebook Page dan Instagram Business aktif.',
+          'success'
+        );
+      } else if (res.fbPage.ok) {
+        onToast?.(
+          'Facebook Page terhubung, namun Instagram Business belum siap.',
+          'info'
+        );
+      } else if (res.igAccount.ok) {
+        onToast?.(
+          'Instagram Business terhubung, namun Facebook Page gagal diperiksa.',
+          'info'
+        );
+      } else {
+        onToast?.(
+          'Tes koneksi Meta belum berhasil. Periksa detail diagnostik.',
+          'error'
+        );
+      }
+
+      return res;
+    } catch (error) {
+      onToast?.(
+        error instanceof Error
+          ? error.message
+          : 'Gagal menjalankan tes koneksi Meta.',
+        'error'
+      );
+      return null;
+    } finally {
+      setBusyKey(null);
+    }
+  }, [onToast]);
+
+  const getMetaAuthUrl = useCallback(async (): Promise<string | null> => {
+    setBusyKey('meta-auth');
+    try {
+      const res = await requestJson<{ ok?: boolean; url?: string; authUrl?: string }>(
+        '/api/autopost/meta/auth-url'
+      );
+      const url = res.url || res.authUrl || null;
+      if (!url) throw new Error('URL OAuth Meta tidak tersedia.');
+      return url;
+    } catch (error) {
+      onToast?.(
+        error instanceof Error ? error.message : 'Gagal membuka OAuth Meta.',
+        'error'
+      );
+      return null;
+    } finally {
+      setBusyKey(null);
+    }
+  }, [onToast]);
+
   const disconnectMeta = useCallback(async () => {
     setBusyKey('meta-disconnect');
     try {
@@ -561,6 +707,9 @@ export function useAutoPostData(
     openProfile,
     closeProfile,
     discoverMeta,
+    exchangeMetaToken,
+    testMetaConnection,
+    getMetaAuthUrl,
     disconnectMeta,
     getYouTubeAuthUrl,
     disconnectYouTube,

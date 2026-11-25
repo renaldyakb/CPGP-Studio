@@ -3,6 +3,7 @@ import path from 'node:path';
 import type {
   AutoPostBrowserConfig,
   AutoPostCapabilities,
+  AutoPostMetaApiConfig,
   AutoPostMode,
   AutoPostSettings,
 } from '../../src/types/autopost.ts';
@@ -83,11 +84,18 @@ export interface InternalAutoPostYouTubeApiConfig {
   connectedAt: string | null;
 }
 
+export type MetaTokenType = AutoPostMetaApiConfig['tokenType'];
+
 export interface InternalAutoPostMetaApiConfig {
   enabled: boolean;
+  appId: string;
+  appSecret: string;
+  redirectUri: string;
   graphApiVersion: string;
   accessToken: string;
   pageAccessToken: string;
+  tokenType: MetaTokenType;
+  tokenExpiresAt: string | null;
   pageId: string;
   pageName: string | null;
   igUserId: string;
@@ -117,11 +125,17 @@ export interface UpdateAutoPostSettingsPatch {
   };
   metaApi?: {
     enabled?: boolean;
+    appId?: string;
+    appSecret?: string;
+    clearAppSecret?: boolean;
+    redirectUri?: string;
     graphApiVersion?: string;
     accessToken?: string;
     clearAccessToken?: boolean;
     pageAccessToken?: string;
     clearPageAccessToken?: boolean;
+    tokenType?: MetaTokenType;
+    tokenExpiresAt?: string | null;
     pageId?: string;
     pageName?: string | null;
     igUserId?: string;
@@ -198,6 +212,21 @@ function hasAnyExistingPath(paths: string[]): boolean {
   });
 }
 
+function normalizeMetaTokenType(
+  raw: unknown,
+  fallback: MetaTokenType = 'unknown'
+): MetaTokenType {
+  if (
+    raw === 'short_lived' ||
+    raw === 'long_lived' ||
+    raw === 'page_permanent' ||
+    raw === 'unknown'
+  ) {
+    return raw;
+  }
+  return fallback;
+}
+
 function createDefaultInternalConfig(
   workspaceId?: string
 ): InternalAutoPostConfig {
@@ -230,9 +259,14 @@ function createDefaultInternalConfig(
     },
     metaApi: {
       enabled: false,
+      appId: '',
+      appSecret: '',
+      redirectUri: 'http://localhost:5173/api/autopost/meta/callback',
       graphApiVersion: 'v25.0',
       accessToken: '',
       pageAccessToken: '',
+      tokenType: 'unknown',
+      tokenExpiresAt: null,
       pageId: '',
       pageName: null,
       igUserId: '',
@@ -320,6 +354,13 @@ function normalizeInternalConfig(
     },
     metaApi: {
       enabled: Boolean(rawMeta.enabled),
+      appId: typeof rawMeta.appId === 'string' ? rawMeta.appId.trim() : '',
+      appSecret:
+        typeof rawMeta.appSecret === 'string' ? rawMeta.appSecret.trim() : '',
+      redirectUri:
+        typeof rawMeta.redirectUri === 'string' && rawMeta.redirectUri.trim()
+          ? rawMeta.redirectUri.trim()
+          : defaults.metaApi.redirectUri,
       graphApiVersion:
         typeof rawMeta.graphApiVersion === 'string' &&
         rawMeta.graphApiVersion.trim()
@@ -333,6 +374,15 @@ function normalizeInternalConfig(
         typeof rawMeta.pageAccessToken === 'string'
           ? rawMeta.pageAccessToken.trim()
           : '',
+      tokenType: normalizeMetaTokenType(
+        rawMeta.tokenType,
+        defaults.metaApi.tokenType
+      ),
+      tokenExpiresAt:
+        typeof rawMeta.tokenExpiresAt === 'string' &&
+        rawMeta.tokenExpiresAt.trim()
+          ? rawMeta.tokenExpiresAt.trim()
+          : null,
       pageId: typeof rawMeta.pageId === 'string' ? rawMeta.pageId.trim() : '',
       pageName:
         typeof rawMeta.pageName === 'string' && rawMeta.pageName.trim()
@@ -423,11 +473,17 @@ export function toPublicAutoPostSettings(
     },
     metaApi: {
       enabled: config.metaApi.enabled,
+      appId: config.metaApi.appId,
+      appSecretConfigured: Boolean(config.metaApi.appSecret.trim()),
+      redirectUri: config.metaApi.redirectUri,
       graphApiVersion: config.metaApi.graphApiVersion,
       accessTokenConfigured: Boolean(
         config.metaApi.accessToken.trim() ||
           config.metaApi.pageAccessToken.trim()
       ),
+      pageAccessTokenConfigured: Boolean(config.metaApi.pageAccessToken.trim()),
+      tokenType: config.metaApi.tokenType,
+      tokenExpiresAt: config.metaApi.tokenExpiresAt,
       pageId: config.metaApi.pageId,
       pageName: config.metaApi.pageName,
       igUserId: config.metaApi.igUserId,
@@ -501,6 +557,16 @@ export function updateAutoPostSettings(
         : current.youtubeApi.redirectUri,
   };
 
+  let nextMetaAppSecret = current.metaApi.appSecret;
+  if (patch.metaApi?.clearAppSecret) {
+    nextMetaAppSecret = '';
+  } else if (
+    typeof patch.metaApi?.appSecret === 'string' &&
+    patch.metaApi.appSecret.trim()
+  ) {
+    nextMetaAppSecret = patch.metaApi.appSecret.trim();
+  }
+
   let nextMetaAccessToken = current.metaApi.accessToken;
   let tokenUpdated = false;
   if (patch.metaApi?.clearAccessToken) {
@@ -539,6 +605,22 @@ export function updateAutoPostSettings(
     nextMetaAccessToken.trim() || nextMetaPageAccessToken.trim()
   );
 
+  const nextMetaTokenType: MetaTokenType =
+    patch.metaApi?.tokenType !== undefined
+      ? normalizeMetaTokenType(patch.metaApi.tokenType, current.metaApi.tokenType)
+      : hasAnyMetaToken
+        ? current.metaApi.tokenType
+        : 'unknown';
+
+  const nextMetaTokenExpiresAt: string | null =
+    patch.metaApi?.tokenExpiresAt === null
+      ? null
+      : typeof patch.metaApi?.tokenExpiresAt === 'string'
+        ? patch.metaApi.tokenExpiresAt.trim() || null
+        : hasAnyMetaToken
+          ? current.metaApi.tokenExpiresAt
+          : null;
+
   const nextMetaConnectedAt = hasAnyMetaToken
     ? tokenUpdated
       ? new Date().toISOString()
@@ -551,6 +633,16 @@ export function updateAutoPostSettings(
       typeof patch.metaApi?.enabled === 'boolean'
         ? patch.metaApi.enabled
         : current.metaApi.enabled,
+    appId:
+      typeof patch.metaApi?.appId === 'string'
+        ? patch.metaApi.appId.trim()
+        : current.metaApi.appId,
+    appSecret: nextMetaAppSecret,
+    redirectUri:
+      typeof patch.metaApi?.redirectUri === 'string' &&
+      patch.metaApi.redirectUri.trim()
+        ? patch.metaApi.redirectUri.trim()
+        : current.metaApi.redirectUri,
     graphApiVersion:
       typeof patch.metaApi?.graphApiVersion === 'string' &&
       patch.metaApi.graphApiVersion.trim()
@@ -558,6 +650,8 @@ export function updateAutoPostSettings(
         : current.metaApi.graphApiVersion,
     accessToken: nextMetaAccessToken,
     pageAccessToken: nextMetaPageAccessToken,
+    tokenType: nextMetaTokenType,
+    tokenExpiresAt: nextMetaTokenExpiresAt,
     pageId: nextMetaPageId,
     pageName:
       patch.metaApi?.pageName === null
@@ -658,6 +752,8 @@ export function clearMetaConfig(): AutoPostSettings {
       enabled: false,
       accessToken: '',
       pageAccessToken: '',
+      tokenType: 'unknown',
+      tokenExpiresAt: null,
       pageId: '',
       pageName: null,
       igUserId: '',

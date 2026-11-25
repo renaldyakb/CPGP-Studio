@@ -41,8 +41,12 @@ import {
 } from './autopost/config.ts';
 import { resolveUploadVideoForItem } from './autopost/contentHelpers.ts';
 import {
+  createMetaOAuthUrl,
   discoverMetaAccounts,
+  exchangeMetaOAuthCode,
+  exchangeShortLivedMetaToken,
   getCachedPageToken,
+  testMetaConnection,
 } from './autopost/metaApi.ts';
 import { createAutoPostQueue } from './autopost/queue.ts';
 import {
@@ -183,12 +187,17 @@ function renderOAuthResultHtml(params: {
   ok: boolean;
   title: string;
   message: string;
+  eventType?: 'youtube-oauth-result' | 'meta-oauth-result';
   channelTitle?: string | null;
+  pageName?: string | null;
+  igUsername?: string | null;
 }): string {
   const payload = JSON.stringify({
-    type: 'youtube-oauth-result',
+    type: params.eventType ?? 'youtube-oauth-result',
     ok: params.ok,
     channelTitle: params.channelTitle ?? null,
+    pageName: params.pageName ?? null,
+    igUsername: params.igUsername ?? null,
     message: params.message,
   }).replace(/</g, '\\u003c');
 
@@ -1796,6 +1805,150 @@ export function createApiRouter(): Express {
           error: 'Gagal memutuskan koneksi YouTube API',
           details: error instanceof Error ? error.message : String(error),
         });
+      }
+    }
+  );
+
+  // GET /api/autopost/meta/auth-url
+  app.get('/api/autopost/meta/auth-url', (req: Request, res: Response) => {
+    try {
+      const origin = getRequestOrigin(req);
+      const authUrl = createMetaOAuthUrl(origin);
+      res.json({ ok: true, url: authUrl, authUrl });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const statusCode = message.includes('belum dikonfigurasi') ? 400 : 500;
+      res.status(statusCode).json({ error: message });
+    }
+  });
+
+  // GET /api/autopost/meta/callback
+  app.get(
+    '/api/autopost/meta/callback',
+    async (req: Request, res: Response) => {
+      const oauthError =
+        typeof req.query.error === 'string' ? req.query.error : null;
+      const oauthErrorDescription =
+        typeof req.query.error_description === 'string'
+          ? req.query.error_description
+          : typeof req.query.error_reason === 'string'
+            ? req.query.error_reason
+            : null;
+      const code = typeof req.query.code === 'string' ? req.query.code : null;
+
+      if (oauthError) {
+        const detail = oauthErrorDescription
+          ? `${oauthError} (${oauthErrorDescription})`
+          : oauthError;
+        res.status(400).type('html').send(
+          renderOAuthResultHtml({
+            eventType: 'meta-oauth-result',
+            ok: false,
+            title: 'Otorisasi Meta Dibatalkan',
+            message: `Meta OAuth mengembalikan error: ${detail}`,
+          })
+        );
+        return;
+      }
+
+      if (!code) {
+        res.status(400).type('html').send(
+          renderOAuthResultHtml({
+            eventType: 'meta-oauth-result',
+            ok: false,
+            title: 'Kode OAuth Tidak Ditemukan',
+            message: 'Parameter code dari Meta OAuth tidak tersedia.',
+          })
+        );
+        return;
+      }
+
+      try {
+        const origin = getRequestOrigin(req);
+        const result = await exchangeMetaOAuthCode(code, origin);
+        const selected = result.autoSelectedPage;
+        const targetLabel = selected
+          ? selected.igUsername
+            ? `Page "${selected.pageName}" dan Instagram @${selected.igUsername} berhasil terhubung.`
+            : `Page "${selected.pageName}" berhasil terhubung.`
+          : result.pages.length > 1
+            ? `${result.pages.length} Facebook Page ditemukan. Pilih Page tujuan di pengaturan Meta API.`
+            : 'Token Long-Lived Meta Graph API berhasil disimpan.';
+
+        res.status(200).type('html').send(
+          renderOAuthResultHtml({
+            eventType: 'meta-oauth-result',
+            ok: true,
+            title: 'Meta Graph API Terhubung',
+            message: `${targetLabel} Tab ini akan tertutup otomatis.`,
+            pageName: selected?.pageName ?? null,
+            igUsername: selected?.igUsername ?? null,
+          })
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.status(500).type('html').send(
+          renderOAuthResultHtml({
+            eventType: 'meta-oauth-result',
+            ok: false,
+            title: 'Gagal Menghubungkan Meta Graph API',
+            message,
+          })
+        );
+      }
+    }
+  );
+
+  // POST /api/autopost/meta/exchange-token
+  app.post(
+    '/api/autopost/meta/exchange-token',
+    async (req: Request, res: Response) => {
+      try {
+        const appId =
+          typeof req.body?.appId === 'string' ? req.body.appId : undefined;
+        const appSecret =
+          typeof req.body?.appSecret === 'string'
+            ? req.body.appSecret
+            : undefined;
+        const shortLivedToken =
+          typeof req.body?.shortLivedToken === 'string'
+            ? req.body.shortLivedToken
+            : typeof req.body?.accessToken === 'string'
+              ? req.body.accessToken
+              : '';
+        const graphApiVersion =
+          typeof req.body?.graphApiVersion === 'string'
+            ? req.body.graphApiVersion
+            : undefined;
+
+        const result = await exchangeShortLivedMetaToken({
+          appId,
+          appSecret,
+          shortLivedToken,
+          graphApiVersion,
+        });
+        res.json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const statusCode =
+          message.includes('belum diisi') || message.includes('wajib')
+            ? 400
+            : 500;
+        res.status(statusCode).json({ error: message });
+      }
+    }
+  );
+
+  // POST /api/autopost/meta/test-connection
+  app.post(
+    '/api/autopost/meta/test-connection',
+    async (_req: Request, res: Response) => {
+      try {
+        const result = await testMetaConnection();
+        res.json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.status(500).json({ error: message });
       }
     }
   );

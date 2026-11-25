@@ -52,7 +52,7 @@ jobs:
 
           BUNDLE_DIR="release-bundle/CPGP-Studio-${TAG_NAME}"
           mkdir -p "${BUNDLE_DIR}/data" "${BUNDLE_DIR}/src"
-          cp -r dist server shared bin "${BUNDLE_DIR}/"
+          cp -r dist server shared bin docs "${BUNDLE_DIR}/"
           cp -r src/types "${BUNDLE_DIR}/src/"
           cp package.json package-lock.json start-planner.sh start-planner.bat README.md CHANGELOG.md "${BUNDLE_DIR}/"
           touch "${BUNDLE_DIR}/data/.gitkeep"

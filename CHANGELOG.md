@@ -4,6 +4,21 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.1.1] - 2026-11-25 (Meta API 8-Step Flow, Long-Lived Token Exchange & Connection Test)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Otomatisasi Tukar Short-Lived -> Long-Lived & Permanent Page Token (`POST /api/autopost/meta/exchange-token`)**:
+  - Menyimpan `App ID` & `App Secret` secara aman di backend (`data/workspaces/<id>/autopost-config.json`, tidak pernah diekspos ke JavaScript frontend).
+  - Menukar token `EAA...` dari Graph API Explorer menjadi **Long-Lived User Token (~60 hari)** via `fb_exchange_token`, lalu otomatis mengambil **Permanent `PAGE_ACCESS_TOKEN`**, `PAGE_ID`, dan `IG_USER_ID` (termasuk fallback `GET /{PAGE_ID}?fields=instagram_business_account`).
+- **Login OAuth Meta 1-Klik (`GET /api/autopost/meta/auth-url` & `/callback`)**:
+  - Otorisasi langsung dengan 7 permission resmi (`instagram_basic`, `instagram_content_publish`, `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `pages_manage_metadata`, `publish_video`).
+- **Diagnostik Tes Koneksi FB & IG (`POST /api/autopost/meta/test-connection`)**:
+  - Memverifikasi Facebook Page, akun Instagram Business (`@username` & jumlah post), masa berlaku token (`Expires: Never` vs tanggal expired), serta daftar permission yang sudah aktif atau masih kurang sebelum Auto-Post dijalankan.
+- **Dokumentasi Tutorial Lengkap (`docs/META_API_GUIDE.md`) & Panduan 8 Langkah di UI (`MetaApiPage.tsx`)**:
+  - Panduan terstruktur Langkah 0 hingga Langkah 8 lengkap dengan tombol 1-klik `Salin daftar permission`, tabel ringkasan variabel, dan troubleshooting.
+
+---
+
 ## [v2.1.0] - 2026-11-25 (Minimalist UI Polish, `/watermark` Route, `Ctrl+K` Command Palette & Date Pickers)
 
 ### Fitur Baru & Peningkatan (Added / Improved)

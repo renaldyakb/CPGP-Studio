@@ -70,6 +70,7 @@ Setiap tampilan memiliki rute URL nyata dan tidak pernah ter-reset saat terjadi 
 - Pemicu upload manual satu per satu atau sekaligus ke **YouTube Shorts, TikTok, Instagram Reels, dan Facebook Reels**.
 - Pilihan **Mode Tinjau (Aman)** yang berhenti sebelum tombol Publish terakhir, atau **Mode Langsung Publish**.
 - Mendukung **Meta Graph API (`rupload.facebook.com`)** untuk upload file lokal FB & IG Reels tanpa browser, **YouTube Data API v3 (`googleapis`)**, serta **Profil Browser Lokal Persisten (`patchright`)**.
+- Panduan lengkap konfigurasi 8 langkah: [Panduan Lengkap Menyambungkan Meta API (Facebook & Instagram Reels)](./docs/META_API_GUIDE.md).
 
 ---
 

@@ -38,8 +38,14 @@ export interface MetaDiscoveredPage {
 
 export interface AutoPostMetaApiConfig {
   enabled: boolean;
+  appId: string;
+  appSecretConfigured: boolean;
+  redirectUri: string;
   graphApiVersion: string;
   accessTokenConfigured: boolean;
+  pageAccessTokenConfigured: boolean;
+  tokenType: 'short_lived' | 'long_lived' | 'page_permanent' | 'unknown';
+  tokenExpiresAt: string | null;
   pageId: string;
   pageName: string | null;
   igUserId: string;
@@ -47,6 +53,42 @@ export interface AutoPostMetaApiConfig {
   shareToFeed: boolean;
   igThumbOffsetMs: number;
   connectedAt: string | null;
+}
+
+export interface MetaTokenExchangeResult {
+  ok: boolean;
+  longLivedTokenExpiresAt: string | null;
+  expiresInDays: number | null;
+  pages: MetaDiscoveredPage[];
+  autoSelectedPage: MetaDiscoveredPage | null;
+  settings: AutoPostSettings;
+  capabilities: AutoPostCapabilities;
+}
+
+export interface MetaConnectionTestResult {
+  ok: boolean;
+  checkedAt: string;
+  graphApiVersion: string;
+  fbPage: {
+    ok: boolean;
+    pageId: string;
+    pageName: string | null;
+    error: string | null;
+  };
+  igAccount: {
+    ok: boolean;
+    igUserId: string;
+    username: string | null;
+    mediaCount: number | null;
+    error: string | null;
+  };
+  permissions: {
+    granted: string[];
+    missingIg: string[];
+    missingFb: string[];
+    tokenExpiresAt: string | null;
+    isNeverExpiring: boolean;
+  };
 }
 
 export interface AutoPostSettings {
