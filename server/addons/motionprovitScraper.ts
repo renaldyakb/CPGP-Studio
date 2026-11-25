@@ -774,36 +774,50 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
       );
     }
 
-    // Wait for job cards to render on /app/jobs
-    await page
-      .locator('a[href*="/app/jobs/"]')
-      .first()
-      .waitFor({ state: 'visible', timeout: 15_000 })
-      .catch(() => {});
+    const PER_PAGE = 48;
+    const MAX_PAGES = 20;
+    const mergedMap = new Map<string, MotionProvitJobSummary>();
+    let totalRemoteCount = 0;
+    let totalPages = 1;
 
-    // Scroll progressively to trigger lazy-loaded / infinite-scroll cards (max 6 passes)
-    let prevLinkCount = 0;
-    for (let pass = 0; pass < 6; pass += 1) {
-      const currCount = await page
-        .locator('a[href*="/app/jobs/"]')
-        .count()
-        .catch(() => 0);
-      if (pass > 0 && currCount <= prevLinkCount) {
-        break;
-      }
-      prevLinkCount = currCount;
-      await page.evaluate(() => {
-        window.scrollTo(0, document.body.scrollHeight);
+    for (let currentPage = 1; currentPage <= Math.min(totalPages, MAX_PAGES); currentPage += 1) {
+      const targetUrl = `${current.baseUrl}/app/jobs?hal=${currentPage}&per=${PER_PAGE}`;
+      await page.goto(targetUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60_000,
       });
-      await page.waitForTimeout(700);
-    }
-    await page.evaluate(() => window.scrollTo(0, 0));
 
-    // DOM extraction (100% inline inside page.evaluate, zero inner helper functions)
-    const domJobsRaw = await page.evaluate((baseUrl) => {
-      const byId = new Map<
-        string,
-        {
+      await page
+        .locator('article, a[href*="/app/jobs/"]')
+        .first()
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .catch(() => {});
+      await page.waitForTimeout(800);
+
+      // Extract exact cards & pagination metadata from this page (100% inline, zero inner functions)
+      const pageData = await page.evaluate((baseUrl) => {
+        const nav = document.querySelector(
+          'nav[aria-label="Halaman daftar render"]'
+        );
+        const navText = (nav?.textContent ?? '').replace(/\s+/g, ' ').trim();
+        const totalMatch = navText.match(/dari\s+(\d+)\s+render/i);
+        const parsedTotal = totalMatch?.[1] ? Number(totalMatch[1]) : 0;
+
+        let maxPageLink = 1;
+        if (nav) {
+          const pageLinks = Array.from(
+            nav.querySelectorAll<HTMLAnchorElement>('a[href*="hal="]')
+          );
+          for (const a of pageLinks) {
+            const m = (a.getAttribute('href') ?? '').match(/[?&]hal=(\d+)/);
+            if (m?.[1]) {
+              const n = Number(m[1]);
+              if (n > maxPageLink) maxPageLink = n;
+            }
+          }
+        }
+
+        const items: Array<{
           id: string;
           shortId: string;
           title: string;
@@ -814,166 +828,174 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
           createdAtText: string;
           thumbnailUrl: string | null;
           detailUrl: string;
-        }
-      >();
+          videoUrl: string | null;
+          coverUrl: string | null;
+        }> = [];
+        const seenIds = new Set<string>();
 
-      const links = Array.from(
-        document.querySelectorAll<HTMLAnchorElement>('a[href*="/app/jobs/"]')
+        const articles = Array.from(document.querySelectorAll('article'));
+        const cards: Element[] =
+          articles.length > 0
+            ? articles
+            : Array.from(
+                document.querySelectorAll<HTMLAnchorElement>(
+                  'a[href*="/app/jobs/"]'
+                )
+              )
+                .map((a) => a.closest('li') ?? a.parentElement ?? a)
+                .filter(Boolean);
+
+        for (const card of cards) {
+          const detailLink =
+            card.querySelector<HTMLAnchorElement>('a[href*="/app/jobs/"]') ??
+            card.querySelector<HTMLAnchorElement>('a[href*="/api/jobs/"]');
+          const href = detailLink?.getAttribute('href') ?? '';
+          const idMatch =
+            href.match(/\/app\/jobs\/([^/?#]+)/) ??
+            href.match(/\/api\/jobs\/([^/?#]+)/);
+          if (!idMatch?.[1]) continue;
+          const jobId = decodeURIComponent(idMatch[1]).trim();
+          if (!jobId || seenIds.has(jobId)) continue;
+          seenIds.add(jobId);
+
+          const rawText = (card.textContent ?? '').replace(/\s+/g, ' ').trim();
+          const uuidFirstPart = jobId.split('-')[0];
+          const shortId =
+            uuidFirstPart && uuidFirstPart.length >= 6
+              ? uuidFirstPart.slice(0, 8).toLowerCase()
+              : jobId.slice(0, 8).toLowerCase();
+
+          // Exact title from <h2> inside <article>
+          const h2Text = (
+            card.querySelector('h2, h3, h1')?.textContent ?? ''
+          ).trim();
+          const title = h2Text || `Video #${shortId}`;
+
+          // Status badge
+          let statusText = 'Selesai';
+          if (/\bgagal\b|\bfailed\b/i.test(rawText)) {
+            statusText = 'Gagal';
+          } else if (/\bdiproses\b|\bprocessing\b|\brendering\b/i.test(rawText)) {
+            statusText = 'Diproses';
+          } else if (/\bselesai\b|\bcompleted\b/i.test(rawText)) {
+            statusText = 'Selesai';
+          }
+
+          // Dynamic style badge (first rounded-full badge pill before status badge)
+          let style = 'MotionProvit';
+          const pillSpans = Array.from(
+            card.querySelectorAll<HTMLElement>('span.rounded-full, span[class*="rounded-full"]')
+          );
+          for (const pill of pillSpans) {
+            const pText = (pill.textContent ?? '').replace(/\s+/g, ' ').trim();
+            if (!pText || pText.length > 48) continue;
+            if (/^(?:selesai|diproses|gagal|completed|processing|failed)$/i.test(pText)) {
+              continue;
+            }
+            style = pText;
+            break;
+          }
+
+          // Metadata line: "9:16 · 79 detik · 25 Nov 2026, 14.06"
+          const ratioMatch = rawText.match(/\b(\d{1,2}:\d{1,2})\b/);
+          const aspectRatio = ratioMatch?.[1] ?? '9:16';
+
+          const durMatch = rawText.match(/(\d+)\s*(?:detik|sec|s\b)/i);
+          const durationSec = durMatch?.[1] ? Number(durMatch[1]) : null;
+
+          const dateMatch = rawText.match(
+            /\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}(?:,\s*\d{1,2}[.:]\d{2})?/
+          );
+          const createdAtText = dateMatch?.[0] ?? '';
+
+          const img = card.querySelector<HTMLImageElement>('img');
+          const imgSrc = img?.getAttribute('src') || img?.currentSrc || null;
+          const thumbnailUrl = !imgSrc
+            ? `${baseUrl}/api/jobs/${encodeURIComponent(jobId)}/cover?thumb=1`
+            : imgSrc.startsWith('http')
+              ? imgSrc
+              : imgSrc.startsWith('/')
+                ? `${baseUrl}${imgSrc}`
+                : null;
+
+          const ratioTag = aspectRatio.replace(':', 'x');
+          const downloadAnchor = card.querySelector<HTMLAnchorElement>(
+            'a[href*="/download"]'
+          );
+          const dlHref = downloadAnchor?.getAttribute('href') ?? '';
+          const videoUrl = dlHref
+            ? dlHref.startsWith('http')
+              ? dlHref
+              : `${baseUrl}${dlHref}`
+            : `${baseUrl}/api/jobs/${encodeURIComponent(jobId)}/download?ratio=${ratioTag}`;
+
+          const coverUrl = `${baseUrl}/api/jobs/${encodeURIComponent(jobId)}/cover?ratio=${ratioTag}&art=1`;
+
+          items.push({
+            id: jobId,
+            shortId,
+            title,
+            style,
+            statusText,
+            aspectRatio,
+            durationSec,
+            createdAtText,
+            thumbnailUrl,
+            detailUrl: `${baseUrl}/app/jobs/${encodeURIComponent(jobId)}`,
+            videoUrl,
+            coverUrl,
+          });
+        }
+
+        return {
+          parsedTotal,
+          maxPageLink,
+          items,
+        };
+      }, current.baseUrl);
+
+      if (pageData.parsedTotal > totalRemoteCount) {
+        totalRemoteCount = pageData.parsedTotal;
+      }
+      const computedPagesFromTotal =
+        totalRemoteCount > 0 ? Math.ceil(totalRemoteCount / PER_PAGE) : 1;
+      totalPages = Math.max(
+        totalPages,
+        pageData.maxPageLink,
+        computedPagesFromTotal
       );
 
-      for (const link of links) {
-        const href = link.getAttribute('href') ?? '';
-        const match = href.match(/\/app\/jobs\/([^/?#]+)/);
-        if (!match?.[1]) continue;
-        const jobId = decodeURIComponent(match[1]).trim();
-        if (!jobId || byId.has(jobId)) continue;
-
-        // Walk up to find the enclosing job card container
-        let card: Element = link;
-        let curr: Element | null = link.parentElement;
-        for (let depth = 0; depth < 6 && curr && curr !== document.body; depth += 1) {
-          const rect = curr.getBoundingClientRect();
-          const jobLinksInside = new Set(
-            Array.from(curr.querySelectorAll('a[href*="/app/jobs/"]'))
-              .map((a) => {
-                const m = (a.getAttribute('href') ?? '').match(/\/app\/jobs\/([^/?#]+)/);
-                return m?.[1] ?? '';
-              })
-              .filter(Boolean)
-          );
-          if (jobLinksInside.size > 1) {
-            break;
-          }
-          if (rect.width >= 240 && rect.height >= 120) {
-            card = curr;
-          }
-          curr = curr.parentElement;
+      let addedThisPage = 0;
+      for (const domJob of pageData.items) {
+        if (!mergedMap.has(domJob.id)) {
+          addedThisPage += 1;
         }
-
-        const rawText = (card.textContent ?? '').replace(/\s+/g, ' ').trim();
-        const shortIdMatch = rawText.match(/#([a-f0-9]{6,12})/i);
-        const shortId = shortIdMatch?.[1]
-          ? shortIdMatch[1].toLowerCase()
-          : jobId.split('-')[0].slice(0, 8).toLowerCase();
-
-        // Title: look for headings or prominent text elements inside card
-        let title = '';
-        const titleCandidates = Array.from(
-          card.querySelectorAll('h1, h2, h3, h4, p, div, span')
-        );
-        for (const el of titleCandidates) {
-          if (el.children.length > 0) continue;
-          const t = (el.textContent ?? '').trim();
-          if (!t || t.length < 2 || t.length > 140) continue;
-          if (/^(?:selesai|diproses|gagal|unduh|download|\d{1,3})$/i.test(t)) continue;
-          if (t.startsWith('#')) continue;
-          if (/^\d+:\d+\s*[·•]/.test(t)) continue;
-          const fs = parseFloat(window.getComputedStyle(el).fontSize || '0');
-          const fw = parseInt(window.getComputedStyle(el).fontWeight || '400', 10);
-          if (fs >= 15 || fw >= 600) {
-            // Skip known style pill text if it's small badge-like
-            const rect = el.getBoundingClientRect();
-            if (rect.height <= 26 && fs <= 13) continue;
-            title = t;
-            break;
-          }
-        }
-        if (!title) {
-          title = `Video #${shortId}`;
-        }
-
-        // Status pill
-        let statusText = 'Selesai';
-        if (/\bgagal\b|\bfailed\b/i.test(rawText)) {
-          statusText = 'Gagal';
-        } else if (/\bdiproses\b|\bprocessing\b|\brendering\b/i.test(rawText)) {
-          statusText = 'Diproses';
-        } else if (/\bselesai\b|\bcompleted\b/i.test(rawText)) {
-          statusText = 'Selesai';
-        }
-
-        // Style pill (e.g., Koran Lama, Explainer 3D, Dokumen Rahasia Sepia, Teknik 3D, Cetak Biru)
-        let style = 'MotionProvit';
-        const knownStyles = [
-          'Koran Lama',
-          'Explainer 3D',
-          'Explainer 2D',
-          'Dokumen Rahasia Sepia',
-          'Teknik 3D',
-          'Cetak Biru',
-          'Dulu & Sekarang',
-        ];
-        for (const known of knownStyles) {
-          if (rawText.toLowerCase().includes(known.toLowerCase())) {
-            style = known;
-            break;
-          }
-        }
-
-        // Metadata line: "9:16 · 79 detik · 25 Nov 2026, 14.06"
-        const ratioMatch = rawText.match(/\b(\d{1,2}:\d{1,2})\b/);
-        const aspectRatio = ratioMatch?.[1] ?? '9:16';
-
-        const durMatch = rawText.match(/(\d+)\s*(?:detik|sec|s\b)/i);
-        const durationSec = durMatch?.[1] ? Number(durMatch[1]) : null;
-
-        const dateMatch = rawText.match(
-          /\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}(?:,\s*\d{1,2}[.:]\d{2})?/
-        );
-        const createdAtText = dateMatch?.[0] ?? '';
-
-        const img = card.querySelector<HTMLImageElement>('img');
-        const imgSrc = img?.currentSrc || img?.getAttribute('src') || null;
-        const thumbnailUrl = imgSrc
-          ? imgSrc.startsWith('http')
-            ? imgSrc
-            : imgSrc.startsWith('/')
-              ? `${baseUrl}${imgSrc}`
-              : null
-          : null;
-
-        byId.set(jobId, {
-          id: jobId,
-          shortId,
-          title,
-          style,
-          statusText,
-          aspectRatio,
-          durationSec,
-          createdAtText,
-          thumbnailUrl,
-          detailUrl: `${baseUrl}/app/jobs/${encodeURIComponent(jobId)}`,
+        const statusInfo = normalizeJobStatus(domJob.statusText);
+        mergedMap.set(domJob.id, {
+          id: domJob.id,
+          shortId: domJob.shortId,
+          title: domJob.title,
+          style: domJob.style,
+          status: statusInfo.status,
+          statusLabel: statusInfo.label,
+          aspectRatio: domJob.aspectRatio,
+          durationSec: domJob.durationSec,
+          createdAtText: domJob.createdAtText,
+          createdAtIso: null,
+          thumbnailUrl: domJob.thumbnailUrl,
+          detailUrl: domJob.detailUrl,
+          videoUrl: domJob.videoUrl,
+          coverUrl: domJob.coverUrl,
+          captionPreview: null,
+          alreadyImported: false,
+          importedItemId: null,
+          importedFolderCode: null,
         });
       }
 
-      return Array.from(byId.values());
-    }, current.baseUrl);
-
-    // Merge intercepted JSON jobs + DOM scraped jobs (preserving richest fields!)
-    const mergedMap = new Map<string, MotionProvitJobSummary>();
-
-    for (const domJob of domJobsRaw) {
-      const statusInfo = normalizeJobStatus(domJob.statusText);
-      mergedMap.set(domJob.id, {
-        id: domJob.id,
-        shortId: domJob.shortId,
-        title: domJob.title,
-        style: domJob.style,
-        status: statusInfo.status,
-        statusLabel: statusInfo.label,
-        aspectRatio: domJob.aspectRatio,
-        durationSec: domJob.durationSec,
-        createdAtText: domJob.createdAtText,
-        createdAtIso: null,
-        thumbnailUrl: domJob.thumbnailUrl,
-        detailUrl: domJob.detailUrl,
-        videoUrl: null,
-        coverUrl: null,
-        captionPreview: null,
-        alreadyImported: false,
-        importedItemId: null,
-        importedFolderCode: null,
-      });
+      if (addedThisPage === 0) {
+        break;
+      }
     }
 
     for (const jsonJob of interceptedJobs) {
@@ -1021,6 +1043,7 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
           session.email ?? current.accountEmail ?? (current.email || null),
         lastVerifiedAt: nowIso,
         lastSyncedAt: nowIso,
+        totalRemoteCount: Math.max(totalRemoteCount, mergedList.length),
         cachedJobs: mergedList,
       },
       workspaceId
@@ -1562,10 +1585,37 @@ export async function startMotionProvitBatchImport(
             }
           }
 
+          const aspectFileTag = normalizeAspectForFile(job.aspectRatio);
           const finalTitle = domDetail.headingTitle || job.title;
+
+          // Fetch official MotionProvit caption.txt directly from /api/jobs/{id}/kit?download=caption&opener=1
+          let officialKitCaption: string | null = null;
+          if (input.assets.caption) {
+            try {
+              const kitRes = await context.request.get(
+                `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/kit?download=caption&opener=1`,
+                {
+                  headers: { Referer: job.detailUrl },
+                  timeout: 20_000,
+                }
+              );
+              if (kitRes.ok()) {
+                const rawKit = (await kitRes.text()).trim();
+                if (rawKit.length >= 10) {
+                  officialKitCaption = rawKit;
+                }
+              }
+            } catch {
+              // fallback to DOM/template caption below
+            }
+          }
+
           const finalCaption = buildFallbackCaption(
             finalTitle,
-            jsonCaption ?? domDetail.captionText ?? job.captionPreview,
+            officialKitCaption ??
+              jsonCaption ??
+              domDetail.captionText ??
+              job.captionPreview,
             workspace
           );
 
@@ -1585,8 +1635,6 @@ export async function startMotionProvitBatchImport(
             fs.unlinkSync(created.captionPath);
           }
 
-          const aspectFileTag = normalizeAspectForFile(job.aspectRatio);
-
           // 1. Download Video MP4 -> motionprovit-{shortId}.mp4
           if (input.assets.video) {
             runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Mengunduh video "${finalTitle}" ke ${slot.folderCode}...`;
@@ -1594,10 +1642,10 @@ export async function startMotionProvitBatchImport(
             const videoDest = path.join(created.folderPath, videoFileName);
 
             let videoSaved = false;
-            // Priority A: Click the yellow "Unduh 9:16" / "Unduh" button to capture native download
+            // Priority A: Click the yellow "Unduh 9:16" / download anchor to capture native browser download
             const videoDownloadBtn = page
-              .locator('a, button, [role="button"]')
-              .filter({ hasText: /^Unduh\s*\d+:\d+$/i })
+              .locator('a[href*="/download"]')
+              .filter({ hasText: /^Unduh/i })
               .first();
             videoSaved = await downloadViaButtonClick(
               page,
@@ -1606,16 +1654,27 @@ export async function startMotionProvitBatchImport(
               180_000
             );
 
-            // Priority B: Direct authenticated fetch from video URL (<video src> or JSON)
+            // Priority B: Direct authenticated GET with Referer header
             if (!videoSaved) {
               const candidateVideoUrl =
-                domDetail.videoUrl ?? jsonVideoUrl ?? job.videoUrl;
-              if (candidateVideoUrl) {
-                videoSaved = await downloadFileFromUrl(
-                  context,
-                  candidateVideoUrl,
-                  videoDest
-                );
+                domDetail.videoUrl ??
+                jsonVideoUrl ??
+                job.videoUrl ??
+                `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/download?ratio=${aspectFileTag}`;
+              try {
+                const res = await context.request.get(candidateVideoUrl, {
+                  headers: { Referer: job.detailUrl },
+                  timeout: 180_000,
+                });
+                if (res.ok()) {
+                  const buf = await res.body();
+                  if (buf && buf.length > 1024) {
+                    fs.writeFileSync(videoDest, buf);
+                    videoSaved = true;
+                  }
+                }
+              } catch {
+                videoSaved = false;
               }
             }
 
@@ -1635,33 +1694,39 @@ export async function startMotionProvitBatchImport(
             const coverDest = path.join(created.folderPath, coverFileName);
 
             let coverSaved = false;
-            // Priority A: Click "Unduh JPG" inside Cover card
-            const coverDownloadBtn = page
-              .locator('a, button, [role="button"]')
-              .filter({ hasText: /^Unduh\s*JPG$/i })
-              .first();
-            coverSaved = await downloadViaButtonClick(
-              page,
-              coverDownloadBtn,
-              coverDest,
-              45_000
+            // Priority A: Official artwork Cover JPG endpoint (/cover?ratio=9x16&art=1)
+            const officialArtCoverUrl = `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/cover?ratio=${aspectFileTag}&art=1`;
+            coverSaved = await downloadFileFromUrl(
+              context,
+              officialArtCoverUrl,
+              coverDest
             );
 
-            // Priority B: Fallback to Thumbnail "JPG" button if Cover isn't present
+            // Priority B: Click "Unduh JPG" inside Cover card
             if (!coverSaved) {
-              const thumbJpgBtn = page
+              const coverDownloadBtn = page
                 .locator('a, button, [role="button"]')
-                .filter({ hasText: /^JPG$/i })
+                .filter({ hasText: /^Unduh\s*JPG$/i })
                 .first();
               coverSaved = await downloadViaButtonClick(
                 page,
-                thumbJpgBtn,
+                coverDownloadBtn,
                 coverDest,
                 45_000
               );
             }
 
-            // Priority C: Direct authenticated fetch from cover/thumbnail URL
+            // Priority C: Fallback to Thumbnail JPG endpoint (/cover?ratio=9x16&format=jpg)
+            if (!coverSaved) {
+              const thumbFallbackUrl = `${config.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/cover?ratio=${aspectFileTag}&format=jpg`;
+              coverSaved = await downloadFileFromUrl(
+                context,
+                thumbFallbackUrl,
+                coverDest
+              );
+            }
+
+            // Priority D: Direct fetch from scraped cover/thumbnail URL
             if (!coverSaved) {
               const candidateCoverUrl =
                 jsonCoverUrl ??

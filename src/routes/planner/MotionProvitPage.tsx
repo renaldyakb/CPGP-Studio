@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   CloudDownload,
   ExternalLink,
   Film,
@@ -80,10 +82,12 @@ export function MotionProvitPage() {
   const [password, setPassword] = useState<string>('');
   const [showAuthForm, setShowAuthForm] = useState<boolean>(false);
 
-  // Filters & selection
+  // Filters, pagination & selection
   const [search, setSearch] = useState<string>('');
   const [styleFilter, setStyleFilter] = useState<string>('all');
   const [importFilter, setImportFilter] = useState<'new' | 'all'>('new');
+  const [page, setPage] = useState<number>(1);
+  const [perPage, setPerPage] = useState<number>(12);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   // Selective assets & target start slot
@@ -347,6 +351,34 @@ export function MotionProvitPage() {
     });
   }, [jobs, importFilter, styleFilter, search]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / perPage));
+  const safePage = Math.min(page, totalPages);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, styleFilter, importFilter, perPage]);
+
+  const paginatedJobs = useMemo(() => {
+    const start = (safePage - 1) * perPage;
+    return filteredJobs.slice(start, start + perPage);
+  }, [filteredJobs, safePage, perPage]);
+
+  const pageNumbers = useMemo(() => {
+    const pages: Array<number | 'ellipsis'> = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i += 1) pages.push(i);
+      return pages;
+    }
+    pages.push(1);
+    if (safePage > 3) pages.push('ellipsis');
+    const start = Math.max(2, safePage - 1);
+    const end = Math.min(totalPages - 1, safePage + 1);
+    for (let i = start; i <= end; i += 1) pages.push(i);
+    if (safePage < totalPages - 2) pages.push('ellipsis');
+    pages.push(totalPages);
+    return pages;
+  }, [safePage, totalPages]);
+
   // Compute live target slot assignment preview for every selected job
   const orderedSlotCodes = useMemo(() => {
     const defs = activeWorkspace?.timeSlots;
@@ -417,6 +449,13 @@ export function MotionProvitPage() {
         ? prev.filter((id) => id !== jobId)
         : [...prev, jobId]
     );
+  };
+
+  const selectCurrentPage = () => {
+    const pageJobIds = paginatedJobs
+      .filter((j) => j.status === 'completed' || j.status === 'unknown')
+      .map((j) => j.id);
+    setSelectedIds((prev) => Array.from(new Set([...prev, ...pageJobIds])));
   };
 
   const selectAllFiltered = () => {
@@ -728,7 +767,16 @@ export function MotionProvitPage() {
                   disabled={isImporting || newJobsCount === 0}
                   onClick={selectOnlyNew}
                 >
-                  Pilih Baru ({newJobsCount})
+                  Pilih Semua Baru ({newJobsCount})
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={isImporting || paginatedJobs.length === 0}
+                  onClick={selectCurrentPage}
+                >
+                  Pilih Halaman Ini ({paginatedJobs.length})
                 </Button>
                 <Button
                   type="button"
@@ -737,7 +785,7 @@ export function MotionProvitPage() {
                   disabled={isImporting || filteredJobs.length === 0}
                   onClick={selectAllFiltered}
                 >
-                  Pilih Tampil ({filteredJobs.length})
+                  Pilih Semua ({filteredJobs.length})
                 </Button>
                 {selectedIds.length > 0 ? (
                   <Button
@@ -898,8 +946,9 @@ export function MotionProvitPage() {
               </CardContent>
             </Card>
           ) : (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              {filteredJobs.map((job) => {
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {paginatedJobs.map((job) => {
                 const isSelected = selectedIds.includes(job.id);
                 const targetSlotLabel = slotPreviewMap.get(job.id);
                 const existingPlannerItem = job.importedItemId
@@ -1032,6 +1081,81 @@ export function MotionProvitPage() {
                   </Card>
                 );
               })}
+              </div>
+
+              {/* Pagination Bar (mirroring MotionProvit 12 / 24 / 48 per page) */}
+              <div className="flex flex-col items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-2.5 sm:flex-row">
+                <p className="font-mono text-[11px] font-light text-muted-foreground">
+                  Menampilkan{' '}
+                  <span className="font-semibold text-foreground">
+                    {(safePage - 1) * perPage + 1}-
+                    {Math.min(safePage * perPage, filteredJobs.length)}
+                  </span>{' '}
+                  dari{' '}
+                  <span className="font-semibold text-foreground">
+                    {filteredJobs.length}
+                  </span>{' '}
+                  video
+                  {config?.totalRemoteCount &&
+                  config.totalRemoteCount > jobs.length
+                    ? ` (total ${config.totalRemoteCount} di MotionProvit)`
+                    : ''}
+                </p>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1">
+                    <IconActionButton
+                      icon={ChevronLeft}
+                      label="Halaman sebelumnya"
+                      variant="outline"
+                      disabled={safePage <= 1}
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    />
+
+                    {pageNumbers.map((entry, idx) =>
+                      entry === 'ellipsis' ? (
+                        <span
+                          key={`el-${idx}`}
+                          className="px-1.5 text-xs text-muted-foreground"
+                        >
+                          ...
+                        </span>
+                      ) : (
+                        <Button
+                          key={entry}
+                          type="button"
+                          size="xs"
+                          variant={entry === safePage ? 'default' : 'outline'}
+                          aria-current={entry === safePage ? 'page' : undefined}
+                          onClick={() => setPage(entry)}
+                          className="min-w-7 font-mono"
+                        >
+                          {entry}
+                        </Button>
+                      )
+                    )}
+
+                    <IconActionButton
+                      icon={ChevronRight}
+                      label="Halaman berikutnya"
+                      variant="outline"
+                      disabled={safePage >= totalPages}
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    />
+                  </div>
+
+                  <NativeSelect
+                    value={String(perPage)}
+                    aria-label="Jumlah video per halaman"
+                    onChange={(e) => setPerPage(Number(e.target.value) || 12)}
+                    className="w-36"
+                  >
+                    <option value="12">12 per halaman</option>
+                    <option value="24">24 per halaman</option>
+                    <option value="48">48 per halaman</option>
+                  </NativeSelect>
+                </div>
+              </div>
             </div>
           )}
         </div>

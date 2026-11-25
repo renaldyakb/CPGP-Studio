@@ -4,6 +4,19 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.6.1] - 2026-11-25 (MotionProvit Full Multi-Page Pagination, Official Kit Caption/Cover Endpoints & Exact ID Matching)
+
+### Peningkatan & Perbaikan (Improved / Fixed — Live-Tested on 49/49 MotionProvit Videos)
+- **Scraping Multi-Halaman MotionProvit (`server/addons/motionprovitScraper.ts`)**:
+  - Memindai seluruh halaman `/app/jobs?hal=<n>&per=48` secara otomatis berdasarkan metadata `<nav aria-label="Halaman daftar render">` (`Menampilkan 1-12 dari 49 render`), sehingga seluruh video (49/49) dan seluruh gaya (`Koran Lama`, `Mode Thinking`, `Explainer 3D`, `Sains Papan Tulis`, dll.) terbaca utuh tanpa terpotong di halaman pertama.
+  - Memperbaiki ekstraksi `#shortId` (8 karakter langsung dari UUID) sehingga pendeteksian video yang sudah ada di workspace (`alreadyImported`) 100% akurat (terverifikasi mendeteksi 12 video yang sudah ada di folder `KONTEN`).
+- **Unduh Langsung dari Endpoint Resmi Paket Posting MotionProvit**:
+  - Mengunduh **`caption.txt`** asli langsung dari `/api/jobs/{id}/kit?download=caption&opener=1` dan **Cover 9:16 Artwork JPG** dari `/api/jobs/{id}/cover?ratio=9x16&art=1` (dengan fallback `format=jpg` & tombol `Unduh JPG`).
+- **Kontrol Pagination di Halaman Add-on MotionProvit (`MotionProvitPage.tsx`)**:
+  - Menambahkan pagination bar (`Menampilkan 1-12 dari N video`, tombol `Sebelumnya` / nomor halaman `1 2 3 ...` / `Berikutnya`, pemilih **`12 / 24 / 48 per halaman`**), serta tombol **`Pilih Halaman Ini`** di samping `Pilih Semua Baru` dan `Pilih Semua`.
+
+---
+
 ## [v2.6.0] - 2026-11-25 (Optional Add-on: MotionProvit Scraper, Workspace Credentials & Selective Batch Importer)
 
 ### Fitur Baru (Added)

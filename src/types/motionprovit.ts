@@ -9,6 +9,7 @@ export interface MotionProvitConfigPublic {
   lastVerifiedAt: string | null;
   lastSyncedAt: string | null;
   cachedJobsCount: number;
+  totalRemoteCount: number;
 }
 
 export interface MotionProvitJobSummary {

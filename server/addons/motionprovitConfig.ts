@@ -23,6 +23,7 @@ export interface InternalMotionProvitConfig {
   accountEmail: string | null;
   lastVerifiedAt: string | null;
   lastSyncedAt: string | null;
+  totalRemoteCount: number;
   cachedJobs: MotionProvitJobSummary[];
 }
 
@@ -39,6 +40,7 @@ function createDefaultConfig(): InternalMotionProvitConfig {
     accountEmail: null,
     lastVerifiedAt: null,
     lastSyncedAt: null,
+    totalRemoteCount: 0,
     cachedJobs: [],
   };
 }
@@ -79,6 +81,13 @@ export function getInternalMotionProvitConfig(
         typeof parsed.lastVerifiedAt === 'string' ? parsed.lastVerifiedAt : null,
       lastSyncedAt:
         typeof parsed.lastSyncedAt === 'string' ? parsed.lastSyncedAt : null,
+      totalRemoteCount:
+        typeof parsed.totalRemoteCount === 'number' &&
+        Number.isFinite(parsed.totalRemoteCount)
+          ? parsed.totalRemoteCount
+          : Array.isArray(parsed.cachedJobs)
+            ? parsed.cachedJobs.length
+            : 0,
       cachedJobs: Array.isArray(parsed.cachedJobs) ? parsed.cachedJobs : [],
     };
   } catch {
@@ -148,5 +157,6 @@ export function toPublicMotionProvitConfig(
     lastVerifiedAt: config.lastVerifiedAt,
     lastSyncedAt: config.lastSyncedAt,
     cachedJobsCount: config.cachedJobs.length,
+    totalRemoteCount: Math.max(config.totalRemoteCount, config.cachedJobs.length),
   };
 }
