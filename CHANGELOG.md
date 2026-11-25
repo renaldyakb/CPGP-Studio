@@ -4,6 +4,16 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.0.1] - 2026-11-25 (Production Release Bundle & Launcher Fix)
+
+### Perbaikan (Fixed)
+- **Production Mode pada `start-planner.bat` & `start-planner.sh`**: Memanggil `bin/cpgp-studio.mjs` yang langsung melayani folder hasil build `dist/` via `server/index.ts` (tanpa menjalankan `vite dev` saat dijalankan dari paket rilis).
+- **Dependensi `tsx` di `dependencies`**: Memindahkan `tsx` dari `devDependencies` ke `dependencies` agar `npm install --omit=dev` pada paket rilis langsung berjalan tanpa error.
+- **Bundel Rilis Lebih Ringkas & Terverifikasi**: Workflow GitHub Actions sekarang hanya menyertakan file runtime (`dist/`, `server/`, `shared/`, `src/types/`, `bin/`, launcher) serta melakukan verifikasi integritas file sebelum mengemas `.zip` dan `.tar.gz`.
+- **Validasi Ekstraksi ZIP di Launcher**: Menampilkan pesan jelas apabila paket ZIP belum diekstrak secara penuh (misal terpotong oleh sinkronisasi OneDrive).
+
+---
+
 ## [v2.0.0] - 2026-11-25 (Multi-Workspace & Luxury Burgundy Release)
 
 ### Highlight Rilis

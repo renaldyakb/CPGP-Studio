@@ -122,6 +122,35 @@ Penggunaan:
   console.log('   Multi-Workspace Content Planner | Watermark Studio | Auto-Post');
   console.log('========================================================================');
 
+  if (!fs.existsSync(path.join(APP_DIR, 'shared', 'captionParser.ts'))) {
+    console.error(
+      '\n[ERROR] Folder "shared" tidak ditemukan di dalam direktori aplikasi.'
+    );
+    console.error(
+      'Kemungkinan file ZIP rilis belum selesai diekstrak secara penuh.'
+    );
+    console.error(
+      'Silakan ekstrak ulang seluruh isi ZIP ke folder lokal (misal D:\\CPGP-Studio).\n'
+    );
+    process.exit(1);
+  }
+
+  // Ensure node_modules exists before running
+  if (!fs.existsSync(path.join(APP_DIR, 'node_modules'))) {
+    console.log(
+      hasProdBuild
+        ? 'Menginstall dependencies produksi (npm install --omit=dev)...'
+        : 'Menginstall dependencies (npm install)...'
+    );
+    const installCode = await runCommand(
+      npmBin,
+      hasProdBuild ? ['install', '--omit=dev'] : ['install']
+    );
+    if (installCode !== 0) {
+      process.exit(installCode);
+    }
+  }
+
   if (args.includes('--scan-only')) {
     const code = await runCommand(npmBin, ['run', 'scan']);
     process.exit(code);
@@ -130,9 +159,10 @@ Penggunaan:
   // Run initial scan before starting server
   await runCommand(npmBin, ['run', 'scan']);
 
-  const port = customPort || (hasProdBuild ? 5173 : 5173);
+  const port = customPort || 5173;
   const url = `http://localhost:${port}`;
-  console.log(`\n  Web UI : ${url}`);
+  console.log(`\n  Mode   : ${hasProdBuild ? 'Production Bundle (dist/)' : 'Development (Vite)'}`);
+  console.log(`  Web UI : ${url}`);
   console.log('  Tekan Ctrl + C untuk menghentikan server.\n');
 
   if (!args.includes('--no-browser')) {
@@ -142,7 +172,7 @@ Penggunaan:
   if (hasProdBuild) {
     // Run production standalone server serving dist/ + /api + /media
     process.env.PORT = String(port);
-    const code = await runCommand(npxBin, ['tsx', 'server/index.ts']);
+    const code = await runCommand(npmBin, ['run', 'server']);
     process.exit(code);
   } else {
     // Run Vite dev middleware server

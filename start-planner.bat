@@ -1,14 +1,14 @@
 @echo off
 setlocal EnableDelayedExpansion
-title CPGP (Content Planer Gam Puko) v2.0
+title CPGP Studio (Content Planer Gam Puko)
 color 0E
 
 cd /d "%~dp0"
 
 cls
 echo ============================================================================
-echo    CPGP (Content Planer Gam Puko) v2.0 - Multi-Workspace Content Planner
-echo    YouTube Shorts  ^|  TikTok  ^|  Instagram Reels  ^|  Facebook Reels
+echo    CPGP STUDIO (Content Planer Gam Puko)
+echo    Multi-Workspace Content Planner ^| Watermark Studio ^| Auto-Post Suite
 echo ============================================================================
 echo   App Root       : %CD%
 echo   Workspace Data : Multi-Workspace JSON (data/workspaces.json)
@@ -20,38 +20,40 @@ where node >nul 2>nul
 if %ERRORLEVEL% neq 0 (
     color 0C
     echo [ERROR] Node.js tidak ditemukan di sistem ini.
+    echo Silakan install Node.js v20+ terlebih dahulu di https://nodejs.org
     pause
     exit /b 1
 )
 
-echo [1/3] Memeriksa dependencies (node_modules)...
+if not exist "shared\captionParser.ts" (
+    color 0C
+    echo [ERROR] Folder "shared" tidak ditemukan!
+    echo Kemungkinan file ZIP rilis belum selesai diekstrak seluruhnya.
+    echo Silakan klik kanan file ZIP lalu pilih "Extract All..." ke folder lokal (misal D:\CPGP-Studio).
+    pause
+    exit /b 1
+)
+
+echo [1/2] Memeriksa dependencies (node_modules)...
 if not exist "node_modules\" (
-    echo       Dependencies belum ada. Menjalankan npm install...
-    call npm.cmd install
+    if exist "dist\index.html" (
+        echo       Mode rilis terdeteksi. Menjalankan npm install --omit=dev...
+        call npm.cmd install --omit=dev
+    ) else (
+        echo       Dependencies belum ada. Menjalankan npm install...
+        call npm.cmd install
+    )
+    if !ERRORLEVEL! neq 0 (
+        color 0C
+        echo [ERROR] Gagal menginstall dependencies.
+        pause
+        exit /b 1
+    )
 ) else (
     echo       [OK] Dependencies sudah siap.
 )
 
 echo.
-echo [2/3] Mensinkronkan workspace aktif ke Multi-Workspace JSON (data/workspaces.json)...
-call npm.cmd run scan
-
-if /i "%~1"=="--scan-only" (
-    echo.
-    echo [OK] Scan selesai.
-    pause
-    exit /b 0
-)
-
-echo.
-echo [3/3] Membuka http://localhost:5173 di Browser dan menyalakan Server Lokal...
-echo       (Biarkan jendela ini tetap terbuka selama menggunakan CPGP v2.0)
-echo       (Tekan Ctrl + C untuk mematikan server)
-echo.
-
-if /i not "%~1"=="--no-browser" (
-    start "" cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:5173"
-)
-
-call npm.cmd run dev
+echo [2/2] Menjalankan CPGP Studio (bin\cpgp-studio.mjs)...
+node bin\cpgp-studio.mjs %*
 pause

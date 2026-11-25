@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (misal v2.0.0)'
+        description: 'Release tag (misal v2.0.1)'
         required: false
         default: ''
 
@@ -36,7 +36,7 @@ jobs:
       - name: Build production web UI (Vite)
         run: npm run build
 
-      - name: Prepare CPGP Studio release bundle
+      - name: Prepare CPGP Studio production release bundle
         id: bundle
         run: |
           TAG_NAME="${GITHUB_REF_NAME}"
@@ -51,10 +51,19 @@ jobs:
           echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
 
           BUNDLE_DIR="release-bundle/CPGP-Studio-${TAG_NAME}"
-          mkdir -p "${BUNDLE_DIR}/data"
-          cp -r dist server shared bin src index.html package.json package-lock.json tsconfig.json vite.config.ts components.json start-planner.sh start-planner.bat README.md CHANGELOG.md DESIGN.md RULES.md "${BUNDLE_DIR}/"
+          mkdir -p "${BUNDLE_DIR}/data" "${BUNDLE_DIR}/src"
+          cp -r dist server shared bin "${BUNDLE_DIR}/"
+          cp -r src/types "${BUNDLE_DIR}/src/"
+          cp package.json package-lock.json start-planner.sh start-planner.bat README.md CHANGELOG.md "${BUNDLE_DIR}/"
           touch "${BUNDLE_DIR}/data/.gitkeep"
           chmod +x "${BUNDLE_DIR}/bin/cpgp-studio.mjs" "${BUNDLE_DIR}/start-planner.sh"
+
+          # Verify essential runtime files exist inside the bundle before archiving
+          test -f "${BUNDLE_DIR}/dist/index.html"
+          test -f "${BUNDLE_DIR}/shared/captionParser.ts"
+          test -f "${BUNDLE_DIR}/src/types/watermark.ts"
+          test -f "${BUNDLE_DIR}/server/index.ts"
+          test -f "${BUNDLE_DIR}/bin/cpgp-studio.mjs"
 
           mkdir -p release-artifacts
           (cd release-bundle && zip -rq "../release-artifacts/CPGP-Studio-${TAG_NAME}.zip" "CPGP-Studio-${TAG_NAME}")
@@ -74,22 +83,19 @@ jobs:
 
             Multi-Workspace Local Content Planner, Watermark Studio, dan Auto-Post Suite (YouTube Shorts, TikTok, Instagram Reels, Facebook Reels).
 
-            ### Cara Menjalankan Cepat
-            1. Ekstrak `CPGP-Studio-${{ steps.bundle.outputs.tag }}.zip` (atau `.tar.gz`).
-            2. Masuk ke folder hasil ekstrak lalu jalankan:
+            ### Cara Menjalankan Cepat (Production Bundle)
+            1. Klik kanan **`CPGP-Studio-${{ steps.bundle.outputs.tag }}.zip`** lalu pilih **Extract All...** ke folder lokal (disarankan di luar OneDrive, misal `D:\CPGP-Studio`).
+            2. Klik 2x **`start-planner.bat`** (Windows) atau jalankan **`./start-planner.sh`** (Git Bash / macOS / Linux).
+            3. Atau pasang perintah terminal global `cpgp-studio`:
                ```bash
                npm install --omit=dev
                npm link
                cpgp-studio
                ```
-               Atau cukup klik 2x **`start-planner.bat`** (Windows) / jalankan **`./start-planner.sh`** (Git Bash / macOS / Linux).
 
-            ### Fitur Utama
-            - Multi-Workspace JSON lokal + Native Folder Picker
-            - Tema Luxury Burgundy Minimalist (Light & Dark Mode)
-            - 3 Mode Aturan Watermark (`wm_final.mp4` terpisah, video langsung, atau overwrite video asli)
-            - `+ Konten Baru` dengan Smart Slot Finder & Batch Slot Generator
-            - Notifikasi pembaruan rilis otomatis dari GitHub
+            ### Catatan Penting
+            - Paket rilis sudah menyertakan hasil build production (`dist/`) sehingga berjalan ringan langsung via Node.js tanpa perlu Vite dev server.
+            - Jika ada versi baru di GitHub Releases, CPGP otomatis menampilkan banner notifikasi update di bagian atas aplikasi.
           files: |
             ${{ steps.bundle.outputs.zip }}
             ${{ steps.bundle.outputs.tar }}
