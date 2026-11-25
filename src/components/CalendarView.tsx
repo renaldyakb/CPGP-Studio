@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo } from 'react';
 import { id as idLocale } from 'date-fns/locale/id';
-import { Sun, Moon } from 'lucide-react';
 import {
   ContentPlannerItem,
   PlatformKey,
@@ -21,6 +20,11 @@ import type {
 import type { EventCalendarI18nOverrides } from '@/components/reui/event-calendar/event-calendar-i18n';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { parseTimeToHoursMinutes } from '@/lib/formatSlot';
 
 export interface CalendarViewProps {
@@ -203,14 +207,14 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       const color = getEventColor(item);
       const statusText =
         color === '#166534'
-          ? 'WM Siap'
+          ? 'Siap'
           : color === '#b45309'
-          ? 'Butuh WM'
-          : 'Hold / Kurang';
+          ? 'No WM'
+          : 'Hold';
 
       return (
         <div className="flex w-full min-w-0 items-center gap-3 text-foreground">
-          <span className="w-32 shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+          <span className="w-32 shrink-0 font-mono text-xs font-light text-muted-foreground/75 tabular-nums">
             {timeWindow}
           </span>
           <span
@@ -223,7 +227,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
           <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
             {hookTitle}
           </span>
-          <span className="hidden shrink-0 font-mono text-[11px] text-muted-foreground sm:inline">
+          <span className="hidden shrink-0 font-mono text-[11px] font-light text-muted-foreground/75 sm:inline">
             {statusText}
           </span>
         </div>
@@ -240,38 +244,6 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     },
     [onSelectItem]
   );
-
-  const slotLegend = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        code: string;
-        label: string;
-        timeWindow: string;
-        isDay: boolean;
-      }
-    >();
-    for (const item of items) {
-      const code = item.schedule.slotCode || '01';
-      if (!map.has(code)) {
-        const { hour, minute } = parseTimeToHoursMinutes(
-          item.schedule.recommendedTimeWib
-        );
-        const fallbackTime = `${String(hour).padStart(2, '0')}.${String(
-          minute
-        ).padStart(2, '0')} WIB`;
-        map.set(code, {
-          code,
-          label: item.schedule.slotLabel || `Slot ${code}`,
-          timeWindow: item.schedule.slotTimeWindow?.trim() || fallbackTime,
-          isDay: hour < 17,
-        });
-      }
-    }
-    return Array.from(map.values()).sort((a, b) =>
-      a.code.localeCompare(b.code, undefined, { numeric: true })
-    );
-  }, [items]);
 
   if (items.length === 0) {
     return (
@@ -303,61 +275,68 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   }
 
   return (
-    <div className="space-y-3">
-      {/* Compact Legend Header */}
-      <div className="flex items-center justify-between gap-3 overflow-x-auto whitespace-nowrap rounded-lg border border-border bg-card px-3.5 py-2 text-[11px]">
-        <div className="flex items-center gap-3 text-muted-foreground">
-          {slotLegend.map((slot, index) => (
-            <React.Fragment key={slot.code}>
-              {index > 0 ? (
-                <span className="text-border" aria-hidden="true">
-                  |
-                </span>
-              ) : null}
-              <span className="inline-flex items-center gap-1.5">
-                {slot.isDay ? (
-                  <Sun
-                    className="h-3.5 w-3.5 shrink-0 text-foreground"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <Moon
-                    className="h-3.5 w-3.5 shrink-0 text-foreground"
-                    aria-hidden="true"
-                  />
-                )}
-                <span className="font-medium text-foreground">
-                  Slot {slot.code} {slot.label}:
-                </span>
-                <span className="font-mono">{slot.timeWindow}</span>
-              </span>
-            </React.Fragment>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-3 text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
+    <div className="space-y-2.5">
+      {/* Slim Borderless Legend Strip */}
+      <div className="flex items-center justify-end gap-3 text-[11px] font-light text-muted-foreground/80">
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                tabIndex={0}
+                className="inline-flex cursor-default items-center gap-1.5 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              />
+            }
+          >
             <span
               aria-hidden="true"
               className="size-2 shrink-0 rounded-full bg-[#166534]"
             />
-            <span>WM Siap</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5">
+            <span>Siap</span>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            Video wm_final, cover, dan caption siap upload atau sudah tayang
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                tabIndex={0}
+                className="inline-flex cursor-default items-center gap-1.5 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              />
+            }
+          >
             <span
               aria-hidden="true"
               className="size-2 shrink-0 rounded-full bg-[#b45309]"
             />
-            <span>Butuh WM</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5">
+            <span>No WM</span>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            Aset dasar tersedia, menunggu render wm_final
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                tabIndex={0}
+                className="inline-flex cursor-default items-center gap-1.5 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              />
+            }
+          >
             <span
               aria-hidden="true"
               className="size-2 shrink-0 rounded-full bg-[#991b1b]"
             />
-            <span>Hold / Kurang</span>
-          </span>
-        </div>
+            <span>Hold</span>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            Konten ditahan untuk revisi atau aset dasar belum lengkap
+          </TooltipContent>
+        </Tooltip>
       </div>
 
       {/* ReUI Event Calendar Card */}

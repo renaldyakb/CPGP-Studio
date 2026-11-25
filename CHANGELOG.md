@@ -4,6 +4,19 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.1.0] - 2026-11-25 (Minimalist UI Polish, `/watermark` Route, `Ctrl+K` Command Palette & Date Pickers)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Command Palette Global (`Ctrl + K`)**: Pencarian cepat halaman, aksi produksi, penggantian tema, dan perpindahan workspace dari keyboard menggunakan komponen resmi `shadcn/ui` `Command`, `Dialog`, dan `Kbd`.
+- **Halaman Penuh Watermark Studio (`/watermark`)**: Mempromosikan Watermark Studio dari modal sempit menjadi rute penuh `/watermark` dengan tata letak 2 kolom lega, `Select` resmi `shadcn/ui`, 3 tab 1-kata (`Preset`, `Posisi`, `Gaya`), bar aksi preset ber-ikon + Tooltip, dan 1 tombol CTA burgundy utama.
+- **Komponen `DatePicker` & `DateRangePicker` Resmi `shadcn/ui`**: Mengganti input tanggal manual pada modal **Buat Konten Baru** (`Tunggal` & `Batch`) serta menambahkan filter rentang tanggal di halaman **Riwayat Auto-Post** dengan locale Bahasa Indonesia (`date-fns/locale/id`).
+- **Rombak Ringkasan (`/`) & Poles Semua Tampilan**:
+  - Menghapus banner workspace duplikat, 4 kartu teks panjang, dan 8 tile navigasi berulang di `/`, menggantinya dengan **Quick Tools Bar** 1 baris dan feed operasional bersih.
+  - Meringkas label sidebar dan judul kolom Kanban menjadi 1–2 kata (`Draft`, `Watermark`, `Siap`, `Terjadwal`, `Sebagian`, `Selesai`, `Hold`), menerapkan `font-light` untuk teks sekunder, menyatukan `PlatformToggleStrip` dalam satu bar halus, dan mengganti `<select>` status di Tabel & Auto-Post menjadi `Select` resmi `shadcn/ui`.
+  - Menghapus duplikasi tombol `+ Konten Baru` di `PlannerToolbar`, memperbaiki horizontal scrollbar bocor di sidebar, dan menambahkan tautan aksesibilitas `Langsung ke konten` (`#main-content`).
+
+---
+
 ## [v2.0.3] - 2026-11-25 (Slider Rail & Scrollbar Contrast Fix)
 
 ### Perbaikan (Fixed)

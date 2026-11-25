@@ -21,7 +21,6 @@ import type {
 } from '@/types/workspace';
 import { plannerApi } from '@/services/apiClient';
 import { ContentDetailModal } from '@/components/ContentDetailModal';
-import { WatermarkStudioModal } from '@/components/WatermarkStudioModal';
 import {
   WorkspaceModal,
   type WorkspaceModalMode,
@@ -77,6 +76,10 @@ const ROUTE_TITLES: Record<string, { title: string; subtitle: string }> = {
   '/galeri': {
     title: 'Galeri',
     subtitle: 'Dinding video vertikal 9:16',
+  },
+  '/watermark': {
+    title: 'Watermark',
+    subtitle: 'Atur overlay dan render video',
   },
 };
 
@@ -145,10 +148,6 @@ export function App() {
   const [detailInitialTab, setDetailInitialTab] = useState<
     'publish' | 'caption' | 'assets'
   >('publish');
-  const [watermarkStudioState, setWatermarkStudioState] = useState<{
-    open: boolean;
-    itemId: string | null;
-  }>({ open: false, itemId: null });
 
   const [toast, setToast] = useState<{
     message: string;
@@ -694,7 +693,8 @@ export function App() {
         | '/tabel'
         | '/kalender'
         | '/jadwal'
-        | '/galeri';
+        | '/galeri'
+        | '/watermark';
       void navigate({ to: currentTo, search: {}, replace: true });
     }
   }, [
@@ -715,9 +715,15 @@ export function App() {
     setSelectedItemId(item.id);
   }, []);
 
-  const openWatermark = useCallback((item: ContentPlannerItem) => {
-    setWatermarkStudioState({ open: true, itemId: item.id });
-  }, []);
+  const openWatermark = useCallback(
+    (item?: ContentPlannerItem | null) => {
+      void navigate({
+        to: '/watermark',
+        search: item?.id ? { item: item.id } : {},
+      });
+    },
+    [navigate]
+  );
 
   const openAutoPost = useCallback(
     (item?: ContentPlannerItem | null, platform?: PlatformKey | null) => {
@@ -745,9 +751,13 @@ export function App() {
       return;
     }
     if (routeSearch.watermark) {
-      setWatermarkStudioState({ open: true, itemId: routeSearch.watermark });
+      void navigate({
+        to: '/watermark',
+        search: { item: routeSearch.watermark },
+        replace: true,
+      });
     }
-  }, [routeSearch.detail, routeSearch.caption, routeSearch.watermark]);
+  }, [routeSearch.detail, routeSearch.caption, routeSearch.watermark, navigate]);
 
   const workspace = useMemo<PlannerWorkspace>(
     () => ({
@@ -877,17 +887,11 @@ export function App() {
         onOpenWorkspaceSettings={() => openWorkspaceModal('edit')}
         onOpenQuickGuide={openQuickGuide}
         onOpenCreateContent={() => openCreateContent('single')}
-        onOpenWatermarkStudio={() =>
-          setWatermarkStudioState({
-            open: true,
-            itemId:
-              allItems.find((it) => !it.autoMetadata.readiness.hasWmFinal)
-                ?.id ??
-              allItems[0]?.id ??
-              null,
-          })
+        toolbar={
+          activePath === '/' || activePath === '/watermark' ? undefined : (
+            <PlannerToolbar />
+          )
         }
-        toolbar={activePath === '/' ? undefined : <PlannerToolbar />}
       >
         {errorMsg ? (
           <div
@@ -989,19 +993,6 @@ export function App() {
           openAutoPost(item, platform ?? null)
         }
         onOpenWatermark={(item) => openWatermark(item)}
-      />
-
-      <WatermarkStudioModal
-        isOpen={watermarkStudioState.open}
-        onClose={() => {
-          setWatermarkStudioState((prev) => ({ ...prev, open: false }));
-          clearDeepLinkSearch();
-        }}
-        items={allItems}
-        initialItemId={watermarkStudioState.itemId}
-        watermarkPolicy={activeWorkspace?.rules.watermarkPolicy}
-        onRenderCompleted={() => void fetchPlanner()}
-        onToast={showToast}
       />
 
       <WorkspaceModal

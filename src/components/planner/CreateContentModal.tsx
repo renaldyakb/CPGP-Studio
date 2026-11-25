@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import type { DateRange } from 'react-day-picker';
 import {
   AlertCircle,
   CalendarPlus,
@@ -22,6 +23,12 @@ import { composeCaptionFromParts } from '../../../shared/captionParser';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  DatePicker,
+  DateRangePicker,
+  INDONESIAN_MONTH_NAMES,
+  monthNameToIndex,
+} from '@/components/ui/date-picker';
 import {
   Input,
   NativeSelect,
@@ -51,20 +58,28 @@ export interface CreateContentModalProps {
   onToast?: (message: string, type?: 'success' | 'info' | 'error') => void;
 }
 
-const INDONESIAN_MONTHS = [
-  'Januari',
-  'Februari',
-  'Maret',
-  'April',
-  'Mei',
-  'Juni',
-  'Juli',
-  'Agustus',
-  'September',
-  'Oktober',
-  'November',
-  'Desember',
-];
+function buildDateFromFolder(
+  monthName: string,
+  dayOfMonth: number,
+  year: number
+): Date {
+  const idx = monthNameToIndex(monthName);
+  const monthIndex = idx >= 0 ? idx : new Date().getMonth();
+  const maxDay = new Date(year, monthIndex + 1, 0).getDate();
+  const safeDay = Math.max(1, Math.min(maxDay, dayOfMonth || 1));
+  return new Date(year, monthIndex, safeDay);
+}
+
+function buildDefaultRangeFromDate(start: Date): DateRange {
+  const year = start.getFullYear();
+  const month = start.getMonth();
+  const lastDay = new Date(year, month + 1, 0).getDate();
+  const endDay = Math.min(lastDay, start.getDate() + 6);
+  return {
+    from: start,
+    to: new Date(year, month, endDay),
+  };
+}
 
 export const CreateContentModal: React.FC<CreateContentModalProps> = ({
   isOpen,
@@ -77,6 +92,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
   onCreatedBatch,
   onToast,
 }) => {
+  const defaultYear = activeWorkspace?.defaultYear || new Date().getFullYear();
   const [activeTab, setActiveTab] = useState<CreateContentTab>(initialTab);
 
   // Single slot creation state
@@ -85,6 +101,9 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
   );
   const [isLoadingSuggestion, setIsLoadingSuggestion] =
     useState<boolean>(false);
+  const [selectedDate, setSelectedDate] = useState<Date | undefined>(() =>
+    buildDateFromFolder('November', 1, defaultYear)
+  );
   const [monthFolder, setMonthFolder] = useState<string>('November');
   const [dayOfMonth, setDayOfMonth] = useState<number>(1);
   const [slotCode, setSlotCode] = useState<string>('01');
@@ -98,9 +117,9 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
   const [openInExplorer, setOpenInExplorer] = useState<boolean>(true);
 
   // Batch slot generator state
-  const [batchMonthFolder, setBatchMonthFolder] = useState<string>('November');
-  const [startDay, setStartDay] = useState<number>(1);
-  const [endDay, setEndDay] = useState<number>(7);
+  const [batchRange, setBatchRange] = useState<DateRange | undefined>(() =>
+    buildDefaultRangeFromDate(buildDateFromFolder('November', 1, defaultYear))
+  );
   const [selectedBatchSlots, setSelectedBatchSlots] = useState<string[]>([
     '01',
     '02',
@@ -121,47 +140,50 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     return list.length > 0 ? list : Object.values(DEFAULT_TIME_SLOTS);
   }, [activeWorkspace]);
 
-  const monthSuggestions = useMemo<string[]>(() => {
-    const set = new Set<string>(availableMonths);
-    for (const m of INDONESIAN_MONTHS) set.add(m);
-    return Array.from(set);
-  }, [availableMonths]);
+  const fetchSuggestedSlot = useCallback(
+    async (monthHint?: string) => {
+      try {
+        setIsLoadingSuggestion(true);
+        const query = monthHint
+          ? `?month=${encodeURIComponent(monthHint)}`
+          : '';
+        const res = await fetch(`/api/items/suggest-slot${query}`);
+        if (!res.ok) return;
+        const raw = (await res.json()) as
+          | NextSuggestedSlot
+          | { suggested?: NextSuggestedSlot };
+        const data =
+          raw && 'suggested' in raw && raw.suggested
+            ? raw.suggested
+            : (raw as NextSuggestedSlot);
+        if (!data || !data.folderCode) return;
+        setSuggestedSlot(data);
 
-  const fetchSuggestedSlot = useCallback(async (monthHint?: string) => {
-    try {
-      setIsLoadingSuggestion(true);
-      const query = monthHint
-        ? `?month=${encodeURIComponent(monthHint)}`
-        : '';
-      const res = await fetch(`/api/items/suggest-slot${query}`);
-      if (!res.ok) return;
-      const raw = (await res.json()) as
-        | NextSuggestedSlot
-        | { suggested?: NextSuggestedSlot };
-      const data =
-        raw && 'suggested' in raw && raw.suggested
-          ? raw.suggested
-          : (raw as NextSuggestedSlot);
-      if (!data || !data.folderCode) return;
-      setSuggestedSlot(data);
-      if (data.monthFolder) {
-        setMonthFolder(data.monthFolder);
-        setBatchMonthFolder(data.monthFolder);
+        const targetMonth = data.monthFolder || monthHint || 'November';
+        const targetDay =
+          typeof data.dayOfMonth === 'number' ? data.dayOfMonth : 1;
+        const suggestedDate = buildDateFromFolder(
+          targetMonth,
+          targetDay,
+          defaultYear
+        );
+
+        setSelectedDate(suggestedDate);
+        setMonthFolder(INDONESIAN_MONTH_NAMES[suggestedDate.getMonth()]);
+        setDayOfMonth(suggestedDate.getDate());
+        setBatchRange(buildDefaultRangeFromDate(suggestedDate));
+
+        if (data.slotCode) {
+          setSlotCode(data.slotCode);
+        }
+      } catch {
+        // ignore suggestion fetch errors
+      } finally {
+        setIsLoadingSuggestion(false);
       }
-      if (typeof data.dayOfMonth === 'number') {
-        setDayOfMonth(data.dayOfMonth);
-        setStartDay(data.dayOfMonth);
-        setEndDay(Math.min(31, data.dayOfMonth + 6));
-      }
-      if (data.slotCode) {
-        setSlotCode(data.slotCode);
-      }
-    } catch {
-      // ignore suggestion fetch errors
-    } finally {
-      setIsLoadingSuggestion(false);
-    }
-  }, []);
+    },
+    [defaultYear]
+  );
 
   useEffect(() => {
     if (!isOpen) return;
@@ -183,8 +205,11 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
 
     const fallbackMonth =
       availableMonths[availableMonths.length - 1] || 'November';
-    setMonthFolder(fallbackMonth);
-    setBatchMonthFolder(fallbackMonth);
+    const initialDate = buildDateFromFolder(fallbackMonth, 1, defaultYear);
+    setSelectedDate(initialDate);
+    setMonthFolder(INDONESIAN_MONTH_NAMES[initialDate.getMonth()]);
+    setDayOfMonth(initialDate.getDate());
+    setBatchRange(buildDefaultRangeFromDate(initialDate));
 
     void fetchSuggestedSlot(fallbackMonth);
   }, [
@@ -193,17 +218,25 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     activeWorkspace,
     availableMonths,
     timeSlots,
+    defaultYear,
     fetchSuggestedSlot,
   ]);
 
   useEffect(() => {
     if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape' && !e.defaultPrevented) onClose();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isOpen, onClose]);
+
+  const handleSingleDateChange = (date?: Date) => {
+    if (!date) return;
+    setSelectedDate(date);
+    setMonthFolder(INDONESIAN_MONTH_NAMES[date.getMonth()]);
+    setDayOfMonth(date.getDate());
+  };
 
   const formattedCode = useMemo(() => {
     const dd = String(Math.max(1, Math.min(31, dayOfMonth || 1))).padStart(
@@ -232,10 +265,41 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     });
   }, [hookTitle, ctaQuestion, hashtagsInput, formattedCode]);
 
+  const batchDerived = useMemo(() => {
+    if (!batchRange?.from) {
+      return {
+        monthFolder: '',
+        startDay: 0,
+        endDay: 0,
+        dayCount: 0,
+        clampedCrossMonth: false,
+      };
+    }
+    const from = batchRange.from;
+    const to = batchRange.to ?? from;
+    const fromYear = from.getFullYear();
+    const fromMonth = from.getMonth();
+    const monthName = INDONESIAN_MONTH_NAMES[fromMonth];
+    const lastDayOfMonth = new Date(fromYear, fromMonth + 1, 0).getDate();
+    const clampedCrossMonth =
+      to.getFullYear() !== fromYear || to.getMonth() !== fromMonth;
+    const startDay = from.getDate();
+    const endDay = clampedCrossMonth
+      ? lastDayOfMonth
+      : Math.max(startDay, to.getDate());
+
+    return {
+      monthFolder: monthName,
+      startDay,
+      endDay,
+      dayCount: Math.max(0, endDay - startDay + 1),
+      clampedCrossMonth,
+    };
+  }, [batchRange]);
+
   const batchTotalCount = useMemo(() => {
-    const days = Math.max(0, endDay - startDay + 1);
-    return days * selectedBatchSlots.length;
-  }, [startDay, endDay, selectedBatchSlots]);
+    return batchDerived.dayCount * selectedBatchSlots.length;
+  }, [batchDerived.dayCount, selectedBatchSlots]);
 
   const handleToggleBatchSlot = (code: string) => {
     setSelectedBatchSlots((prev) =>
@@ -255,8 +319,8 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
 
   const handleCreateSingle = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (dayOfMonth < 1 || dayOfMonth > 31) {
-      setErrorMsg('Tanggal harus berada di antara 1 sampai 31.');
+    if (!selectedDate || dayOfMonth < 1 || dayOfMonth > 31) {
+      setErrorMsg('Pilih tanggal yang valid.');
       return;
     }
 
@@ -296,7 +360,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
         database: PlannerDatabase;
       };
       onToast?.(
-        `Folder konten ${data.item.folderCode} dan caption.txt berhasil dibuat.`,
+        `Folder ${data.item.folderCode} dan caption.txt dibuat.`,
         'success'
       );
       onCreatedSingle(data);
@@ -312,12 +376,16 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
 
   const handleCreateBatch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (startDay < 1 || endDay > 31 || startDay > endDay) {
-      setErrorMsg('Rentang tanggal tidak valid (harus 1 sampai 31).');
+    if (
+      batchDerived.dayCount <= 0 ||
+      batchDerived.startDay < 1 ||
+      batchDerived.endDay > 31
+    ) {
+      setErrorMsg('Pilih rentang tanggal terlebih dahulu.');
       return;
     }
     if (selectedBatchSlots.length === 0) {
-      setErrorMsg('Pilih minimal 1 slot jam untuk di-generate.');
+      setErrorMsg('Pilih minimal 1 slot jam.');
       return;
     }
 
@@ -328,9 +396,9 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
       .map((t) => (t.startsWith('#') ? t : `#${t}`));
 
     const payload: BatchGenerateSlotsInput = {
-      monthFolder: batchMonthFolder.trim() || undefined,
-      startDay,
-      endDay,
+      monthFolder: batchDerived.monthFolder || undefined,
+      startDay: batchDerived.startDay,
+      endDay: batchDerived.endDay,
       slotCodes: selectedBatchSlots,
       defaultHashtags: parsedHashtags,
       ctaTemplate: batchCtaTemplate.trim() || undefined,
@@ -357,7 +425,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
         database: PlannerDatabase;
       };
       onToast?.(
-        `Batch selesai: ${data.createdCodes.length} folder baru dibuat (${data.skippedCodes.length} dilewati karena sudah ada).`,
+        `Batch selesai: ${data.createdCodes.length} folder dibuat (${data.skippedCodes.length} dilewati).`,
         'success'
       );
       onCreatedBatch(data);
@@ -379,13 +447,13 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Buat Konten Baru atau Batch Generate Slot"
-      className="fixed inset-0 z-[65] flex items-center justify-center bg-black/65 p-3 sm:p-5"
+      aria-label="Buat Konten Baru"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 sm:p-5"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex max-h-[92vh] w-full max-w-[780px] flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground shadow-lg">
+      <div className="flex max-h-[92vh] w-full max-w-[760px] flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground shadow-lg">
         {/* Header */}
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-5 py-3.5">
           <div className="flex min-w-0 items-center gap-2.5">
@@ -398,7 +466,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="truncate text-sm font-semibold text-foreground sm:text-base">
-                  Buat Slot Konten & caption.txt
+                  Buat Konten
                 </h2>
                 {activeWorkspace ? (
                   <Badge variant="outline" size="xs" className="font-mono">
@@ -406,9 +474,8 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                   </Badge>
                 ) : null}
               </div>
-              <p className="truncate text-xs text-muted-foreground">
-                Buat folder kode DD.SLOT beserta template caption.txt langsung di
-                disk.
+              <p className="truncate text-xs font-light text-muted-foreground/75">
+                Siapkan folder DD.SLOT dan caption.txt di disk.
               </p>
             </div>
           </div>
@@ -446,36 +513,34 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
             >
               <TabsTrigger value="single">
                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Buat 1 Konten Baru</span>
+                <span>Tunggal</span>
               </TabsTrigger>
               <TabsTrigger value="batch">
                 <CalendarPlus className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Batch Generate Slot (Mingguan / Bulanan)</span>
+                <span>Batch</span>
               </TabsTrigger>
             </TabsList>
 
             {/* TAB 1: SINGLE CONTENT */}
             <TabsContent value="single">
               <form onSubmit={handleCreateSingle} className="space-y-4">
-                {/* Smart Slot Finder Banner */}
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium text-foreground">
-                      Smart Slot Finder:
+                      Saran Slot
                     </span>
                     {isLoadingSuggestion ? (
-                      <span className="text-muted-foreground">
-                        Mencari slot kosong berikutnya...
+                      <span className="font-light text-muted-foreground/75">
+                        Mencari slot kosong...
                       </span>
                     ) : suggestedSlot ? (
                       <Badge variant="success" size="sm" className="font-mono">
-                        Saran Slot Kosong: {suggestedSlot.folderCode} (
-                        {suggestedSlot.slotLabel}{' '}
+                        {suggestedSlot.folderCode} ({suggestedSlot.slotLabel}{' '}
                         {suggestedSlot.slotTimeWindow})
                       </Badge>
                     ) : (
-                      <span className="text-muted-foreground">
-                        Pilih tanggal dan slot jam di bawah
+                      <span className="font-light text-muted-foreground/75">
+                        Pilih tanggal dan slot.
                       </span>
                     )}
                   </div>
@@ -486,12 +551,18 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                       variant="outline"
                       size="xs"
                       onClick={() => {
-                        setMonthFolder(suggestedSlot.monthFolder);
-                        setDayOfMonth(suggestedSlot.dayOfMonth);
+                        const date = buildDateFromFolder(
+                          suggestedSlot.monthFolder,
+                          suggestedSlot.dayOfMonth,
+                          defaultYear
+                        );
+                        setSelectedDate(date);
+                        setMonthFolder(INDONESIAN_MONTH_NAMES[date.getMonth()]);
+                        setDayOfMonth(date.getDate());
                         setSlotCode(suggestedSlot.slotCode);
                       }}
                     >
-                      Pakai Slot {suggestedSlot.folderCode}
+                      Pakai {suggestedSlot.folderCode}
                     </Button>
                   ) : null}
                 </div>
@@ -499,50 +570,25 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Jadwal & Lokasi Folder (DD.SLOT)
+                      Jadwal
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3">
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div className="space-y-1.5">
                         <label
-                          htmlFor="single-month-input"
+                          htmlFor="single-date-picker"
                           className="block text-xs font-medium text-foreground"
                         >
-                          Folder Bulan
+                          Tanggal
                         </label>
-                        <Input
-                          id="single-month-input"
-                          list="cpgp-month-suggestions"
-                          value={monthFolder}
-                          onChange={(e) => setMonthFolder(e.target.value)}
-                          placeholder="Contoh: November, Desember"
-                        />
-                        <datalist id="cpgp-month-suggestions">
-                          {monthSuggestions.map((m) => (
-                            <option key={m} value={m} />
-                          ))}
-                        </datalist>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label
-                          htmlFor="single-day-input"
-                          className="block text-xs font-medium text-foreground"
-                        >
-                          Tanggal (1-31)
-                        </label>
-                        <Input
-                          id="single-day-input"
-                          type="number"
-                          min={1}
-                          max={31}
-                          value={dayOfMonth}
-                          onChange={(e) =>
-                            setDayOfMonth(Number(e.target.value) || 1)
-                          }
-                          className="font-mono"
-                          required
+                        <DatePicker
+                          id="single-date-picker"
+                          value={selectedDate}
+                          onChange={handleSingleDateChange}
+                          defaultMonth={selectedDate}
+                          placeholder="Pilih tanggal"
+                          ariaLabel="Pilih tanggal konten"
                         />
                       </div>
 
@@ -551,7 +597,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                           htmlFor="single-slot-select"
                           className="block text-xs font-medium text-foreground"
                         >
-                          Slot Jam Upload
+                          Slot Jam
                         </label>
                         <NativeSelect
                           id="single-slot-select"
@@ -569,10 +615,10 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px]">
-                      <span className="text-muted-foreground">
-                        Lokasi berkas fisik:
+                      <span className="font-light text-muted-foreground/75">
+                        Lokasi
                       </span>
-                      <code className="font-mono font-semibold text-foreground">
+                      <code className="break-all font-mono font-medium text-foreground">
                         {liveCaptionPathPreview}
                       </code>
                     </div>
@@ -582,7 +628,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Penyusun caption.txt Terstruktur
+                      Caption
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3">
@@ -591,14 +637,14 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         htmlFor="single-hook-input"
                         className="block text-xs font-medium text-foreground"
                       >
-                        Hook / Judul Pertanyaan Utama (Paragraf 1)
+                        Hook
                       </label>
                       <Textarea
                         id="single-hook-input"
                         rows={2}
                         value={hookTitle}
                         onChange={(e) => setHookTitle(e.target.value)}
-                        placeholder="Contoh: Mengapa Perpustakaan Alexandria yang legendaris bisa musnah tanpa jejak?"
+                        placeholder="Mengapa Perpustakaan Alexandria bisa musnah?"
                       />
                     </div>
 
@@ -608,7 +654,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                           htmlFor="single-cta-input"
                           className="block text-xs font-medium text-foreground"
                         >
-                          Pertanyaan CTA Komentar (Paragraf 2)
+                          CTA
                         </label>
                         <Button
                           type="button"
@@ -617,7 +663,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                           onClick={handleAppendCtaSuffix}
                         >
                           <Plus className="h-3 w-3" aria-hidden="true" />
-                          <span>&quot;Tulis di komentar.&quot;</span>
+                          <span>Tulis di komentar.</span>
                         </Button>
                       </div>
                       <Input
@@ -633,7 +679,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         htmlFor="single-hashtags-input"
                         className="block text-xs font-medium text-foreground"
                       >
-                        Hashtags (Baris Terakhir)
+                        Hashtag
                       </label>
                       <Input
                         id="single-hashtags-input"
@@ -645,8 +691,8 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                     </div>
 
                     <div className="rounded-md border border-border bg-muted/30 p-2.5 space-y-1">
-                      <span className="block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                        Pratinjau Isi caption.txt
+                      <span className="block text-[10px] font-light uppercase tracking-wide text-muted-foreground/75">
+                        Pratinjau
                       </span>
                       <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground">
                         {liveCaptionPreview}
@@ -655,7 +701,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
 
                     <label
                       htmlFor="single-open-explorer"
-                      className="flex items-center gap-2 pt-1 text-xs font-medium text-foreground"
+                      className="flex items-center gap-2 pt-1 text-xs font-light text-muted-foreground/75"
                     >
                       <input
                         id="single-open-explorer"
@@ -664,10 +710,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         onChange={(e) => setOpenInExplorer(e.target.checked)}
                         className="h-4 w-4 rounded border-input accent-primary"
                       />
-                      <span>
-                        Buka folder di Windows Explorer setelah dibuat (untuk
-                        menaruh file video & cover)
-                      </span>
+                      <span>Buka folder di Explorer setelah dibuat</span>
                     </label>
                   </CardContent>
                 </Card>
@@ -694,7 +737,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                     ) : (
                       <Check className="h-3.5 w-3.5" aria-hidden="true" />
                     )}
-                    <span>Buat Folder {formattedCode} & caption.txt</span>
+                    <span>Buat {formattedCode}</span>
                   </Button>
                 </div>
               </form>
@@ -706,73 +749,42 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Rentang Tanggal & Slot Harian
+                      Rentang Jadwal
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3">
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                      <div className="space-y-1.5">
-                        <label
-                          htmlFor="batch-month-input"
-                          className="block text-xs font-medium text-foreground"
-                        >
-                          Folder Bulan
-                        </label>
-                        <Input
-                          id="batch-month-input"
-                          list="cpgp-month-suggestions"
-                          value={batchMonthFolder}
-                          onChange={(e) => setBatchMonthFolder(e.target.value)}
-                          placeholder="November"
-                        />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label
-                          htmlFor="batch-start-day"
-                          className="block text-xs font-medium text-foreground"
-                        >
-                          Dari Tanggal (1-31)
-                        </label>
-                        <Input
-                          id="batch-start-day"
-                          type="number"
-                          min={1}
-                          max={31}
-                          value={startDay}
-                          onChange={(e) =>
-                            setStartDay(Number(e.target.value) || 1)
-                          }
-                          className="font-mono"
-                          required
-                        />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label
-                          htmlFor="batch-end-day"
-                          className="block text-xs font-medium text-foreground"
-                        >
-                          Sampai Tanggal (1-31)
-                        </label>
-                        <Input
-                          id="batch-end-day"
-                          type="number"
-                          min={1}
-                          max={31}
-                          value={endDay}
-                          onChange={(e) =>
-                            setEndDay(Number(e.target.value) || 1)
-                          }
-                          className="font-mono"
-                          required
-                        />
-                      </div>
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="batch-date-range"
+                        className="block text-xs font-medium text-foreground"
+                      >
+                        Rentang
+                      </label>
+                      <DateRangePicker
+                        id="batch-date-range"
+                        value={batchRange}
+                        onChange={setBatchRange}
+                        defaultMonth={batchRange?.from ?? selectedDate}
+                        placeholder="Pilih rentang tanggal"
+                        ariaLabel="Pilih rentang tanggal batch"
+                      />
+                      {batchDerived.clampedCrossMonth ? (
+                        <p className="text-[11px] font-light text-muted-foreground/75">
+                          Rentang lintas bulan dibatasi hingga akhir{' '}
+                          {batchDerived.monthFolder} (tgl {batchDerived.endDay}
+                          ).
+                        </p>
+                      ) : batchDerived.monthFolder ? (
+                        <p className="text-[11px] font-light text-muted-foreground/75">
+                          Folder bulan {batchDerived.monthFolder} (tgl{' '}
+                          {batchDerived.startDay}-{batchDerived.endDay}).
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className="space-y-1.5">
                       <span className="block text-xs font-medium text-foreground">
-                        Slot Jam yang Akan Dibuat Setiap Hari
+                        Slot Harian
                       </span>
                       <div className="flex flex-wrap gap-2">
                         {timeSlots.map((slot) => {
@@ -815,7 +827,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Template Dasar caption.txt
+                      Template Caption
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3">
@@ -824,7 +836,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         htmlFor="batch-cta-input"
                         className="block text-xs font-medium text-foreground"
                       >
-                        Template CTA Komentar
+                        CTA
                       </label>
                       <Input
                         id="batch-cta-input"
@@ -839,7 +851,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         htmlFor="batch-hashtags-input"
                         className="block text-xs font-medium text-foreground"
                       >
-                        Template Hashtags Default
+                        Hashtag
                       </label>
                       <Input
                         id="batch-hashtags-input"
@@ -851,11 +863,13 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs">
-                      <span>Total folder yang akan disiapkan:</span>
+                      <span className="font-light text-muted-foreground/75">
+                        Ringkasan
+                      </span>
                       <Badge variant="default" size="sm" className="font-mono">
-                        {Math.max(0, endDay - startDay + 1)} hari x{' '}
+                        {batchDerived.dayCount} hari ·{' '}
                         {selectedBatchSlots.length} slot = {batchTotalCount}{' '}
-                        folder konten
+                        folder
                       </Badge>
                     </div>
                   </CardContent>
@@ -885,7 +899,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                     ) : (
                       <Layers className="h-3.5 w-3.5" aria-hidden="true" />
                     )}
-                    <span>Generate Semua Folder & caption.txt</span>
+                    <span>Buat {batchTotalCount} Folder</span>
                   </Button>
                 </div>
               </form>

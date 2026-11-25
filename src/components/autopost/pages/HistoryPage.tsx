@@ -1,8 +1,10 @@
 import { useMemo, useState, type ComponentProps } from 'react';
+import type { DateRange } from 'react-day-picker';
 import { Check, ExternalLink, RotateCcw, Square } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { DateRangePicker } from '@/components/ui/date-picker';
 import { Input, NativeSelect } from '@/components/ui/input';
 import {
   Table,
@@ -79,9 +81,20 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
   const [statusFilter, setStatusFilter] = useState<AutoPostJobStatus | 'all'>(
     'all'
   );
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
 
   const filteredJobs = useMemo(() => {
     const needle = search.trim().toLowerCase();
+    let rangeStart: Date | null = null;
+    let rangeEnd: Date | null = null;
+
+    if (dateRange?.from) {
+      rangeStart = new Date(dateRange.from);
+      rangeStart.setHours(0, 0, 0, 0);
+      rangeEnd = new Date(dateRange.to ?? dateRange.from);
+      rangeEnd.setHours(23, 59, 59, 999);
+    }
+
     return jobs
       .filter((job) => {
         if (
@@ -93,6 +106,16 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
         if (statusFilter !== 'all' && job.status !== statusFilter) {
           return false;
         }
+        if (rangeStart && rangeEnd) {
+          const created = new Date(job.createdAt);
+          if (
+            Number.isNaN(created.getTime()) ||
+            created < rangeStart ||
+            created > rangeEnd
+          ) {
+            return false;
+          }
+        }
         if (needle) {
           const haystack =
             `${job.folderCode} ${PLATFORM_META[job.platform].label}`.toLowerCase();
@@ -101,12 +124,13 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
         return true;
       })
       .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
-  }, [jobs, platformFilter, search, statusFilter]);
+  }, [dateRange, jobs, platformFilter, search, statusFilter]);
 
   const hasActiveFilter =
     search.trim().length > 0 ||
     platformFilter.length > 0 ||
-    statusFilter !== 'all';
+    statusFilter !== 'all' ||
+    Boolean(dateRange?.from);
 
   function togglePlatform(platform: PlatformKey) {
     setPlatformFilter((prev) =>
@@ -120,6 +144,7 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
     setSearch('');
     setPlatformFilter([]);
     setStatusFilter('all');
+    setDateRange(undefined);
   }
 
   return (
@@ -128,10 +153,7 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
         <CardContent className="p-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
             <div className="min-w-0 flex-1 space-y-1.5">
-              <label
-                htmlFor="autopost-history-search"
-                className="sr-only"
-              >
+              <label htmlFor="autopost-history-search" className="sr-only">
                 Cari riwayat
               </label>
               <Input
@@ -139,7 +161,7 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Cari kode konten atau platform"
+                placeholder="Cari kode atau platform"
                 className="w-full"
               />
             </div>
@@ -177,8 +199,25 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
 
               <div className="space-y-1.5">
                 <label
+                  htmlFor="autopost-history-date-range"
+                  className="block text-[11px] font-light text-muted-foreground/75"
+                >
+                  Tanggal
+                </label>
+                <DateRangePicker
+                  id="autopost-history-date-range"
+                  value={dateRange}
+                  onChange={setDateRange}
+                  placeholder="Semua tanggal"
+                  ariaLabel="Filter rentang tanggal riwayat"
+                  className="w-full sm:w-[220px]"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label
                   htmlFor="autopost-history-status"
-                  className="block text-[11px] font-medium text-muted-foreground"
+                  className="block text-[11px] font-light text-muted-foreground/75"
                 >
                   Status
                 </label>
@@ -227,19 +266,19 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
             <TableRow>
               <TableCell
                 colSpan={6}
-                className="p-6 text-center text-muted-foreground"
+                className="p-6 text-center font-light text-muted-foreground/75"
               >
-                Memuat riwayat Auto-Post.
+                Memuat riwayat.
               </TableCell>
             </TableRow>
           ) : filteredJobs.length === 0 ? (
             <TableRow>
               <TableCell colSpan={6} className="p-6">
                 <div className="flex flex-col items-center gap-3 text-center">
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-xs font-light text-muted-foreground/75">
                     {jobs.length === 0
-                      ? 'Belum ada riwayat Auto-Post.'
-                      : 'Tidak ada proses yang cocok dengan filter.'}
+                      ? 'Belum ada riwayat.'
+                      : 'Tidak ada hasil untuk filter ini.'}
                   </p>
                   {jobs.length === 0 ? (
                     <Button
@@ -248,7 +287,7 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
                       size="sm"
                       onClick={() => ctx.onNavigate('dashboard')}
                     >
-                      Kembali ke Dasbor
+                      Ke Dasbor
                     </Button>
                   ) : (
                     <Button
@@ -271,7 +310,7 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
                 job.status === 'running' || job.status === 'queued';
               return (
                 <TableRow key={job.jobId}>
-                  <TableCell className="whitespace-nowrap text-muted-foreground">
+                  <TableCell className="whitespace-nowrap font-light text-muted-foreground/75">
                     {formatJobTime(job.createdAt)}
                   </TableCell>
                   <TableCell className="font-mono">{job.folderCode}</TableCell>
@@ -327,8 +366,8 @@ export function HistoryPage({ ctx }: AutoPostPageProps) {
         </TableBody>
       </Table>
 
-      <p className="text-[11px] text-muted-foreground">
-        Menampilkan {filteredJobs.length} dari {jobs.length} proses
+      <p className="text-[11px] font-light text-muted-foreground/75">
+        {filteredJobs.length} dari {jobs.length} proses
       </p>
     </div>
   );

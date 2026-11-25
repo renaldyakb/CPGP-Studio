@@ -20,6 +20,7 @@ import { TablePage } from './routes/planner/TablePage';
 import { CalendarPage } from './routes/planner/CalendarPage';
 import { SchedulePage } from './routes/planner/SchedulePage';
 import { GalleryPage } from './routes/planner/GalleryPage';
+import { WatermarkPage } from './routes/planner/WatermarkPage';
 
 function readString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -32,6 +33,7 @@ export interface PlannerSearch {
   caption?: string;
   watermark?: string;
   view?: string;
+  item?: string;
 }
 
 export interface AutoPostSearch {
@@ -123,6 +125,7 @@ const plannerLayoutRoute = createRoute({
     caption: readString(search.caption),
     watermark: readString(search.watermark),
     view: readString(search.view),
+    item: readString(search.item),
   }),
   component: App,
 });
@@ -161,6 +164,12 @@ const galleryRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/galeri',
   component: GalleryPage,
+});
+
+const watermarkRoute = createRoute({
+  getParentRoute: () => plannerLayoutRoute,
+  path: '/watermark',
+  component: WatermarkPage,
 });
 
 const autoPostRoute = createRoute({
@@ -236,6 +245,7 @@ const routeTree = rootRoute.addChildren([
     calendarRoute,
     scheduleRoute,
     galleryRoute,
+    watermarkRoute,
   ]),
   autoPostRoute.addChildren([
     autoPostIndexRoute,

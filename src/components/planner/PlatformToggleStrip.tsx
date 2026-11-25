@@ -38,35 +38,35 @@ function getPlatformStatusVisual(status: PlatformUploadStatus): {
       return {
         statusLabel: 'Published',
         pillClassName:
-          'border-[#86efac] bg-[#dcfce7] text-[#166534] dark:border-[#166534] dark:bg-[#052e16] dark:text-[#86efac]',
+          'border-transparent bg-[#dcfce7]/85 text-[#166534] hover:bg-[#dcfce7] dark:bg-[#052e16]/85 dark:text-[#86efac] dark:hover:bg-[#052e16]',
         useBrandIconColor: false,
       };
     case 'scheduled':
       return {
         statusLabel: 'Terjadwal',
         pillClassName:
-          'border-[#7dd3fc] bg-[#e0f2fe] text-[#075985] dark:border-[#0369a1] dark:bg-[#082f49] dark:text-[#7dd3fc]',
+          'border-transparent bg-[#e0f2fe]/85 text-[#075985] hover:bg-[#e0f2fe] dark:bg-[#082f49]/85 dark:text-[#7dd3fc] dark:hover:bg-[#082f49]',
         useBrandIconColor: false,
       };
     case 'uploaded_draft':
       return {
         statusLabel: 'Draft Studio',
         pillClassName:
-          'border-[#fcd34d] bg-[#fef3c7] text-[#92400e] dark:border-[#92400e] dark:bg-[#451a03] dark:text-[#fcd34d]',
+          'border-transparent bg-[#fef3c7]/85 text-[#92400e] hover:bg-[#fef3c7] dark:bg-[#451a03]/85 dark:text-[#fcd34d] dark:hover:bg-[#451a03]',
         useBrandIconColor: false,
       };
     case 'issue':
       return {
         statusLabel: 'Kendala / Revisi',
         pillClassName:
-          'border-[#fca5a5] bg-[#fee2e2] text-[#991b1b] dark:border-[#991b1b] dark:bg-[#450a0a] dark:text-[#fca5a5]',
+          'border-transparent bg-[#fee2e2]/85 text-[#991b1b] hover:bg-[#fee2e2] dark:bg-[#450a0a]/85 dark:text-[#fca5a5] dark:hover:bg-[#450a0a]',
         useBrandIconColor: false,
       };
     default:
       return {
         statusLabel: 'Belum Upload',
         pillClassName:
-          'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground',
+          'border-transparent bg-transparent text-muted-foreground opacity-60 hover:opacity-100 hover:bg-card hover:text-foreground',
         useBrandIconColor: true,
       };
   }
@@ -92,14 +92,12 @@ export const PlatformToggleStrip: React.FC<PlatformToggleStripProps> = ({
         className
       )}
     >
-      <div className="flex items-center gap-1">
+      <div className="inline-flex items-center gap-0.5 rounded-md border border-border/60 bg-muted/35 p-0.5">
         {PLATFORM_ORDER.map((key) => {
           const meta = PLATFORM_META[key];
           const status = platforms[key]?.status || 'not_started';
           const visual = getPlatformStatusVisual(status);
-          const tooltipText = onTogglePlatform && !disabled
-            ? `${meta.label}: ${visual.statusLabel} (Klik untuk ubah status)`
-            : `${meta.label}: ${visual.statusLabel}`;
+          const tooltipText = `${meta.label}: ${visual.statusLabel}`;
 
           return (
             <Tooltip key={key}>
@@ -116,7 +114,7 @@ export const PlatformToggleStrip: React.FC<PlatformToggleStripProps> = ({
                     }}
                     aria-label={tooltipText}
                     className={cn(
-                      'inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring disabled:pointer-events-none',
+                      'inline-flex h-6 items-center gap-1 rounded-[5px] border px-1.5 text-[11px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring disabled:pointer-events-none',
                       visual.pillClassName
                     )}
                   />
@@ -127,17 +125,17 @@ export const PlatformToggleStrip: React.FC<PlatformToggleStripProps> = ({
                   size={13}
                   className={
                     visual.useBrandIconColor
-                      ? `${meta.accentClass} opacity-80`
+                      ? `${meta.accentClass}`
                       : 'text-current'
                   }
                 />
                 {status === 'published' ? (
-                  <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
-                ) : status === 'scheduled' || status === 'uploaded_draft' ? (
-                  <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <Check className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+                ) : status === 'scheduled' ? (
+                  <Clock className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                 ) : status === 'issue' ? (
                   <AlertTriangle
-                    className="h-3 w-3 shrink-0"
+                    className="h-2.5 w-2.5 shrink-0"
                     aria-hidden="true"
                   />
                 ) : null}
@@ -150,7 +148,7 @@ export const PlatformToggleStrip: React.FC<PlatformToggleStripProps> = ({
 
       {showCounter ? (
         <span
-          className="shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums"
+          className="shrink-0 font-mono text-[11px] font-light text-muted-foreground/75 tabular-nums"
           title={`${publishedCount} dari 4 platform sudah publish`}
         >
           {publishedCount}/4

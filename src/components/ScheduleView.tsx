@@ -1,7 +1,6 @@
 import React, { useMemo } from 'react';
 import {
   ContentPlannerItem,
-  KANBAN_COLUMNS,
   PlatformKey,
   WorkflowStatus,
 } from '../types/planner';
@@ -12,6 +11,16 @@ import { Card } from '@/components/ui/card';
 import { ItemActionsMenu } from '@/components/ItemActionsMenu';
 import { PlatformToggleStrip } from '@/components/planner/PlatformToggleStrip';
 import { formatSlotShort, parseTimeToHoursMinutes } from '@/lib/formatSlot';
+
+const STATUS_SHORT_LABEL: Record<WorkflowStatus, string> = {
+  draft_assets: 'Draft',
+  needs_watermark: 'Watermark',
+  ready_to_upload: 'Siap',
+  scheduled: 'Terjadwal',
+  partially_published: 'Sebagian',
+  published_all: 'Selesai',
+  on_hold: 'Hold',
+};
 
 export interface ScheduleViewProps {
   items: ContentPlannerItem[];
@@ -188,13 +197,15 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
                 Slot {slotDef.code} {slotDef.label}
               </span>
             </div>
-            <span className="font-mono text-[11px] text-muted-foreground">
+            <span className="font-mono text-[11px] font-light text-muted-foreground/75">
               {expectedCode}
             </span>
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs font-light text-muted-foreground/75">
             Folder{' '}
-            <code className="font-mono text-foreground">{expectedCode}</code>{' '}
+            <code className="font-mono font-normal text-foreground">
+              {expectedCode}
+            </code>{' '}
             belum tersedia di direktori KONTEN.
           </p>
         </Card>
@@ -203,17 +214,16 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
 
     const { assets, readiness, captionParsed } = item.autoMetadata;
     const { workflowStatus, customTitle } = item.userProperties;
-    const statusCol =
-      KANBAN_COLUMNS.find((c) => c.id === workflowStatus) || KANBAN_COLUMNS[0];
+    const statusLabel = STATUS_SHORT_LABEL[workflowStatus];
     const displayTitle =
       customTitle?.trim() ||
       captionParsed.hookTitle?.trim() ||
       `Konten ${item.folderCode}`;
 
     const fileMeta = assets.wmVideo.exists
-      ? `wm_final ${assets.wmVideo.sizeFormatted}`
+      ? assets.wmVideo.sizeFormatted
       : assets.rawVideo.exists
-        ? `raw ${assets.rawVideo.sizeFormatted}`
+        ? `Raw ${assets.rawVideo.sizeFormatted}`
         : 'Belum ada video';
 
     return (
@@ -224,7 +234,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
             <span className="font-mono font-semibold text-xs text-foreground shrink-0">
               {item.folderCode}
             </span>
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground shrink-0">
+            <span className="inline-flex items-center gap-1 text-[11px] font-light text-muted-foreground/75 shrink-0">
               {isDaySlot ? (
                 <Sun className="h-3 w-3" aria-hidden="true" />
               ) : (
@@ -232,8 +242,8 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
               )}
               <span>{formatSlotShort(item.schedule)}</span>
             </span>
-            <span className="text-[11px] text-muted-foreground truncate hidden sm:inline">
-              · {statusCol.shortLabel}
+            <span className="text-[11px] font-light text-muted-foreground/75 truncate hidden sm:inline">
+              · {statusLabel}
             </span>
           </div>
 
@@ -242,7 +252,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
               variant={readiness.hasWmFinal ? 'success' : 'warning'}
               size="xs"
             >
-              {readiness.hasWmFinal ? 'WM Siap' : 'Belum WM'}
+              {readiness.hasWmFinal ? 'Siap' : 'No WM'}
             </Badge>
             <ItemActionsMenu
               item={item}
@@ -284,10 +294,10 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
             <h4 className="text-[13px] font-medium leading-snug text-foreground line-clamp-2 group-hover:underline">
               {displayTitle}
             </h4>
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-              <span className="font-mono">{fileMeta}</span>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-light text-muted-foreground/75">
+              <span className="font-mono tabular-nums">{fileMeta}</span>
               {assets.otherFiles.length > 0 && (
-                <span className="text-[#991b1b] dark:text-[#fca5a5]">
+                <span className="font-normal text-[#991b1b] dark:text-[#fca5a5]">
                   +{assets.otherFiles.length} file ekstra
                 </span>
               )}
@@ -336,9 +346,9 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Compact Dynamic Slot Header Bar */}
+      {/* Slim Dynamic Slot Header Bar */}
       <div
-        className={`grid gap-3 rounded-lg border border-border bg-card px-4 py-2.5 text-xs ${slotGridClass} lg:gap-4`}
+        className={`grid gap-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-1.5 text-xs ${slotGridClass} lg:gap-4`}
       >
         {activeSlots.map((slot, index) => {
           const isDaySlot =
@@ -346,36 +356,31 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
           return (
             <div
               key={slot.code}
-              className={`flex items-center justify-between gap-2 ${
+              className={`flex items-center gap-2 min-w-0 ${
                 index > 0
-                  ? 'border-t border-border pt-2 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0'
+                  ? 'border-t border-border/70 pt-1.5 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0'
                   : ''
               }`}
             >
-              <div className="flex items-center gap-2 min-w-0">
-                {isDaySlot ? (
-                  <Sun
-                    className="h-3.5 w-3.5 text-foreground shrink-0"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <Moon
-                    className="h-3.5 w-3.5 text-foreground shrink-0"
-                    aria-hidden="true"
-                  />
-                )}
-                <span className="font-semibold text-foreground truncate">
-                  Slot {slot.code} {slot.label}
-                  {slot.timeWindow ? ` (${slot.timeWindow})` : ''}
+              {isDaySlot ? (
+                <Sun
+                  className="h-3.5 w-3.5 text-muted-foreground shrink-0"
+                  aria-hidden="true"
+                />
+              ) : (
+                <Moon
+                  className="h-3.5 w-3.5 text-muted-foreground shrink-0"
+                  aria-hidden="true"
+                />
+              )}
+              <span className="font-medium text-foreground truncate">
+                Slot {slot.code} {slot.label}
+              </span>
+              {slot.timeWindow && (
+                <span className="font-mono text-[11px] font-light text-muted-foreground/75 truncate">
+                  {slot.timeWindow}
                 </span>
-              </div>
-              <Badge
-                variant="outline"
-                size="xs"
-                className="font-mono shrink-0"
-              >
-                DD.{slot.code}
-              </Badge>
+              )}
             </div>
           );
         })}
@@ -415,11 +420,10 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
                         : 'secondary'
                   }
                   size="xs"
+                  title={`${readyDayCount} dari ${totalSlotsCount} slot siap upload`}
+                  className="font-mono tabular-nums"
                 >
-                  <span className="font-mono">
-                    {readyDayCount}/{totalSlotsCount}
-                  </span>
-                  <span>WM Siap</span>
+                  {readyDayCount}/{totalSlotsCount}
                 </Badge>
               </header>
 

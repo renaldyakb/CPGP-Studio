@@ -1,4 +1,4 @@
-import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
+import { Search, SlidersHorizontal, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { DEFAULT_TIME_SLOTS } from '../../../shared/rulePresets';
@@ -231,24 +231,16 @@ export function PlannerToolbar() {
         </Popover>
       </div>
 
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-[11px] text-muted-foreground">
-          {workspace.filteredItems.length} dari {workspace.allItems.length} konten
+      <div className="flex items-center gap-2 font-mono text-[11px] font-light text-muted-foreground/85">
+        <span>
+          {workspace.filteredItems.length}/{workspace.allItems.length} konten
         </span>
-        <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">
-          {workspace.database?.stats
-            ? `${workspace.database.stats.uploadReadyCount} siap, ${workspace.database.stats.needsWatermarkCount} butuh WM`
-            : 'memuat data'}
-        </span>
-        <Button
-          type="button"
-          variant="editorial"
-          size="sm"
-          onClick={() => workspace.openCreateContent('single')}
-        >
-          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-          <span>Konten Baru</span>
-        </Button>
+        {workspace.database?.stats ? (
+          <span className="hidden sm:inline">
+            · {workspace.database.stats.uploadReadyCount} siap ·{' '}
+            {workspace.database.stats.needsWatermarkCount} WM
+          </span>
+        ) : null}
       </div>
     </div>
   );

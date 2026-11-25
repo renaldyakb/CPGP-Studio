@@ -242,7 +242,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                     <span className="font-mono text-xs font-semibold text-foreground shrink-0">
                       {item.folderCode}
                     </span>
-                    <span className="text-[11px] text-muted-foreground truncate">
+                    <span className="text-[11px] font-light text-muted-foreground/75 truncate">
                       · {formatSlotShort(item.schedule)}
                     </span>
                   </div>
@@ -252,7 +252,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                       variant={readiness.hasWmFinal ? 'success' : 'warning'}
                       size="xs"
                     >
-                      {readiness.hasWmFinal ? 'WM Siap' : 'Belum WM'}
+                      {readiness.hasWmFinal ? 'Siap' : 'No WM'}
                     </Badge>
                     <ItemActionsMenu
                       item={item}
@@ -278,7 +278,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                     {displayTitle}
                   </button>
                   <span
-                    className="font-mono text-[11px] text-muted-foreground tabular-nums shrink-0"
+                    className="font-mono text-[11px] font-light text-muted-foreground/75 tabular-nums shrink-0"
                     title={`${publishedCount} dari 4 platform sudah tayang`}
                   >
                     {publishedCount}/4

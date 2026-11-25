@@ -65,6 +65,16 @@ interface InternalColumn {
   items: ContentPlannerItem[];
 }
 
+const WORKFLOW_COLUMN_TITLE: Record<WorkflowStatus, string> = {
+  draft_assets: 'Draft',
+  needs_watermark: 'Watermark',
+  ready_to_upload: 'Siap',
+  scheduled: 'Terjadwal',
+  partially_published: 'Sebagian',
+  published_all: 'Selesai',
+  on_hold: 'Hold',
+};
+
 export const KanbanView: React.FC<KanbanViewProps> = ({
   items,
   onSelectItem,
@@ -154,14 +164,17 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
 
   const columns = useMemo<InternalColumn[]>(() => {
     if (activeGroupBy === 'status') {
-      return KANBAN_COLUMNS.map((col) => ({
-        id: col.id,
-        title: col.label,
-        shortTitle: col.shortLabel,
-        subtitle: col.description,
-        workflowStatus: col.id,
-        items: baseStatusColumnsRecord[col.id] ?? [],
-      }));
+      return KANBAN_COLUMNS.map((col) => {
+        const conciseTitle = WORKFLOW_COLUMN_TITLE[col.id];
+        return {
+          id: col.id,
+          title: conciseTitle,
+          shortTitle: conciseTitle,
+          subtitle: col.description,
+          workflowStatus: col.id,
+          items: baseStatusColumnsRecord[col.id] ?? [],
+        };
+      });
     }
 
     if (activeGroupBy === 'slot') {
@@ -202,15 +215,13 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
           const { hour } = parseTimeToHoursMinutes(entry.recommendedTimeWib);
           return {
             id: `slot_${entry.code}`,
-            title: entry.timeWindow
-              ? `Slot ${entry.code} ${entry.label}: ${entry.timeWindow}`
-              : `Slot ${entry.code} ${entry.label}`,
-            shortTitle: `Slot ${entry.code} ${entry.label}`,
+            title: entry.label,
+            shortTitle: entry.label,
             subtitle:
               entry.description ||
-              `Jadwal upload slot ${entry.code}${
+              `Slot ${entry.code}${
                 entry.timeWindow ? ` (${entry.timeWindow})` : ''
-              }.`,
+              }`,
             slotIcon: hour < 17 ? ('sun' as const) : ('moon' as const),
             items: entry.items,
           };
@@ -242,24 +253,24 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
     return [
       {
         id: 'readiness_ready',
-        title: 'Siap Upload',
-        shortTitle: 'WM Siap',
+        title: 'Siap',
+        shortTitle: 'Siap',
         subtitle:
           'File wm_final, cover, dan caption.txt sudah lengkap di folder konten.',
         items: readyUploadItems,
       },
       {
         id: 'readiness_no_wm',
-        title: 'Menunggu Watermark',
-        shortTitle: 'Belum WM',
+        title: 'No WM',
+        shortTitle: 'No WM',
         subtitle:
           'Video raw, cover, dan caption tersedia, tinggal render wm_final.mp4.',
         items: missingWmOnlyItems,
       },
       {
         id: 'readiness_incomplete',
-        title: 'Aset Dasar Kurang',
-        shortTitle: 'Aset Kurang',
+        title: 'Kurang',
+        shortTitle: 'Kurang',
         subtitle:
           'Salah satu dari cover, caption.txt, atau video dasar belum tersedia.',
         items: incompleteItems,
@@ -352,7 +363,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
             <span className="font-mono font-semibold text-xs text-foreground shrink-0">
               {item.folderCode}
             </span>
-            <span className="text-[11px] text-muted-foreground truncate">
+            <span className="text-[11px] font-light text-muted-foreground/75 truncate">
               {formatSlotShort(item.schedule)}
             </span>
           </div>
@@ -362,7 +373,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
               variant={readiness.hasWmFinal ? 'success' : 'warning'}
               size="xs"
             >
-              {readiness.hasWmFinal ? 'WM Siap' : 'Belum WM'}
+              {readiness.hasWmFinal ? 'Siap' : 'No WM'}
             </Badge>
             {options.isOverlay ? (
               <span
@@ -479,13 +490,13 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Top Bar: Group-By Tabs + Column Focus Toggle */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-3.5 py-2.5">
+      {/* Top Bar: Borderless Group-By Tabs + Column Focus Toggle */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-1">
         <Tabs value={activeGroupBy} onValueChange={handleGroupByChange}>
           <TabsList aria-label="Pengelompokan papan Kanban">
             <TabsTrigger value="status">Status</TabsTrigger>
-            <TabsTrigger value="slot">Jam Upload</TabsTrigger>
-            <TabsTrigger value="readiness">Kesiapan File</TabsTrigger>
+            <TabsTrigger value="slot">Slot</TabsTrigger>
+            <TabsTrigger value="readiness">Berkas</TabsTrigger>
           </TabsList>
         </Tabs>
 
@@ -494,7 +505,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
             <TooltipTrigger
               render={
                 <Button
-                  variant={showAllColumns ? 'secondary' : 'outline'}
+                  variant={showAllColumns ? 'secondary' : 'ghost'}
                   size="sm"
                   aria-pressed={showAllColumns}
                   aria-label={
@@ -503,7 +514,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                       : 'Tampilkan semua 7 kolom status Kanban'
                   }
                   onClick={() => setShowAllColumns((prev) => !prev)}
-                  className="gap-1.5"
+                  className="gap-1.5 text-xs"
                 />
               }
             >
@@ -512,14 +523,10 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
               ) : (
                 <Columns3 className="h-3.5 w-3.5" aria-hidden="true" />
               )}
-              <span>{showAllColumns ? '7 Kolom' : 'Kolom Aktif'}</span>
-              <Badge
-                variant="outline"
-                size="xs"
-                className="font-mono tabular-nums"
-              >
+              <span>{showAllColumns ? 'Semua 7' : 'Fokus'}</span>
+              <span className="font-mono text-[11px] font-light text-muted-foreground/75 tabular-nums">
                 {visibleColumns.length}/{columns.length}
-              </Badge>
+              </span>
             </TooltipTrigger>
             <TooltipContent side="top">
               {showAllColumns
@@ -549,12 +556,12 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
           {!showAllColumns && hiddenEmptyColumns.length > 0 && (
             <div
               aria-label="Target pindah status kolom kosong"
-              className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border bg-muted/30 px-3.5 py-2"
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border bg-muted/30 px-3 py-1.5"
             >
-              <span className="text-[11px] font-medium text-muted-foreground">
+              <span className="text-[11px] font-light text-muted-foreground/75">
                 {activeDragItemId
-                  ? 'Lepaskan kartu ke status:'
-                  : 'Kolom kosong (tarik kartu ke sini):'}
+                  ? 'Lepaskan kartu ke:'
+                  : 'Kolom kosong:'}
               </span>
               <div className="flex flex-wrap items-center gap-1.5">
                 {hiddenEmptyColumns.map((col) => {
@@ -564,16 +571,16 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                     <KanbanColumn
                       key={col.id}
                       value={col.id}
-                      className={`inline-flex flex-row items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
+                      className={`inline-flex flex-row items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] transition-colors ${
                         isTargeted
                           ? 'border-ring bg-card text-foreground ring-2 ring-ring font-medium'
                           : activeDragItemId
                           ? 'border-foreground/30 border-dashed bg-card text-foreground'
-                          : 'border-border bg-card/70 text-muted-foreground'
+                          : 'border-border/70 bg-card/70 text-muted-foreground'
                       }`}
                     >
                       <span>{col.shortTitle}</span>
-                      <span className="font-mono text-[10px] tabular-nums opacity-75">
+                      <span className="font-mono text-[10px] font-light tabular-nums opacity-75">
                         {pillItems.length}
                       </span>
                       <KanbanColumnContent
@@ -612,22 +619,29 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                   aria-label={column.title}
                   className={`${columnWidthClass} bg-muted/50 border border-border rounded-lg p-3.5 flex flex-col gap-3`}
                 >
-                  <header className="space-y-1 border-b border-border pb-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-xs font-semibold text-foreground truncate">
-                        {column.title}
-                      </h3>
-                      <Badge
-                        variant="outline"
-                        size="xs"
-                        className="font-mono shrink-0 tabular-nums"
+                  <header className="flex items-center justify-between gap-2 border-b border-border/80 pb-2">
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <h3
+                            tabIndex={0}
+                            className="cursor-default truncate rounded-sm text-xs font-semibold text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                          />
+                        }
                       >
-                        {columnItems.length}
-                      </Badge>
-                    </div>
-                    <p className="text-[11px] text-muted-foreground line-clamp-1">
-                      {column.subtitle}
-                    </p>
+                        {column.title}
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        {column.subtitle}
+                      </TooltipContent>
+                    </Tooltip>
+                    <Badge
+                      variant="outline"
+                      size="xs"
+                      className="font-mono font-light text-muted-foreground shrink-0 tabular-nums"
+                    >
+                      {columnItems.length}
+                    </Badge>
                   </header>
 
                   <KanbanColumnContent
@@ -640,7 +654,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                   >
                     {columnItems.length === 0 ? (
                       <div className="col-span-full rounded-md border border-dashed border-border bg-card/50 py-8 px-3 text-center">
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-xs font-light text-muted-foreground/75">
                           Belum ada konten di {column.shortTitle}.
                         </p>
                       </div>
@@ -678,9 +692,16 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
               aria-label={column.title}
               className="w-full bg-muted/50 border border-border rounded-lg p-3.5 flex flex-col gap-3"
             >
-              <header className="space-y-1 border-b border-border pb-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 min-w-0">
+              <header className="flex items-center justify-between gap-2 border-b border-border/80 pb-2">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <div
+                        tabIndex={0}
+                        className="flex cursor-default items-center gap-1.5 min-w-0 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                      />
+                    }
+                  >
                     {column.slotIcon === 'sun' && (
                       <Sun
                         className="h-3.5 w-3.5 text-muted-foreground shrink-0"
@@ -696,18 +717,16 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                     <h3 className="text-xs font-semibold text-foreground truncate">
                       {column.title}
                     </h3>
-                  </div>
-                  <Badge
-                    variant="outline"
-                    size="xs"
-                    className="font-mono shrink-0 tabular-nums"
-                  >
-                    {column.items.length}
-                  </Badge>
-                </div>
-                <p className="text-[11px] text-muted-foreground line-clamp-1">
-                  {column.subtitle}
-                </p>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{column.subtitle}</TooltipContent>
+                </Tooltip>
+                <Badge
+                  variant="outline"
+                  size="xs"
+                  className="font-mono font-light text-muted-foreground shrink-0 tabular-nums"
+                >
+                  {column.items.length}
+                </Badge>
               </header>
 
               <div
@@ -719,7 +738,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
               >
                 {column.items.length === 0 ? (
                   <div className="col-span-full rounded-md border border-dashed border-border bg-card/50 py-8 px-3 text-center">
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-xs font-light text-muted-foreground/75">
                       Belum ada konten di {column.shortTitle}.
                     </p>
                   </div>

@@ -17,7 +17,13 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
-import { NativeSelect } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Table,
   TableHeader,
@@ -56,6 +62,16 @@ const STATUS_ORDER: Record<WorkflowStatus, number> = {
   partially_published: 5,
   published_all: 6,
   on_hold: 7,
+};
+
+const STATUS_SHORT_LABEL: Record<WorkflowStatus, string> = {
+  draft_assets: 'Draft',
+  needs_watermark: 'Watermark',
+  ready_to_upload: 'Siap',
+  scheduled: 'Terjadwal',
+  partially_published: 'Sebagian',
+  published_all: 'Selesai',
+  on_hold: 'Hold',
 };
 
 const SHORT_MONTHS: Record<number, string> = {
@@ -289,7 +305,7 @@ export const TableView: React.FC<TableViewProps> = ({
           const fileSizeText = assets.wmVideo.exists
             ? assets.wmVideo.sizeFormatted
             : assets.rawVideo.exists
-            ? `Raw ${assets.rawVideo.sizeFormatted}`
+            ? assets.rawVideo.sizeFormatted
             : '-';
 
           return (
@@ -305,11 +321,11 @@ export const TableView: React.FC<TableViewProps> = ({
                     >
                       {item.folderCode}
                     </button>
-                    <span className="text-[11px] text-muted-foreground">
+                    <span className="text-[11px] font-light text-muted-foreground/75">
                       {formatShortDate(item)}
                     </span>
                   </div>
-                  <div className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                  <div className="inline-flex items-center gap-1 text-[11px] font-light text-muted-foreground/75">
                     {isDaySlot ? (
                       <Sun className="h-3 w-3 shrink-0" aria-hidden="true" />
                     ) : (
@@ -354,7 +370,7 @@ export const TableView: React.FC<TableViewProps> = ({
                         {captionParsed.hashtags.slice(0, 2).map((tag) => (
                           <span
                             key={tag}
-                            className="font-mono text-[10px] text-muted-foreground"
+                            className="font-mono text-[10px] font-light text-muted-foreground/75"
                           >
                             {tag}
                           </span>
@@ -374,27 +390,12 @@ export const TableView: React.FC<TableViewProps> = ({
               <TableCell className="py-3">
                 <div className="flex flex-col items-start gap-1">
                   <Badge
-                    variant={
-                      readiness.hasWmFinal
-                        ? 'success'
-                        : readiness.hasCover && readiness.hasCaption
-                        ? 'warning'
-                        : 'destructive'
-                    }
+                    variant={readiness.hasWmFinal ? 'success' : 'warning'}
                     size="xs"
                   >
-                    {readiness.hasWmFinal ? (
-                      <span>
-                        WM Siap ·{' '}
-                        <span className="font-mono">
-                          {readiness.completenessScore}/4
-                        </span>
-                      </span>
-                    ) : (
-                      <span>Kurang wm_final</span>
-                    )}
+                    {readiness.hasWmFinal ? 'Siap' : 'No WM'}
                   </Badge>
-                  <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                  <span className="font-mono text-[11px] font-light text-muted-foreground/75 tabular-nums">
                     {fileSizeText}
                   </span>
                 </div>
@@ -402,26 +403,34 @@ export const TableView: React.FC<TableViewProps> = ({
 
               {/* 4. Status */}
               <TableCell className="py-3">
-                <label
-                  htmlFor={`table-status-${item.id}`}
-                  className="sr-only"
-                >
-                  Status Kanban {item.folderCode}
-                </label>
-                <NativeSelect
-                  id={`table-status-${item.id}`}
+                <Select
                   value={workflowStatus}
-                  onChange={(e) =>
-                    onUpdateStatus(item, e.target.value as WorkflowStatus)
-                  }
-                  className="w-full max-w-[155px] min-h-8 py-1 px-2 text-xs"
+                  onValueChange={(next) => {
+                    if (typeof next === 'string' && next.length > 0) {
+                      onUpdateStatus(item, next as WorkflowStatus);
+                    }
+                  }}
                 >
-                  {KANBAN_COLUMNS.map((col) => (
-                    <option key={col.id} value={col.id}>
-                      {col.shortLabel}
-                    </option>
-                  ))}
-                </NativeSelect>
+                  <SelectTrigger
+                    id={`table-status-${item.id}`}
+                    size="sm"
+                    aria-label={`Status Kanban ${item.folderCode}`}
+                    className="w-[126px] text-xs"
+                  >
+                    <SelectValue>{STATUS_SHORT_LABEL[workflowStatus]}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent alignItemWithTrigger={false}>
+                    {KANBAN_COLUMNS.map((col) => (
+                      <SelectItem
+                        key={col.id}
+                        value={col.id}
+                        className="text-xs"
+                      >
+                        {STATUS_SHORT_LABEL[col.id]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </TableCell>
 
               {/* 5. Platform */}
@@ -454,23 +463,27 @@ export const TableView: React.FC<TableViewProps> = ({
 
       <TableFooter>
         <TableRow>
-          <TableCell className="py-3 font-medium">
-            Total:{' '}
-            <span className="font-mono tabular-nums">{items.length}</span>
+          <TableCell className="py-3 text-xs font-light text-muted-foreground/75">
+            Total{' '}
+            <span className="font-mono font-medium text-foreground tabular-nums">
+              {items.length}
+            </span>
           </TableCell>
-          <TableCell className="py-3 text-muted-foreground">
+          <TableCell className="py-3 text-xs font-light text-muted-foreground/75">
             Database Konten
           </TableCell>
-          <TableCell className="py-3">
-            WM Siap:{' '}
-            <span className="font-mono tabular-nums">
+          <TableCell className="py-3 text-xs font-light text-muted-foreground/75">
+            Siap{' '}
+            <span className="font-mono font-medium text-foreground tabular-nums">
               {summary.wmReady}/{items.length}
             </span>
           </TableCell>
-          <TableCell className="py-3 text-muted-foreground">-</TableCell>
-          <TableCell className="py-3">
-            Selesai:{' '}
-            <span className="font-mono tabular-nums">
+          <TableCell className="py-3 text-xs font-light text-muted-foreground/75">
+            -
+          </TableCell>
+          <TableCell className="py-3 text-xs font-light text-muted-foreground/75">
+            Selesai{' '}
+            <span className="font-mono font-medium text-foreground tabular-nums">
               {summary.allPublished}/{items.length}
             </span>
           </TableCell>

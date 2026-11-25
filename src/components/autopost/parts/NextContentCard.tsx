@@ -20,14 +20,17 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { NativeSelect } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import type { AutoPostMode } from '@/types/autopost';
 import type { ContentPlannerItem, PlatformKey } from '@/types/planner';
 import type { UseAutoPostDataResult } from '../useAutoPostData';
-import {
-  countPendingPlatforms,
-  pickNextContent,
-} from '../useAutoPostData';
+import { pickNextContent } from '../useAutoPostData';
 import { IconActionButton } from './IconActionButton';
 import { PLATFORM_ORDER } from './platformMeta';
 import { formatSlotShort } from '@/lib/formatSlot';
@@ -40,6 +43,10 @@ export interface NextContentCardProps {
   onEditCaption: (item: ContentPlannerItem) => void;
   onOpenWatermark: (item: ContentPlannerItem) => void;
   onOpenContentDetail: (item: ContentPlannerItem) => void;
+}
+
+function formatItemOption(item: ContentPlannerItem): string {
+  return `${item.folderCode} · ${item.autoMetadata.readiness.hasWmFinal ? 'Siap' : 'No WM'}`;
 }
 
 async function copyText(value: string | null | undefined): Promise<void> {
@@ -75,8 +82,8 @@ export function NextContentCard({
           <CardTitle>Konten Berikutnya</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
-          <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">
-            Belum ada konten siap posting. Render watermark dulu di planner.
+          <p className="max-w-xs text-xs font-light leading-relaxed text-muted-foreground/75">
+            Belum ada konten siap posting.
           </p>
           <Button
             variant="outline"
@@ -101,7 +108,6 @@ export function NextContentCard({
   const pendingKeys: PlatformKey[] = PLATFORM_ORDER.filter(
     (key) => selected.userProperties.platforms[key].status !== 'published'
   );
-  const pendingCount = countPendingPlatforms(selected);
   const busy = data.busyKey === `trigger:${selected.id}`;
   const canSend = hasWmFinal && pendingKeys.length > 0 && !busy;
 
@@ -109,19 +115,33 @@ export function NextContentCard({
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-3 space-y-0 p-4 pb-2">
         <CardTitle>Konten Berikutnya</CardTitle>
-        <NativeSelect
-          aria-label="Pilih konten"
-          className="max-w-[190px]"
+        <Select
           value={selected.id}
-          onChange={(event) => onSelectChange(event.target.value)}
+          onValueChange={(next) => {
+            if (typeof next === 'string' && next.length > 0) {
+              onSelectChange(next);
+            }
+          }}
         >
-          {items.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.folderCode}{' '}
-              {item.autoMetadata.readiness.hasWmFinal ? 'wm Siap' : 'Belum WM'}
-            </option>
-          ))}
-        </NativeSelect>
+          <SelectTrigger
+            size="sm"
+            aria-label="Pilih konten"
+            className="w-[152px] font-mono text-xs"
+          >
+            <SelectValue>{formatItemOption(selected)}</SelectValue>
+          </SelectTrigger>
+          <SelectContent align="end" alignItemWithTrigger={false}>
+            {items.map((item) => (
+              <SelectItem
+                key={item.id}
+                value={item.id}
+                className="font-mono text-xs"
+              >
+                {formatItemOption(item)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </CardHeader>
 
       <CardContent className="space-y-3">
@@ -136,7 +156,7 @@ export function NextContentCard({
               alt={`Cover ${selected.folderCode}`}
             />
           ) : (
-            <div className="flex w-[104px] aspect-[9/16] items-center justify-center rounded-md border border-border bg-muted text-[10px] text-muted-foreground">
+            <div className="flex w-[104px] aspect-[9/16] items-center justify-center rounded-md border border-border bg-muted text-[10px] font-light text-muted-foreground/75">
               Tanpa cover
             </div>
           )}
@@ -146,12 +166,9 @@ export function NextContentCard({
               <span className="font-mono text-xs font-semibold text-foreground">
                 {selected.folderCode}
               </span>
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-[11px] font-light text-muted-foreground/75">
                 {formatSlotShort(selected.schedule)}
               </span>
-              <Badge variant={hasWmFinal ? 'success' : 'warning'} size="xs">
-                {hasWmFinal ? 'WM Siap' : 'Belum WM'}
-              </Badge>
             </div>
 
             <p className="text-sm font-semibold line-clamp-3 text-foreground">
@@ -189,20 +206,20 @@ export function NextContentCard({
           <Button
             type="button"
             size="xs"
-            variant={mode === 'review' ? 'default' : 'outline'}
+            variant={mode === 'review' ? 'default' : 'ghost'}
             aria-pressed={mode === 'review'}
             onClick={() => setMode('review')}
           >
-            Tinjau dulu
+            Tinjau
           </Button>
           <Button
             type="button"
             size="xs"
-            variant={mode === 'publish' ? 'default' : 'outline'}
+            variant={mode === 'publish' ? 'default' : 'ghost'}
             aria-pressed={mode === 'publish'}
             onClick={() => setMode('publish')}
           >
-            Langsung publish
+            Langsung
           </Button>
         </div>
 
@@ -214,7 +231,7 @@ export function NextContentCard({
           onClick={() => void data.triggerPost(selected.id, pendingKeys, mode)}
         >
           <Send className="size-3.5" aria-hidden="true" />
-          Kirim ke {pendingCount} Platform Berikutnya
+          Kirim ({pendingKeys.length} Platform)
         </Button>
 
         <div className="flex items-center gap-1">
@@ -256,18 +273,15 @@ export function NextContentCard({
         </div>
 
         {!hasWmFinal ? (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#fcd34d] bg-[#fef3c7] px-2.5 py-2 text-[11px] text-[#92400e] dark:border-[#92400e] dark:bg-[#451a03] dark:text-[#fcd34d]">
-            <span className="min-w-0 leading-relaxed">
-              Video ini belum punya wm_final.mp4. Render watermark dulu sebelum
-              mengirim.
-            </span>
+          <div className="flex items-center justify-between gap-2 rounded-md border border-[#fcd34d] bg-[#fef3c7] px-2.5 py-1.5 text-[11px] text-[#92400e] dark:border-[#92400e] dark:bg-[#451a03] dark:text-[#fcd34d]">
+            <span className="truncate font-light">Belum ada video final.</span>
             <Button
               type="button"
               size="xs"
               variant="outline"
               onClick={() => onOpenWatermark(selected)}
             >
-              Render sekarang
+              Render
             </Button>
           </div>
         ) : null}

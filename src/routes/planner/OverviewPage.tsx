@@ -1,29 +1,21 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import {
-  CalendarClock,
-  CalendarDays,
-  CalendarPlus,
-  CheckCheck,
-  Columns3,
+  CheckCircle2,
   Database,
   Droplets,
   ExternalLink,
   FileEdit,
   FolderOpen,
-  HelpCircle,
-  LayoutGrid,
-  MonitorSmartphone,
-  Plus,
-  RefreshCw,
+  Layers,
+  Pencil,
   Send,
-  Settings2,
-  Share2,
-  Table2,
 } from 'lucide-react';
-import { SiYoutube } from 'react-icons/si';
-import type { ContentPlannerItem } from '@/types/planner';
-import type { WatermarkPolicyMode } from '@/types/workspace';
+import type {
+  ContentPlannerItem,
+  PlatformKey,
+  ScheduleSlotInfo,
+} from '@/types/planner';
 import { usePlannerWorkspace } from '@/components/planner/PlannerContext';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -33,28 +25,41 @@ import { Progress } from '@/components/ui/progress';
 import { IconActionButton } from '@/components/autopost/parts/IconActionButton';
 import { StatCard } from '@/components/autopost/parts/StatCard';
 import {
-  PLATFORM_META,
   PLATFORM_ORDER,
   PlatformIcon,
 } from '@/components/autopost/parts/platformMeta';
 import { formatSlotShort } from '@/lib/formatSlot';
 
+type AttentionKind = 'no_wm' | 'on_hold' | 'extra_files';
+
 interface AttentionRow {
   item: ContentPlannerItem;
-  text: string;
-  needsWatermark: boolean;
+  kind: AttentionKind;
+  extraCount: number;
 }
 
-function getWatermarkPolicyBadgeLabel(policy?: WatermarkPolicyMode): string {
-  switch (policy) {
-    case 'direct_or_wm':
-      return 'Video Langsung';
-    case 'overwrite_source':
-      return 'Mode Overwrite';
-    case 'separate_wm_file':
-    default:
-      return 'Wajib wm_final.mp4';
-  }
+const PLATFORM_SHORT_LABEL: Record<PlatformKey, string> = {
+  yt_shorts: 'YouTube',
+  tiktok: 'TikTok',
+  ig_reels: 'Instagram',
+  fb_reels: 'Facebook',
+};
+
+function formatShortDate(schedule: ScheduleSlotInfo): string {
+  const monthShort = schedule.monthName
+    ? schedule.monthName.slice(0, 3)
+    : '';
+  return monthShort
+    ? `${schedule.dayOfMonth} ${monthShort}`
+    : schedule.displayDate;
+}
+
+function getItemHookTitle(item: ContentPlannerItem): string {
+  return (
+    item.userProperties.customTitle?.trim() ||
+    item.autoMetadata.captionParsed.hookTitle?.trim() ||
+    item.folderCode
+  );
 }
 
 export function OverviewPage() {
@@ -90,7 +95,7 @@ export function OverviewPage() {
 
   const [selectedCaptionId, setSelectedCaptionId] = useState<string>('');
 
-  const activeCaptionItem = useMemo(() => {
+  const selectedCaptionItem = useMemo(() => {
     if (selectedCaptionId) {
       const found = sortedItems.find((item) => item.id === selectedCaptionId);
       if (found) return found;
@@ -98,7 +103,7 @@ export function OverviewPage() {
     return firstReadyItem ?? sortedItems[0] ?? null;
   }, [selectedCaptionId, sortedItems, firstReadyItem]);
 
-  const readyCount = useMemo(
+  const uploadReadyCount = useMemo(
     () =>
       stats?.uploadReadyCount ??
       allItems.filter((item) => item.autoMetadata.readiness.isUploadReady)
@@ -106,7 +111,7 @@ export function OverviewPage() {
     [stats, allItems]
   );
 
-  const needsWmCount = useMemo(
+  const needsWatermarkCount = useMemo(
     () =>
       stats?.needsWatermarkCount ??
       allItems.filter((item) => !item.autoMetadata.readiness.hasWmFinal).length,
@@ -131,22 +136,14 @@ export function OverviewPage() {
     for (const item of sortedItems) {
       const { readiness, assets } = item.autoMetadata;
       if (!readiness.hasWmFinal) {
-        rows.push({
-          item,
-          text: 'Belum ada wm_final yang siap di-upload.',
-          needsWatermark: true,
-        });
+        rows.push({ item, kind: 'no_wm', extraCount: 0 });
       } else if (item.userProperties.workflowStatus === 'on_hold') {
-        rows.push({
-          item,
-          text: 'Ditandai revisi atau hold untuk perbaikan.',
-          needsWatermark: false,
-        });
+        rows.push({ item, kind: 'on_hold', extraCount: 0 });
       } else if (assets.otherFiles.length > 0) {
         rows.push({
           item,
-          text: `Ada ${assets.otherFiles.length} file ekstra di luar 4 berkas utama.`,
-          needsWatermark: false,
+          kind: 'extra_files',
+          extraCount: assets.otherFiles.length,
         });
       }
       if (rows.length === 5) break;
@@ -163,6 +160,7 @@ export function OverviewPage() {
         const total = allItems.length;
         return {
           key,
+          label: PLATFORM_SHORT_LABEL[key],
           published,
           total,
           pct: total > 0 ? Math.round((published / total) * 100) : 0,
@@ -171,144 +169,13 @@ export function OverviewPage() {
     [allItems]
   );
 
-  const quickLaunchTiles = [
-    {
-      label: 'Papan Kanban',
-      to: '/kanban' as const,
-      Icon: Columns3,
-    },
-    {
-      label: 'Tabel Database',
-      to: '/tabel' as const,
-      Icon: Table2,
-    },
-    {
-      label: 'Kalender Event',
-      to: '/kalender' as const,
-      Icon: CalendarDays,
-    },
-    {
-      label: 'Jadwal Slot',
-      to: '/jadwal' as const,
-      Icon: CalendarClock,
-    },
-    {
-      label: 'Galeri 9:16',
-      to: '/galeri' as const,
-      Icon: LayoutGrid,
-    },
-    {
-      label: 'Sesi Browser Studio',
-      to: '/auto-post/studio' as const,
-      Icon: MonitorSmartphone,
-    },
-    {
-      label: 'Meta Graph API',
-      to: '/auto-post/meta' as const,
-      Icon: Share2,
-    },
-    {
-      label: 'YouTube Data API',
-      to: '/auto-post/youtube' as const,
-      Icon: SiYoutube,
-    },
-  ];
-
-  const activeWs = workspace.activeWorkspace;
-  const activeWsName =
-    activeWs?.name ?? database?.workspaceConfig.workspaceName ?? 'Workspace Aktif';
-  const activeWsHandle = activeWs?.handle || '@channel';
-  const activeWsPolicy = activeWs?.rules.watermarkPolicy ?? 'separate_wm_file';
-
   return (
-    <div className="space-y-3">
-      {/* Section 0: Prominent Active Workspace Banner */}
-      <Card className="border-t-cpgp p-3.5">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex min-w-0 items-start gap-3">
-            <span
-              className="flex h-10 w-12 shrink-0 items-center justify-center rounded-md border border-[#4a0d18] bg-cpgp-gradient font-mono text-xs font-bold tracking-wider text-white"
-              aria-hidden="true"
-            >
-              CPGP
-            </span>
-            <div className="min-w-0 space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="truncate text-sm font-semibold text-foreground sm:text-base">
-                  {activeWsName}
-                </h2>
-                <Badge variant="outline" size="xs" className="font-mono">
-                  {activeWsHandle}
-                </Badge>
-                <Badge variant="secondary" size="xs" className="font-mono">
-                  {getWatermarkPolicyBadgeLabel(activeWsPolicy)}
-                </Badge>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                <span>Folder Konten:</span>
-                <code className="truncate font-mono text-foreground">
-                  {workspace.contentRootPath}
-                </code>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Button
-              type="button"
-              variant="editorial"
-              size="sm"
-              onClick={() => workspace.openCreateContent('single')}
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Konten Baru</span>
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => workspace.openCreateContent('batch')}
-            >
-              <CalendarPlus className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Batch Generate Slot</span>
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => workspace.openWorkspaceModal('edit')}
-            >
-              <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Pengaturan Workspace</span>
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => workspace.openQuickGuide()}
-            >
-              <HelpCircle className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Panduan</span>
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() => workspace.openWorkspaceModal('create')}
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Workspace Baru</span>
-            </Button>
-          </div>
-        </div>
-      </Card>
-
-      {/* Section 1: 4 Interactive KPI StatCards */}
+    <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard
-          label="Total Konten"
+          label="Total"
           value={allItems.length}
-          hint="Seluruh folder di KONTEN"
+          hint="folder"
           icon={Database}
           onClick={() => {
             workspace.resetFilters();
@@ -316,10 +183,10 @@ export function OverviewPage() {
           }}
         />
         <StatCard
-          label="Siap Upload"
-          value={readyCount}
-          hint="wm_final, cover, caption lengkap"
-          icon={CheckCheck}
+          label="Siap"
+          value={uploadReadyCount}
+          hint="siap kirim"
+          icon={CheckCircle2}
           tone="success"
           active={workspace.readinessFilter === 'ready'}
           onClick={() => {
@@ -328,9 +195,9 @@ export function OverviewPage() {
           }}
         />
         <StatCard
-          label="Butuh Watermark"
-          value={needsWmCount}
-          hint="Tinggal render wm_final"
+          label="Watermark"
+          value={needsWatermarkCount}
+          hint="belum WM"
           icon={Droplets}
           tone="warning"
           active={workspace.readinessFilter === 'needs_wm'}
@@ -340,60 +207,22 @@ export function OverviewPage() {
           }}
         />
         <StatCard
-          label="Sudah Publish"
+          label="Tayang"
           value={publishedTotal}
-          hint="Total unggahan lintas 4 platform"
+          hint="total post"
           icon={Send}
           tone="info"
           onClick={() => void navigate({ to: '/auto-post/history' })}
         />
       </div>
 
-      {/* Section 2: Pusat Fitur & Tool Studio */}
-      <Card className="p-3 space-y-3">
+      <Card className="p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold text-foreground">
-              Pusat Fitur & Tool Studio
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Akses cepat ke seluruh tool produksi, otomatisasi upload, tampilan
-              workspace, dan integrasi API.
-            </p>
-          </div>
-          <Badge variant="outline" size="xs">
-            Semua Tool Tersedia
-          </Badge>
-        </div>
-
-        {/* Subsection A: Tool Produksi & Otomatisasi (4 Primary Tool Cards) */}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {/* 1. Watermark Studio & Preset */}
-          <div className="flex flex-col justify-between gap-3 rounded-lg border border-border bg-background/50 p-3">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted text-foreground">
-                  <Droplets className="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
-                <Badge
-                  variant={needsWmCount > 0 ? 'warning' : 'success'}
-                  size="xs"
-                >
-                  {needsWmCount} butuh WM
-                </Badge>
-              </div>
-              <h3 className="text-xs font-semibold text-foreground">
-                Watermark Studio & Preset
-              </h3>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Atur posisi, font, warna, outline {activeWsHandle} di atas video
-                9:16 dan render batch wm_final.mp4.
-              </p>
-            </div>
+          <div className="flex flex-wrap items-center gap-1.5">
             <Button
+              type="button"
               variant="outline"
               size="sm"
-              className="w-full justify-center"
               disabled={allItems.length === 0}
               onClick={() => {
                 const target = firstNeedsWmItem ?? allItems[0];
@@ -403,199 +232,209 @@ export function OverviewPage() {
               }}
             >
               <Droplets className="h-3.5 w-3.5" aria-hidden="true" />
-              Buka Watermark Studio
-            </Button>
-          </div>
-
-          {/* 2. Dasbor Auto-Post (4 Platform) */}
-          <div className="flex flex-col justify-between gap-3 rounded-lg border border-border bg-background/50 p-3">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted text-foreground">
-                  <Send className="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
-                <Badge variant="success" size="xs">
-                  {readyCount} siap kirim
+              <span>Watermark</span>
+              {needsWatermarkCount > 0 ? (
+                <Badge
+                  variant="warning"
+                  size="xs"
+                  className="ml-0.5 font-mono tabular-nums"
+                >
+                  {needsWatermarkCount}
                 </Badge>
-              </div>
-              <h3 className="text-xs font-semibold text-foreground">
-                Dasbor Auto-Post (4 Platform)
-              </h3>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Trigger upload otomatis satu per satu atau sekaligus ke YouTube
-                Shorts, TikTok, IG Reels, dan Facebook.
-              </p>
-            </div>
+              ) : null}
+            </Button>
+
             <Button
+              type="button"
               variant="outline"
               size="sm"
-              className="w-full justify-center"
               onClick={() =>
                 workspace.openAutoPost(firstReadyItem ?? null, null)
               }
             >
               <Send className="h-3.5 w-3.5" aria-hidden="true" />
-              Buka Dasbor Auto-Post
+              <span>Auto-Post</span>
+              {uploadReadyCount > 0 ? (
+                <Badge
+                  variant="success"
+                  size="xs"
+                  className="ml-0.5 font-mono tabular-nums"
+                >
+                  {uploadReadyCount}
+                </Badge>
+              ) : null}
+            </Button>
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => workspace.openCreateContent('batch')}
+            >
+              <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Batch Slot</span>
+            </Button>
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() =>
+                void workspace.openExplorer(workspace.contentRootPath, false)
+              }
+            >
+              <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Folder</span>
             </Button>
           </div>
 
-          {/* 3. Live Editor caption.txt */}
-          <div className="flex flex-col justify-between gap-3 rounded-lg border border-border bg-background/50 p-3">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted text-foreground">
-                  <FileEdit className="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
-                <Badge variant="outline" size="xs">
-                  {allItems.length} berkas
-                </Badge>
-              </div>
-              <h3 className="text-xs font-semibold text-foreground">
-                Live Editor caption.txt
-              </h3>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Edit langsung hook judul, pertanyaan CTA, dan hashtag dengan
-                sinkronisasi dua arah ke file caption.txt.
-              </p>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <NativeSelect
-                aria-label="Pilih kode folder konten untuk edit caption"
-                className="min-h-8 flex-1 px-2 py-1 font-mono text-xs"
-                value={activeCaptionItem?.id ?? ''}
-                disabled={sortedItems.length === 0}
-                onChange={(e) => {
-                  const nextId = e.target.value;
-                  setSelectedCaptionId(nextId);
-                  const picked = sortedItems.find((item) => item.id === nextId);
-                  if (picked) {
-                    workspace.openCaption(picked);
-                  }
-                }}
-              >
-                {sortedItems.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.folderCode} ({formatSlotShort(item.schedule)})
-                  </option>
-                ))}
-              </NativeSelect>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!activeCaptionItem}
-                onClick={() => {
-                  const target =
-                    activeCaptionItem ?? firstReadyItem ?? allItems[0];
-                  if (target) {
-                    workspace.openCaption(target);
-                  }
-                }}
-              >
-                Edit
-              </Button>
-            </div>
-          </div>
-
-          {/* 4. Sinkronisasi & Folder KONTEN */}
-          <div className="flex flex-col justify-between gap-3 rounded-lg border border-border bg-background/50 p-3">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted text-foreground">
-                  <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
-                <Badge variant="outline" size="xs">
-                  Disk Lokal
-                </Badge>
-              </div>
-              <h3 className="text-xs font-semibold text-foreground">
-                Sinkronisasi & Folder KONTEN
-              </h3>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Scan ulang folder{' '}
-                <span className="font-mono text-foreground">
-                  {workspace.contentRootPath || 'KONTEN'}
-                </span>{' '}
-                ke JSON atau buka langsung di Windows Explorer.
-              </p>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Button
-                variant="outline"
-                size="sm"
-                className="flex-1 justify-center"
-                disabled={workspace.isScanning}
-                onClick={() => void workspace.rescan()}
-              >
-                <RefreshCw
-                  className={
-                    workspace.isScanning
-                      ? 'h-3.5 w-3.5 animate-spin'
-                      : 'h-3.5 w-3.5'
-                  }
-                  aria-hidden="true"
-                />
-                Scan Ulang
-              </Button>
-              <IconActionButton
-                icon={FolderOpen}
-                variant="outline"
-                label="Buka Folder KONTEN di Explorer"
-                onClick={() =>
-                  void workspace.openExplorer(workspace.contentRootPath, false)
+          <div className="flex items-center gap-1.5">
+            <FileEdit
+              className="h-3.5 w-3.5 shrink-0 text-muted-foreground/75"
+              aria-hidden="true"
+            />
+            <NativeSelect
+              aria-label="Pilih konten"
+              className="h-7 min-h-0 w-24 px-2 py-0 font-mono text-xs"
+              value={selectedCaptionItem?.id ?? ''}
+              disabled={sortedItems.length === 0}
+              onChange={(event) => setSelectedCaptionId(event.target.value)}
+            >
+              {sortedItems.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.folderCode}
+                </option>
+              ))}
+            </NativeSelect>
+            <IconActionButton
+              icon={Pencil}
+              variant="outline"
+              label="Edit caption"
+              disabled={!selectedCaptionItem}
+              onClick={() => {
+                if (selectedCaptionItem) {
+                  workspace.openCaption(selectedCaptionItem);
                 }
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Subsection B: Tampilan Workspace & Koneksi API (Compact Quick-Launch Strip) */}
-        <div className="border-t border-border pt-2.5">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-[11px] font-medium text-muted-foreground">
-              Tampilan Workspace & Koneksi API
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-            {quickLaunchTiles.map(({ label, to, Icon }) => (
-              <button
-                key={to}
-                type="button"
-                onClick={() => void navigate({ to })}
-                className="flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
-              >
-                <Icon
-                  className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <span className="truncate">{label}</span>
-              </button>
-            ))}
+              }}
+            />
           </div>
         </div>
       </Card>
 
-      {/* Section 3: Two-Column Operational Feed */}
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
-        {/* Left Column: Jadwal Konten Terdekat */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         <div className="xl:col-span-7">
           <Card>
             <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold text-foreground">
-                Jadwal Konten Terdekat
+              <h2 className="text-sm font-medium text-foreground">
+                Jadwal Terdekat
               </h2>
-              <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                {upcoming.length} dari {allItems.length}
-              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="font-light text-muted-foreground/75 hover:text-foreground"
+                onClick={() => void navigate({ to: '/jadwal' })}
+              >
+                Semua
+              </Button>
             </div>
 
             {upcoming.length === 0 ? (
-              <p className="px-4 py-6 text-center text-xs text-muted-foreground">
-                Belum ada konten terjadwal di folder KONTEN.
+              <p className="px-4 py-6 text-center text-xs font-light text-muted-foreground/75">
+                Belum ada jadwal.
               </p>
             ) : (
               <ul className="divide-y divide-border">
                 {upcoming.map((item) => {
                   const hasWmFinal = item.autoMetadata.readiness.hasWmFinal;
+                  const title = getItemHookTitle(item);
+                  return (
+                    <li
+                      key={item.id}
+                      className="flex items-center justify-between gap-3 px-4 py-2.5 transition-colors hover:bg-muted/30"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => workspace.openDetail(item)}
+                        className="min-w-0 flex-1 space-y-0.5 text-left focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="shrink-0 font-mono text-xs font-medium text-foreground">
+                            {item.folderCode}
+                          </span>
+                          <span className="truncate text-[11px] font-light text-muted-foreground/80">
+                            {formatSlotShort(item.schedule)} ·{' '}
+                            {formatShortDate(item.schedule)}
+                          </span>
+                        </div>
+                        <p className="truncate text-xs font-normal text-foreground">
+                          {title}
+                        </p>
+                      </button>
+
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Badge
+                          variant={hasWmFinal ? 'success' : 'warning'}
+                          size="xs"
+                        >
+                          {hasWmFinal ? 'Siap' : 'No WM'}
+                        </Badge>
+                        <IconActionButton
+                          icon={Pencil}
+                          label="Edit caption"
+                          onClick={() => workspace.openCaption(item)}
+                        />
+                        <IconActionButton
+                          icon={Droplets}
+                          label="Watermark"
+                          onClick={() => workspace.openWatermark(item)}
+                        />
+                        <IconActionButton
+                          icon={Send}
+                          label="Auto-Post"
+                          onClick={() => workspace.openAutoPost(item, null)}
+                        />
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </Card>
+        </div>
+
+        <div className="space-y-4 xl:col-span-5">
+          <Card>
+            <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
+              <h2 className="text-sm font-medium text-foreground">
+                Perlu Tindakan
+              </h2>
+              <span className="font-mono text-[11px] font-light text-muted-foreground/75 tabular-nums">
+                {attention.length}
+              </span>
+            </div>
+
+            {attention.length === 0 ? (
+              <p className="px-4 py-6 text-center text-xs font-light text-muted-foreground/75">
+                Semua konten siap.
+              </p>
+            ) : (
+              <ul className="divide-y divide-border">
+                {attention.map(({ item, kind, extraCount }) => {
+                  const title = getItemHookTitle(item);
+                  const badgeVariant =
+                    kind === 'no_wm'
+                      ? 'warning'
+                      : kind === 'on_hold'
+                        ? 'destructive'
+                        : 'muted';
+                  const badgeLabel =
+                    kind === 'no_wm'
+                      ? 'No WM'
+                      : kind === 'on_hold'
+                        ? 'Hold'
+                        : `+${extraCount} file`;
+
                   return (
                     <li
                       key={item.id}
@@ -606,160 +445,62 @@ export function OverviewPage() {
                         onClick={() => workspace.openDetail(item)}
                         className="flex min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
                       >
-                        <span className="font-mono text-xs font-semibold text-foreground">
+                        <span className="shrink-0 font-mono text-xs font-medium text-foreground">
                           {item.folderCode}
                         </span>
-                        <span className="shrink-0 text-[11px] text-muted-foreground">
-                          {formatSlotShort(item.schedule)}
-                        </span>
-                        <span className="truncate text-[11px] text-muted-foreground">
-                          {item.schedule.displayDate}
+                        <span className="truncate text-xs font-light text-muted-foreground/80">
+                          {title}
                         </span>
                       </button>
-                      <div className="flex shrink-0 items-center gap-1">
-                        <Badge
-                          variant={hasWmFinal ? 'success' : 'warning'}
-                          size="xs"
-                        >
-                          {hasWmFinal ? 'Siap' : 'Butuh WM'}
+
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <Badge variant={badgeVariant} size="xs">
+                          {badgeLabel}
                         </Badge>
-                        <IconActionButton
-                          icon={FileEdit}
-                          label={`Edit caption ${item.folderCode}`}
-                          onClick={() => workspace.openCaption(item)}
-                        />
-                        <IconActionButton
-                          icon={Droplets}
-                          label={`Render watermark ${item.folderCode}`}
-                          onClick={() => workspace.openWatermark(item)}
-                        />
-                        <IconActionButton
-                          icon={Send}
-                          label={`Auto-Post ${item.folderCode}`}
-                          onClick={() => workspace.openAutoPost(item, null)}
-                        />
-                        <IconActionButton
-                          icon={ExternalLink}
-                          label={`Buka detail ${item.folderCode}`}
-                          onClick={() => workspace.openDetail(item)}
-                        />
+                        {kind === 'no_wm' ? (
+                          <IconActionButton
+                            icon={Droplets}
+                            label="Render"
+                            onClick={() => workspace.openWatermark(item)}
+                          />
+                        ) : (
+                          <IconActionButton
+                            icon={ExternalLink}
+                            label="Buka"
+                            onClick={() => workspace.openDetail(item)}
+                          />
+                        )}
                       </div>
                     </li>
                   );
                 })}
               </ul>
             )}
-
-            <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-2.5">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void navigate({ to: '/kanban' })}
-              >
-                Lihat semua di Kanban
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void navigate({ to: '/jadwal' })}
-              >
-                Buka Matriks Jadwal Slot
-              </Button>
-            </div>
-          </Card>
-        </div>
-
-        {/* Right Column: Butuh Perhatian + Progres Publikasi 4 Platform */}
-        <div className="space-y-3 xl:col-span-5">
-          <Card>
-            <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold text-foreground">
-                Butuh Perhatian
-              </h2>
-              <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                {attention.length}
-              </span>
-            </div>
-
-            {attention.length === 0 ? (
-              <p className="px-4 py-6 text-center text-xs text-muted-foreground">
-                Tidak ada konten yang butuh perhatian.
-              </p>
-            ) : (
-              <ul className="divide-y divide-border">
-                {attention.map(({ item, text, needsWatermark }) => (
-                  <li
-                    key={item.id}
-                    className="flex items-center justify-between gap-3 px-4 py-2.5"
-                  >
-                    <div className="min-w-0 space-y-0.5">
-                      <span className="font-mono text-xs font-semibold text-foreground">
-                        {item.folderCode}
-                      </span>
-                      <p className="truncate text-[11px] text-muted-foreground">
-                        {text}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1">
-                      {needsWatermark ? (
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          onClick={() => workspace.openWatermark(item)}
-                        >
-                          <Droplets
-                            className="h-3 w-3"
-                            aria-hidden="true"
-                          />
-                          Render WM
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          onClick={() => workspace.openDetail(item)}
-                        >
-                          Periksa
-                        </Button>
-                      )}
-                      <IconActionButton
-                        icon={ExternalLink}
-                        label={`Buka detail ${item.folderCode}`}
-                        onClick={() => workspace.openDetail(item)}
-                      />
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
           </Card>
 
           <Card>
             <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold text-foreground">
-                Progres Publikasi 4 Platform
-              </h2>
-              <span className="text-[11px] text-muted-foreground">
-                Dari {allItems.length} konten
-              </span>
+              <h2 className="text-sm font-medium text-foreground">Platform</h2>
             </div>
 
             <ul className="divide-y divide-border">
-              {platformProgress.map(({ key, published, total, pct }) => (
-                <li key={key} className="space-y-1.5 px-4 py-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="inline-flex items-center gap-2 text-xs font-medium text-foreground">
-                      <PlatformIcon platform={key} />
-                      {PLATFORM_META[key].label}
-                    </span>
-                    <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                      {published}/{total}
-                    </span>
-                  </div>
+              {platformProgress.map(({ key, label, published, total, pct }) => (
+                <li
+                  key={key}
+                  className="flex items-center gap-3 px-4 py-2.5"
+                >
+                  <span className="inline-flex w-24 shrink-0 items-center gap-2 text-xs font-normal text-foreground">
+                    <PlatformIcon platform={key} />
+                    <span>{label}</span>
+                  </span>
                   <Progress
                     value={pct}
-                    aria-label={`Progres ${PLATFORM_META[key].label}`}
+                    aria-label={label}
+                    className="min-w-0 flex-1"
                   />
+                  <span className="w-10 shrink-0 text-right font-mono text-[11px] font-light text-muted-foreground/75 tabular-nums">
+                    {published}/{total}
+                  </span>
                 </li>
               ))}
             </ul>

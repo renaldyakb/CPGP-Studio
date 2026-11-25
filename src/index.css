@@ -11,6 +11,8 @@
 @custom-variant data-disabled (&:where([data-disabled], :disabled));
 @custom-variant data-inset (&:where([data-inset]));
 @custom-variant data-popup-open (&:where([data-popup-open]));
+@custom-variant data-selected (&:where([data-selected="true"], [data-selected=""], [aria-selected="true"]));
+@custom-variant data-placeholder (&:where([data-placeholder]));
 
 @theme inline {
   --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;

@@ -1,7 +1,7 @@
 {
   "name": "cpgp-studio",
   "private": false,
-  "version": "2.0.3",
+  "version": "2.1.0",
   "description": "CPGP (Content Planer Gam Puko) - Multi-Workspace Local Content Planner, Watermark Studio & Auto-Post Suite",
   "type": "module",
   "bin": {
@@ -37,6 +37,7 @@
     "chokidar": "^4.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
     "cn": "^0.5.2",
     "cors": "^2.8.5",
     "date-fns": "^4.4.0",

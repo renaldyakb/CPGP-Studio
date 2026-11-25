@@ -19,7 +19,9 @@ import {
   Plus,
   Radio,
   RefreshCw,
+  Search,
   Send,
+  Settings,
   Settings2,
   Share2,
   Sun,
@@ -34,6 +36,8 @@ import {
   UpdateNotificationBanner,
   useUpdateChecker,
 } from '@/components/shell/UpdateNotificationBanner';
+import { CommandPalette } from '@/components/shell/CommandPalette';
+import { Kbd } from '@/components/ui/kbd';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -81,6 +85,7 @@ type NavTo =
   | '/kalender'
   | '/jadwal'
   | '/galeri'
+  | '/watermark'
   | '/auto-post'
   | '/auto-post/history'
   | '/auto-post/studio'
@@ -96,27 +101,27 @@ interface NavSubItem {
 const PLANNER_VIEWS_SUB: NavSubItem[] = [
   {
     to: '/kanban',
-    label: 'Papan Kanban',
+    label: 'Kanban',
     icon: <Columns3 aria-hidden="true" />,
   },
   {
     to: '/tabel',
-    label: 'Tabel Database',
+    label: 'Tabel',
     icon: <Table2 aria-hidden="true" />,
   },
   {
     to: '/kalender',
-    label: 'Kalender Event',
+    label: 'Kalender',
     icon: <CalendarDays aria-hidden="true" />,
   },
   {
     to: '/jadwal',
-    label: 'Jadwal Slot',
+    label: 'Jadwal',
     icon: <CalendarClock aria-hidden="true" />,
   },
   {
     to: '/galeri',
-    label: 'Galeri 9:16',
+    label: 'Galeri',
     icon: <LayoutGrid aria-hidden="true" />,
   },
 ];
@@ -124,17 +129,17 @@ const PLANNER_VIEWS_SUB: NavSubItem[] = [
 const CONNECTIONS_SUB: NavSubItem[] = [
   {
     to: '/auto-post/studio',
-    label: 'Sesi Browser Studio',
+    label: 'Browser',
     icon: <MonitorSmartphone aria-hidden="true" />,
   },
   {
     to: '/auto-post/meta',
-    label: 'Meta Graph API (FB/IG)',
+    label: 'Meta API',
     icon: <Share2 aria-hidden="true" />,
   },
   {
     to: '/auto-post/youtube',
-    label: 'YouTube Data API',
+    label: 'YouTube',
     icon: <SiYoutube aria-hidden="true" />,
   },
 ];
@@ -170,7 +175,6 @@ export interface AppShellProps {
   isScanning?: boolean;
   isLiveSyncActive?: boolean;
   counts?: AppShellCounts;
-  onOpenWatermarkStudio?: () => void;
   workspacesRegistry?: WorkspacesRegistry | null;
   activeWorkspace?: WorkspaceMetadata | null;
   onSwitchWorkspace?: (workspaceId: string) => void;
@@ -192,7 +196,6 @@ export function AppShell({
   isScanning = false,
   isLiveSyncActive = false,
   counts,
-  onOpenWatermarkStudio,
   workspacesRegistry,
   activeWorkspace,
   onSwitchWorkspace,
@@ -216,6 +219,7 @@ export function AppShell({
   const [isConnectionsOpen, setIsConnectionsOpen] = useState<boolean>(() =>
     CONNECTION_ROUTES.has(activePath)
   );
+  const [commandOpen, setCommandOpen] = useState<boolean>(false);
   const { updateInfo, dismissed, dismissUpdate } = useUpdateChecker();
 
   useEffect(() => {
@@ -374,7 +378,7 @@ export function AppShell({
         <SidebarContent>
           {/* Group 1: Workspace Konten */}
           <SidebarGroup>
-            <SidebarGroupLabel>Workspace Konten</SidebarGroupLabel>
+            <SidebarGroupLabel>Konten</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
                 <SidebarMenuItem>
@@ -396,13 +400,13 @@ export function AppShell({
                 <SidebarMenuItem>
                   <SidebarMenuButton
                     isActive={isPlannerSubActive && !isPlannerOpen}
-                    tooltip="Tampilan Planner"
+                    tooltip="Tampilan"
                     aria-expanded={isPlannerOpen}
                     onClick={() => setIsPlannerOpen((prev) => !prev)}
                     className="group-data-[collapsible=icon]:hidden"
                   >
                     <FolderKanban aria-hidden="true" />
-                    <span>Tampilan Planner</span>
+                    <span>Tampilan</span>
                     <ChevronRight
                       aria-hidden="true"
                       className={cn(
@@ -475,46 +479,45 @@ export function AppShell({
                   </SidebarMenuItem>
                 ))}
 
-                {onOpenWatermarkStudio ? (
-                  <SidebarMenuItem>
-                    <SidebarMenuButton
-                      tooltip="Batch Watermark Studio"
-                      onClick={onOpenWatermarkStudio}
-                    >
-                      <Droplets aria-hidden="true" />
-                      <span>Watermark Studio</span>
-                    </SidebarMenuButton>
-                    {typeof needsWmCount === 'number' && needsWmCount > 0 ? (
-                      <SidebarMenuBadge className="rounded-sm bg-[#FEF3C7] px-1 font-mono text-[10px] font-medium text-[#92400E] dark:bg-[#451A03] dark:text-[#FCD34D]">
-                        {needsWmCount}
-                      </SidebarMenuBadge>
-                    ) : null}
-                  </SidebarMenuItem>
-                ) : null}
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={activePath === '/watermark'}
+                    tooltip="Watermark"
+                    onClick={() => void navigate({ to: '/watermark' })}
+                  >
+                    <Droplets aria-hidden="true" />
+                    <span>Watermark</span>
+                  </SidebarMenuButton>
+                  {typeof needsWmCount === 'number' && needsWmCount > 0 ? (
+                    <SidebarMenuBadge className="rounded-sm bg-[#FEF3C7] px-1 font-mono text-[10px] font-medium text-[#92400E] dark:bg-[#451A03] dark:text-[#FCD34D]">
+                      {needsWmCount}
+                    </SidebarMenuBadge>
+                  ) : null}
+                </SidebarMenuItem>
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
 
           <SidebarSeparator />
 
-          {/* Group 2: Distribusi & Auto-Post */}
+          {/* Group 2: Distribusi */}
           <SidebarGroup>
-            <SidebarGroupLabel>Distribusi & Auto-Post</SidebarGroupLabel>
+            <SidebarGroupLabel>Distribusi</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
                 <SidebarMenuItem>
                   <SidebarMenuButton
                     isActive={activePath === '/auto-post'}
-                    tooltip="Dasbor Auto-Post"
+                    tooltip="Auto-Post"
                     onClick={() => void navigate({ to: '/auto-post' })}
                   >
                     <Send aria-hidden="true" />
-                    <span>Dasbor Auto-Post</span>
+                    <span>Auto-Post</span>
                   </SidebarMenuButton>
                   {typeof readyCount === 'number' && readyCount > 0 ? (
                     <SidebarMenuBadge
                       className="rounded-sm bg-[#DCFCE7] px-1 font-mono text-[10px] font-medium text-[#166534] dark:bg-[#052E16] dark:text-[#86EFAC]"
-                      title={`${readyCount} konten siap upload`}
+                      title={`${readyCount} siap upload`}
                     >
                       {readyCount}
                     </SidebarMenuBadge>
@@ -524,11 +527,11 @@ export function AppShell({
                 <SidebarMenuItem>
                   <SidebarMenuButton
                     isActive={activePath === '/auto-post/history'}
-                    tooltip="Riwayat & Antrean"
+                    tooltip="Riwayat"
                     onClick={() => void navigate({ to: '/auto-post/history' })}
                   >
                     <History aria-hidden="true" />
-                    <span>Riwayat & Antrean</span>
+                    <span>Riwayat</span>
                   </SidebarMenuButton>
                   {typeof historyBadgeCount === 'number' &&
                   historyBadgeCount > 0 ? (
@@ -541,13 +544,13 @@ export function AppShell({
                 <SidebarMenuItem>
                   <SidebarMenuButton
                     isActive={isConnectionSubActive && !isConnectionsOpen}
-                    tooltip="Koneksi & API"
+                    tooltip="Koneksi"
                     aria-expanded={isConnectionsOpen}
                     onClick={() => setIsConnectionsOpen((prev) => !prev)}
                     className="group-data-[collapsible=icon]:hidden"
                   >
                     <PlugZap aria-hidden="true" />
-                    <span>Koneksi & API</span>
+                    <span>Koneksi</span>
                     <ChevronRight
                       aria-hidden="true"
                       className={cn(
@@ -655,22 +658,29 @@ export function AppShell({
       </Sidebar>
 
       <SidebarInset>
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[80] focus:rounded-md focus:bg-primary focus:px-3 focus:py-1.5 focus:text-xs focus:font-medium focus:text-primary-foreground"
+        >
+          Langsung ke konten
+        </a>
+
         <UpdateNotificationBanner
           updateInfo={updateInfo}
           dismissed={dismissed}
           onDismiss={dismissUpdate}
         />
-        <header className="sticky top-0 z-20 flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background/95 px-3 py-2 backdrop-blur sm:px-5">
+        <header className="sticky top-0 z-20 flex min-h-13 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background/95 px-3 py-1.5 backdrop-blur sm:px-5">
           <div className="flex min-w-0 items-center gap-2">
             <SidebarTrigger aria-label="Buka atau tutup menu navigasi" />
             <Separator orientation="vertical" className="h-4" />
             <div className="min-w-0 leading-tight">
               <div className="flex min-w-0 items-center gap-1.5">
-                <span className="shrink-0 text-xs font-medium text-muted-foreground">
-                  {isPublishingGroup ? 'Publishing' : 'Konten'}
+                <span className="shrink-0 text-xs font-light text-muted-foreground/80">
+                  {isPublishingGroup ? 'Distribusi' : 'Konten'}
                 </span>
                 <span
-                  className="shrink-0 text-xs text-muted-foreground/60"
+                  className="shrink-0 text-xs text-muted-foreground/50"
                   aria-hidden="true"
                 >
                   /
@@ -680,14 +690,34 @@ export function AppShell({
                 </h1>
               </div>
               {subtitle ? (
-                <p className="hidden truncate text-[11px] text-muted-foreground md:block">
+                <p className="hidden truncate text-[11px] font-light text-muted-foreground/75 md:block">
                   {subtitle}
                 </p>
               ) : null}
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCommandOpen(true)}
+                    aria-label="Buka pencarian cepat (Ctrl+K)"
+                    className="h-7 gap-2 px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
+                  />
+                }
+              >
+                <Search className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="hidden lg:inline">Cari cepat...</span>
+                <Kbd className="hidden sm:inline-flex">Ctrl K</Kbd>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Pencarian Cepat (Ctrl+K)</TooltipContent>
+            </Tooltip>
+
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -695,25 +725,17 @@ export function AppShell({
                     tabIndex={0}
                     role="status"
                     aria-label={liveSyncLabel}
-                    className={cn(
-                      'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium outline-hidden focus-visible:ring-2 focus-visible:ring-ring',
-                      isLiveSyncActive
-                        ? 'border-[#166534]/30 bg-[#DCFCE7] text-[#166534] dark:border-[#86EFAC]/30 dark:bg-[#052E16] dark:text-[#86EFAC]'
-                        : 'border-border bg-muted text-muted-foreground'
-                    )}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-md outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <span
                       className={cn(
-                        'h-1.5 w-1.5 shrink-0 rounded-full',
+                        'h-2 w-2 rounded-full',
                         isLiveSyncActive
-                          ? 'bg-[#166534] dark:bg-[#86EFAC]'
-                          : 'bg-muted-foreground'
+                          ? 'bg-[#16a34a] dark:bg-[#4ade80]'
+                          : 'bg-muted-foreground/40'
                       )}
                       aria-hidden="true"
                     />
-                    <span className="hidden font-mono text-[10px] sm:inline">
-                      {isLiveSyncActive ? 'SYNC' : 'OFF'}
-                    </span>
                   </span>
                 }
               />
@@ -726,9 +748,10 @@ export function AppShell({
                 variant="editorial"
                 size="sm"
                 onClick={onOpenCreateContent}
+                aria-label="Buat konten baru"
               >
                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Konten Baru</span>
+                <span>Baru</span>
               </Button>
             ) : null}
 
@@ -737,7 +760,7 @@ export function AppShell({
             {onOpenQuickGuide ? (
               <IconActionButton
                 icon={HelpCircle}
-                label="Panduan singkat folder & aturan workspace"
+                label="Panduan"
                 side="bottom"
                 onClick={onOpenQuickGuide}
               />
@@ -745,8 +768,8 @@ export function AppShell({
 
             {onOpenWorkspaceSettings ? (
               <IconActionButton
-                icon={Settings2}
-                label="Pengaturan workspace aktif"
+                icon={Settings}
+                label="Pengaturan"
                 side="bottom"
                 onClick={onOpenWorkspaceSettings}
               />
@@ -755,7 +778,7 @@ export function AppShell({
             {onRescan ? (
               <IconActionButton
                 icon={RefreshCw}
-                label="Scan ulang folder KONTEN"
+                label="Scan ulang"
                 side="bottom"
                 onClick={onRescan}
                 disabled={isScanning}
@@ -765,7 +788,7 @@ export function AppShell({
 
             <IconActionButton
               icon={theme === 'dark' ? Sun : Moon}
-              label="Ganti tema terang / gelap"
+              label={theme === 'dark' ? 'Mode terang' : 'Mode gelap'}
               side="bottom"
               onClick={onToggleTheme}
             />
@@ -778,12 +801,31 @@ export function AppShell({
           </div>
         ) : null}
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="min-h-0 flex-1 overflow-y-auto outline-none"
+        >
           <div className="mx-auto w-full max-w-[1500px] space-y-4 p-4 sm:p-6">
             {children}
           </div>
-        </div>
+        </main>
       </SidebarInset>
+
+      <CommandPalette
+        open={commandOpen}
+        onOpenChange={setCommandOpen}
+        theme={theme}
+        onToggleTheme={onToggleTheme}
+        onRescan={onRescan}
+        onOpenCreateContent={onOpenCreateContent}
+        onOpenCreateWorkspace={onOpenCreateWorkspace}
+        onOpenWorkspaceSettings={onOpenWorkspaceSettings}
+        onOpenQuickGuide={onOpenQuickGuide}
+        workspaces={workspaceList}
+        activeWorkspaceId={activeWorkspace?.id}
+        onSwitchWorkspace={onSwitchWorkspace}
+      />
     </SidebarProvider>
   );
 }

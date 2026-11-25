@@ -23,11 +23,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import {
-  KANBAN_COLUMNS,
-  type PlatformKey,
-  type WorkflowStatus,
-} from '@/types/planner';
+import type { PlatformKey, WorkflowStatus } from '@/types/planner';
 import type { AutoPostPageProps } from '../pageProps';
 import { useDerivedStats, pickNextContent } from '../useAutoPostData';
 import { ActivityFeed } from '../parts/ActivityFeed';
@@ -44,8 +40,18 @@ import { formatSlotShort } from '@/lib/formatSlot';
 
 const QUEUE_LIMIT = 12;
 
+const WORKFLOW_SHORT_LABEL: Record<WorkflowStatus, string> = {
+  draft_assets: 'Draft',
+  needs_watermark: 'Watermark',
+  ready_to_upload: 'Siap',
+  scheduled: 'Terjadwal',
+  partially_published: 'Sebagian',
+  published_all: 'Selesai',
+  on_hold: 'Hold',
+};
+
 function workflowShortLabel(status: WorkflowStatus): string {
-  return KANBAN_COLUMNS.find((column) => column.id === status)?.shortLabel ?? status;
+  return WORKFLOW_SHORT_LABEL[status] ?? status;
 }
 
 export function DashboardPage({ ctx }: AutoPostPageProps) {
@@ -82,25 +88,25 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard
-          label="Siap Posting"
+          label="Siap"
           value={stats.readyToPost}
           tone="default"
           icon={Send}
         />
         <StatCard
-          label="Sedang Jalan"
+          label="Berjalan"
           value={stats.runningJobs}
           tone="info"
           icon={LoaderCircle}
         />
         <StatCard
-          label="Sudah Publish"
+          label="Tayang"
           value={stats.publishedTotal}
           tone="success"
           icon={CheckCheck}
         />
         <StatCard
-          label="Butuh Watermark"
+          label="Watermark"
           value={stats.needsWatermark}
           tone="warning"
           icon={Droplets}
@@ -136,8 +142,8 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
           <h2 className="text-sm font-semibold text-foreground">
             Antrean Konten
           </h2>
-          <span className="text-[11px] text-muted-foreground">
-            {queue.length} dari {ctx.items.length} konten
+          <span className="text-[11px] font-light text-muted-foreground/75">
+            {queue.length} konten
           </span>
         </div>
 
@@ -146,8 +152,8 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
             <TableRow>
               <TableHead>Kode</TableHead>
               <TableHead>Slot</TableHead>
-              <TableHead>Watermark</TableHead>
-              <TableHead>Progres Platform</TableHead>
+              <TableHead>Berkas</TableHead>
+              <TableHead>Platform</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Aksi</TableHead>
             </TableRow>
@@ -157,7 +163,7 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
               <TableRow>
                 <TableCell
                   colSpan={6}
-                  className="py-8 text-center text-xs text-muted-foreground"
+                  className="py-8 text-center text-xs font-light text-muted-foreground/75"
                 >
                   Belum ada konten di folder KONTEN.
                 </TableCell>
@@ -177,17 +183,15 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
                     <TableCell className="font-mono text-xs font-medium">
                       {item.folderCode}
                     </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" size="xs">
-                        {formatSlotShort(item.schedule)}
-                      </Badge>
+                    <TableCell className="text-xs font-light whitespace-nowrap text-muted-foreground/75">
+                      {formatSlotShort(item.schedule)}
                     </TableCell>
                     <TableCell>
                       <Badge
                         variant={hasWmFinal ? 'success' : 'warning'}
                         size="xs"
                       >
-                        {hasWmFinal ? 'Siap' : 'Belum'}
+                        {hasWmFinal ? 'Siap' : 'No WM'}
                       </Badge>
                     </TableCell>
                     <TableCell>
