@@ -740,7 +740,9 @@ async function selectMetaBusinessPostTargets(
     await trigger.click({ timeout: 8000 });
     await humanDelay(500, 800, signal);
 
-    // Inspect the opened popover and tag Facebook & Instagram checkbox targets
+    // Inspect the opened popover and tag Facebook & Instagram targets.
+    // NOTE: Keep all logic inline (zero inner helper function declarations) so tsx/esbuild
+    // keepNames never injects __name() into the serialized browser function!
     const inspectAndTag = async () =>
       page.evaluate(() => {
         document
@@ -750,79 +752,57 @@ async function selectMetaBusinessPostTargets(
             el.removeAttribute('data-cpgp-meta-row');
           });
 
-        const isVisible = (el: Element): boolean => {
-          const rect = el.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) return false;
-          const style = window.getComputedStyle(el);
-          return style.visibility !== 'hidden' && style.display !== 'none';
-        };
-
-        const readChecked = (el: Element): boolean => {
-          if (el instanceof HTMLInputElement && el.type === 'checkbox') {
-            return el.checked;
-          }
-          const ariaChecked = el.getAttribute('aria-checked');
-          if (ariaChecked === 'true') return true;
-          if (ariaChecked === 'false') return false;
-          const ariaSelected = el.getAttribute('aria-selected');
-          if (ariaSelected === 'true') return true;
-          const nestedInput = el.querySelector<HTMLInputElement>(
-            'input[type="checkbox"]'
-          );
-          if (nestedInput) return nestedInput.checked;
-          const nestedAria = el.querySelector('[aria-checked]');
-          if (nestedAria) {
-            return nestedAria.getAttribute('aria-checked') === 'true';
-          }
-          return false;
-        };
-
-        // Locate the "Post to Facebook and Instagram" floating popover first
-        let scope: Element | null = null;
         const headerRegex =
           /post to facebook and instagram|posting ke facebook dan instagram|post to facebook|posting ke facebook/i;
 
-        const allNodes = Array.from(document.querySelectorAll('div, section, ul'));
-        let bestPopover: Element | null = null;
-        let bestArea = Number.POSITIVE_INFINITY;
-
-        for (const node of allNodes) {
-          if (!isVisible(node)) continue;
-          const rect = node.getBoundingClientRect();
-          if (rect.width < 180 || rect.height < 60 || rect.width > 760) continue;
-          const text = (node.textContent ?? '').trim();
-          if (!headerRegex.test(text)) continue;
-
-          const boxes = node.querySelectorAll(
-            'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
-          );
-          if (boxes.length >= 1 && boxes.length <= 8) {
-            const area = rect.width * rect.height;
-            if (area < bestArea) {
-              bestArea = area;
-              bestPopover = node;
+        // Primary: Meta's multiselectable listbox popover
+        let scope: Element | null = null;
+        const listboxes = Array.from(
+          document.querySelectorAll(
+            '[role="listbox"][aria-multiselectable="true"], [role="listbox"]'
+          )
+        );
+        for (const lb of listboxes) {
+          const rect = lb.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) continue;
+          const style = window.getComputedStyle(lb);
+          if (style.visibility === 'hidden' || style.display === 'none') continue;
+          const opts = lb.querySelectorAll('[role="option"]');
+          if (opts.length >= 1) {
+            const text = (lb.textContent ?? '').trim();
+            if (headerRegex.test(text) || !scope) {
+              scope = lb;
+              if (headerRegex.test(text)) break;
             }
           }
         }
 
-        if (bestPopover) {
-          scope = bestPopover;
-        } else {
-          // Fallback to visible floating menu/listbox/dialog with checkboxes
-          const popups = Array.from(
-            document.querySelectorAll(
-              '[role="dialog"], [role="listbox"], [role="menu"], [data-visualcompletion="ignore-dynamic"]'
-            )
-          ).filter((el) => isVisible(el));
-          for (const popup of popups) {
-            const boxes = popup.querySelectorAll(
-              'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
+        // Secondary fallback: floating container with heading + options/checkboxes
+        if (!scope) {
+          const allNodes = Array.from(document.querySelectorAll('div, section, ul'));
+          let bestPopover: Element | null = null;
+          let bestArea = Number.POSITIVE_INFINITY;
+
+          for (const node of allNodes) {
+            const rect = node.getBoundingClientRect();
+            if (rect.width < 180 || rect.height < 60 || rect.width > 760) continue;
+            const style = window.getComputedStyle(node);
+            if (style.visibility === 'hidden' || style.display === 'none') continue;
+            const text = (node.textContent ?? '').trim();
+            if (!headerRegex.test(text)) continue;
+
+            const items = node.querySelectorAll(
+              '[role="option"], input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
             );
-            if (boxes.length >= 1 && boxes.length <= 8) {
-              scope = popup;
-              break;
+            if (items.length >= 1 && items.length <= 8) {
+              const area = rect.width * rect.height;
+              if (area < bestArea) {
+                bestArea = area;
+                bestPopover = node;
+              }
             }
           }
+          scope = bestPopover;
         }
 
         if (!scope) {
@@ -835,114 +815,131 @@ async function selectMetaBusinessPostTargets(
           };
         }
 
-        const rawBoxes = Array.from(
-          scope.querySelectorAll(
-            'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
-          )
-        ).filter((el) => {
-          // Avoid duplicates when a [role="checkbox"] wraps an <input type="checkbox">
-          if (
-            el.tagName !== 'INPUT' &&
-            el.querySelector('input[type="checkbox"]')
-          ) {
-            return false;
-          }
+        // Prefer [role="option"] inside listbox; fall back to checkbox elements
+        const rawItems: Element[] = [];
+        for (const el of Array.from(scope.querySelectorAll('[role="option"]'))) {
           const rect = el.getBoundingClientRect();
-          const parentRect = el.parentElement?.getBoundingClientRect();
-          return (
-            (rect.width > 0 && rect.height > 0) ||
-            (parentRect ? parentRect.width > 0 && parentRect.height > 0 : false)
-          );
-        });
+          if (rect.width <= 0 || rect.height <= 0) continue;
+          const style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || style.display === 'none') continue;
+          rawItems.push(el);
+        }
 
-        const getRowElement = (box: Element): Element => {
-          const explicitRow = box.closest(
-            '[role="option"], [role="menuitemcheckbox"], label, li'
-          );
-          if (explicitRow && scope!.contains(explicitRow)) {
-            return explicitRow;
-          }
-          let curr: Element | null = box.parentElement;
-          let candidate: Element = box.parentElement ?? box;
-          for (let depth = 0; depth < 5 && curr && curr !== scope; depth += 1) {
-            const r = curr.getBoundingClientRect();
-            const siblingBoxes = curr.querySelectorAll(
+        if (rawItems.length === 0) {
+          for (const el of Array.from(
+            scope.querySelectorAll(
               'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
-            );
-            // Stop before ascending to a container that holds multiple rows
-            const uniqueInputs = Array.from(siblingBoxes).filter(
-              (b) =>
-                !(
-                  b.tagName !== 'INPUT' &&
-                  b.querySelector('input[type="checkbox"]')
-                )
-            );
-            if (uniqueInputs.length > 1) break;
-            if (r.height >= 28 && r.height <= 96 && r.width >= 140) {
-              candidate = curr;
+            )
+          )) {
+            if (
+              el.tagName !== 'INPUT' &&
+              el.querySelector('input[type="checkbox"]')
+            ) {
+              continue;
             }
-            curr = curr.parentElement;
+            const rect = el.getBoundingClientRect();
+            const parentRect = el.parentElement?.getBoundingClientRect();
+            if (
+              (rect.width > 0 && rect.height > 0) ||
+              (parentRect ? parentRect.width > 0 && parentRect.height > 0 : false)
+            ) {
+              rawItems.push(el);
+            }
           }
-          return candidate;
-        };
+        }
 
-        const rowHint = (row: Element): 'facebook' | 'instagram' | null => {
-          const parts: string[] = [];
-          parts.push(row.getAttribute('aria-label') ?? '');
-          parts.push(row.textContent ?? '');
-          row.querySelectorAll('img, svg, i, [aria-label], [alt], [title]').forEach(
-            (child) => {
+        let fbEl: Element | null = null;
+        let igEl: Element | null = null;
+        const unassigned: Element[] = [];
+
+        for (const item of rawItems) {
+          let row: Element = item;
+          if (item.getAttribute('role') !== 'option') {
+            const explicitRow = item.closest(
+              '[role="option"], [role="menuitemcheckbox"], label, li'
+            );
+            if (explicitRow && scope.contains(explicitRow)) {
+              row = explicitRow;
+            } else {
+              row = item.parentElement ?? item;
+            }
+          }
+
+          const parts: string[] = [
+            row.getAttribute('aria-label') ?? '',
+            row.textContent ?? '',
+          ];
+          row
+            .querySelectorAll('img, svg, i, [aria-label], [alt], [title]')
+            .forEach((child) => {
               parts.push(child.getAttribute('aria-label') ?? '');
               parts.push(child.getAttribute('alt') ?? '');
               parts.push(child.getAttribute('title') ?? '');
               parts.push(child.getAttribute('src') ?? '');
-            }
-          );
+            });
           const combined = parts.join(' ').toLowerCase();
-          if (combined.includes('instagram')) return 'instagram';
-          if (combined.includes('facebook')) return 'facebook';
-          return null;
-        };
-
-        let fbBox: Element | null = null;
-        let igBox: Element | null = null;
-        const unassigned: Element[] = [];
-
-        for (const box of rawBoxes) {
-          const row = getRowElement(box);
-          const hint = rowHint(row);
-          if (hint === 'facebook' && !fbBox) {
-            fbBox = box;
-          } else if (hint === 'instagram' && !igBox) {
-            igBox = box;
+          if (combined.includes('instagram') && !igEl) {
+            igEl = item;
+          } else if (combined.includes('facebook') && !fbEl) {
+            fbEl = item;
           } else {
-            unassigned.push(box);
+            unassigned.push(item);
           }
         }
 
         // Meta Business Suite lists Facebook Page first (index 0) and Instagram account second (index 1)
-        if (!fbBox && unassigned.length > 0) {
-          fbBox = unassigned.shift() ?? null;
+        if (!fbEl && unassigned.length > 0) {
+          fbEl = unassigned.shift() ?? null;
         }
-        if (!igBox && unassigned.length > 0) {
-          igBox = unassigned.shift() ?? null;
+        if (!igEl && unassigned.length > 0) {
+          igEl = unassigned.shift() ?? null;
         }
 
-        if (fbBox) {
-          fbBox.setAttribute('data-cpgp-meta-target', 'facebook');
-          getRowElement(fbBox).setAttribute('data-cpgp-meta-row', 'facebook');
+        let facebookChecked = false;
+        let instagramChecked = false;
+
+        if (fbEl) {
+          fbEl.setAttribute('data-cpgp-meta-target', 'facebook');
+          const fbRow =
+            fbEl.getAttribute('role') === 'option'
+              ? fbEl
+              : (fbEl.closest('[role="option"], [role="menuitemcheckbox"], label, li') ??
+                fbEl.parentElement ??
+                fbEl);
+          fbRow.setAttribute('data-cpgp-meta-row', 'facebook');
+          if (fbEl instanceof HTMLInputElement && fbEl.type === 'checkbox') {
+            facebookChecked = fbEl.checked;
+          } else if (fbEl.getAttribute('aria-selected') !== null) {
+            facebookChecked = fbEl.getAttribute('aria-selected') === 'true';
+          } else if (fbEl.getAttribute('aria-checked') !== null) {
+            facebookChecked = fbEl.getAttribute('aria-checked') === 'true';
+          }
         }
-        if (igBox) {
-          igBox.setAttribute('data-cpgp-meta-target', 'instagram');
-          getRowElement(igBox).setAttribute('data-cpgp-meta-row', 'instagram');
+
+        if (igEl) {
+          igEl.setAttribute('data-cpgp-meta-target', 'instagram');
+          const igRow =
+            igEl.getAttribute('role') === 'option'
+              ? igEl
+              : (igEl.closest('[role="option"], [role="menuitemcheckbox"], label, li') ??
+                igEl.parentElement ??
+                igEl);
+          igRow.setAttribute('data-cpgp-meta-row', 'instagram');
+          if (igEl instanceof HTMLInputElement && igEl.type === 'checkbox') {
+            instagramChecked = igEl.checked;
+          } else if (igEl.getAttribute('aria-selected') !== null) {
+            instagramChecked = igEl.getAttribute('aria-selected') === 'true';
+          } else if (igEl.getAttribute('aria-checked') !== null) {
+            instagramChecked = igEl.getAttribute('aria-checked') === 'true';
+          }
         }
 
         return {
-          foundFacebook: Boolean(fbBox),
-          foundInstagram: Boolean(igBox),
-          facebookChecked: fbBox ? readChecked(fbBox) : false,
-          instagramChecked: igBox ? readChecked(igBox) : false,
-          totalBoxes: rawBoxes.length,
+          foundFacebook: Boolean(fbEl),
+          foundInstagram: Boolean(igEl),
+          facebookChecked,
+          instagramChecked,
+          totalBoxes: rawItems.length,
         };
       });
 
@@ -958,6 +955,9 @@ async function selectMetaBusinessPostTargets(
           if (el instanceof HTMLInputElement && el.type === 'checkbox') {
             return el.checked;
           }
+          const ariaSelected = el.getAttribute('aria-selected');
+          if (ariaSelected === 'true') return true;
+          if (ariaSelected === 'false') return false;
           const ariaChecked = el.getAttribute('aria-checked');
           if (ariaChecked === 'true') return true;
           if (ariaChecked === 'false') return false;
@@ -1217,9 +1217,13 @@ async function uploadFacebookReelCover(
     await abortableWait(650, signal);
 
     const secondaryCandidates: Locator[] = [
-      // Exact case match for the blue "Upload Image" link/button shown in Meta Business Suite
+      // Exact match for the blue <a role="link">Upload Image</a> shown in Meta Business Suite
       reelSurface
-        .locator('a, button, [role="button"], span, div')
+        .locator('a[role="link"], a')
+        .filter({ hasText: /^Upload Image$/ })
+        .last(),
+      reelSurface
+        .locator('a, button, [role="button"]')
         .filter({ hasText: /^Upload Image$/ })
         .last(),
       reelSurface
@@ -1378,12 +1382,38 @@ async function configureMetaBusinessSchedule(
       return false;
     }
 
-    await scheduleTab.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await scheduleTab.click({ timeout: 8000 });
+    // Reset scroll position so Step 3 "Scheduling options" is fully visible below sticky header
+    await page
+      .evaluate(() => {
+        window.scrollTo(0, 0);
+        document.querySelectorAll('*').forEach((el) => {
+          if (el.scrollTop > 0) {
+            el.scrollTop = 0;
+          }
+        });
+      })
+      .catch(() => {});
+    await sweepGeoGuidanceCards(page);
+    await abortableWait(300, signal);
+
+    await scheduleTab.click({ force: true, timeout: 8000 }).catch(() => {});
+    await abortableWait(350, signal);
+    const pressedAfterClick = await scheduleTab
+      .getAttribute('aria-pressed')
+      .catch(() => null);
+    if (pressedAfterClick !== 'true') {
+      await scheduleTab
+        .evaluate((el) => {
+          (el as HTMLElement).click();
+        })
+        .catch(() => {});
+    }
     await humanDelay(650, 950, signal);
 
     // Inspect and tag all visible date, hour, minute, meridiem, or combined time inputs
-    // inside the Scheduling options card (1 row for single-channel, 2 rows for FB + IG!)
+    // inside the Scheduling options card (1 row for single-channel, 2 rows for FB + IG!).
+    // NOTE: Keep all logic inline (zero inner helper functions) so tsx/esbuild keepNames
+    // never injects __name() into the serialized browser callback!
     const tagged = await page.evaluate(() => {
       document
         .querySelectorAll(
@@ -1397,13 +1427,6 @@ async function configureMetaBusinessSchedule(
           el.removeAttribute('data-cpgp-sched-time');
         });
 
-      const isVisible = (el: Element): boolean => {
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) return false;
-        const st = window.getComputedStyle(el);
-        return st.visibility !== 'hidden' && st.display !== 'none';
-      };
-
       const footer = document.querySelector(
         '[data-surface$="bizweb_create_reel:footer"]'
       );
@@ -1411,16 +1434,24 @@ async function configureMetaBusinessSchedule(
         document.querySelector('[data-surface$="lib:bizweb_create_reel"]') ??
         document.body;
 
-      const allInputs = Array.from(
+      const allInputs: HTMLInputElement[] = [];
+      for (const el of Array.from(
         root.querySelectorAll<HTMLInputElement>(
           'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])'
         )
-      ).filter((el) => isVisible(el) && !(footer && footer.contains(el)));
+      )) {
+        if (footer && footer.contains(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        const st = window.getComputedStyle(el);
+        if (st.visibility === 'hidden' || st.display === 'none') continue;
+        allInputs.push(el);
+      }
 
       const dateRegex =
         /^\d{1,2}\s+[A-Za-z]+\.?\s+\d{4}$|^[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}$|^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}$|^\d{4}-\d{2}-\d{2}$/;
 
-      const dateSamples: string[] = [];
+      const dateMeta: Array<{ value: string; placeholder: string }> = [];
       const hourSamples: string[] = [];
       const minSamples: string[] = [];
       const ampmSamples: string[] = [];
@@ -1442,26 +1473,20 @@ async function configureMetaBusinessSchedule(
           placeholder.includes('dd') ||
           placeholder.includes('yyyy')
         ) {
-          input.setAttribute('data-cpgp-sched-date', String(dateSamples.length));
-          dateSamples.push(val);
+          input.setAttribute('data-cpgp-sched-date', String(dateMeta.length));
+          dateMeta.push({ value: val, placeholder });
           continue;
         }
 
         // Explicit hour / minute / meridiem spinbuttons
-        if (
-          aria.includes('hour') ||
-          aria.includes('jam')
-        ) {
+        if (aria.includes('hour') || aria.includes('jam')) {
           input.setAttribute('data-cpgp-sched-hour', String(hourSamples.length));
-          hourSamples.push(val);
+          hourSamples.push(val || input.getAttribute('aria-valuenow') || '');
           continue;
         }
-        if (
-          aria.includes('minute') ||
-          aria.includes('menit')
-        ) {
+        if (aria.includes('minute') || aria.includes('menit')) {
           input.setAttribute('data-cpgp-sched-min', String(minSamples.length));
-          minSamples.push(val);
+          minSamples.push(val || input.getAttribute('aria-valuenow') || '');
           continue;
         }
         if (
@@ -1487,23 +1512,35 @@ async function configureMetaBusinessSchedule(
       }
 
       // Positional pairing for unlabeled spinbutton pairs (hour, minute) per row
-      if (hourSamples.length === 0 && minSamples.length === 0 && spinInputs.length >= 2) {
+      if (
+        hourSamples.length === 0 &&
+        minSamples.length === 0 &&
+        spinInputs.length >= 2
+      ) {
         for (let i = 0; i + 1 < spinInputs.length; i += 2) {
           spinInputs[i].setAttribute(
             'data-cpgp-sched-hour',
             String(hourSamples.length)
           );
-          hourSamples.push((spinInputs[i].value ?? '').trim());
+          hourSamples.push(
+            (spinInputs[i].value ?? '').trim() ||
+              spinInputs[i].getAttribute('aria-valuenow') ||
+              ''
+          );
           spinInputs[i + 1].setAttribute(
             'data-cpgp-sched-min',
             String(minSamples.length)
           );
-          minSamples.push((spinInputs[i + 1].value ?? '').trim());
+          minSamples.push(
+            (spinInputs[i + 1].value ?? '').trim() ||
+              spinInputs[i + 1].getAttribute('aria-valuenow') ||
+              ''
+          );
         }
       }
 
       return {
-        dateSamples,
+        dateMeta,
         hourSamples,
         minSamples,
         ampmSamples,
@@ -1512,7 +1549,7 @@ async function configureMetaBusinessSchedule(
     });
 
     if (
-      tagged.dateSamples.length === 0 &&
+      tagged.dateMeta.length === 0 &&
       tagged.hourSamples.length === 0 &&
       tagged.timeSamples.length === 0
     ) {
@@ -1526,25 +1563,107 @@ async function configureMetaBusinessSchedule(
       return false;
     }
 
-    // Fill every date input (1 for single platform, 2 for Facebook + Instagram)
-    for (let i = 0; i < tagged.dateSamples.length; i += 1) {
+    // Fill every date input (1 for single platform, 2 for Facebook + Instagram).
+    // Meta's GeoDateInput opens a [role="grid"] calendar popup on click; selecting the day
+    // inside the calendar reliably commits the date (typing + Enter reverts to today!).
+    const ddStr = String(schedule.day).padStart(2, '0');
+    const mmStr = String(schedule.month).padStart(2, '0');
+    const targetEnMonth = EN_MONTHS_FULL[schedule.month - 1];
+    const targetIdMonth = ID_MONTHS_FULL[schedule.month - 1];
+    const targetMonthRegex = new RegExp(
+      `\\b(?:${targetEnMonth}|${targetIdMonth}|${EN_MONTHS_SHORT[schedule.month - 1]}|${ID_MONTHS_SHORT[schedule.month - 1]})\\b`,
+      'i'
+    );
+
+    for (let i = 0; i < tagged.dateMeta.length; i += 1) {
       throwIfAborted(signal);
-      const formattedDate = formatDateMatchingSample(
-        tagged.dateSamples[i],
-        schedule
-      );
+      const { value: sampleVal, placeholder } = tagged.dateMeta[i];
       const dateInput = page
         .locator(`[data-cpgp-sched-date="${i}"]`)
         .first();
-      await dateInput.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-      await dateInput.click({ timeout: 5000 });
+
+      await page
+        .evaluate(() => {
+          window.scrollTo(0, 0);
+          document.querySelectorAll('*').forEach((el) => {
+            if (el.scrollTop > 0) {
+              el.scrollTop = 0;
+            }
+          });
+        })
+        .catch(() => {});
       await abortableWait(150, signal);
-      await page.keyboard.press('Control+A');
-      await page.keyboard.press('Backspace');
-      await page.keyboard.type(formattedDate, { delay: 25 });
-      await page.keyboard.press('Enter');
-      await page.keyboard.press('Tab');
-      await abortableWait(300, signal);
+
+      await dateInput.click({ force: true, timeout: 5000 });
+      await abortableWait(450, signal);
+
+      const calGrid = page.locator('[role="grid"]:visible').last();
+      const gridVisible = await calGrid
+        .isVisible({ timeout: 2500 })
+        .catch(() => false);
+
+      let dateSetViaCalendar = false;
+      if (gridVisible) {
+        // Scope strictly to the calendar popover container so we NEVER click buttons outside the calendar!
+        const calContainer = calGrid.locator('xpath=ancestor::div[4]').first();
+        for (let nav = 0; nav < 6; nav += 1) {
+          throwIfAborted(signal);
+          const calContainerText = await calContainer
+            .innerText()
+            .catch(() => '');
+          if (targetMonthRegex.test(calContainerText)) {
+            break;
+          }
+          const nextMonthBtn = calContainer
+            .locator(
+              '[aria-label*="Next month" i]:visible, [aria-label*="Bulan berikutnya" i]:visible, [aria-label*="Next" i]:visible'
+            )
+            .last();
+          if (await nextMonthBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+            await nextMonthBtn.click({ timeout: 3000 }).catch(() => {});
+            await abortableWait(300, signal);
+          } else {
+            break;
+          }
+        }
+
+        const dayCells = calGrid
+          .locator(
+            '[role="gridcell"]:not([aria-disabled="true"]), [role="button"]:not([aria-disabled="true"]), button:not([disabled])'
+          )
+          .filter({ hasText: new RegExp(`^${schedule.day}$`) });
+        const cellCount = await dayCells.count().catch(() => 0);
+        if (cellCount > 0) {
+          // Days 1..15 of current month appear before next month's leading days -> first()
+          // Days 16..31 of current month appear after previous month's trailing days -> last()
+          const targetCell =
+            schedule.day <= 15 ? dayCells.first() : dayCells.last();
+          await targetCell.click({ timeout: 4000 }).catch(() => {});
+          await abortableWait(400, signal);
+          dateSetViaCalendar = true;
+        }
+      }
+
+      if (!dateSetViaCalendar) {
+        let formattedDate: string;
+        if (placeholder.includes('dd/mm/yyyy')) {
+          formattedDate = `${ddStr}/${mmStr}/${schedule.year}`;
+        } else if (placeholder.includes('mm/dd/yyyy')) {
+          formattedDate = `${mmStr}/${ddStr}/${schedule.year}`;
+        } else if (placeholder.includes('yyyy-mm-dd')) {
+          formattedDate = `${schedule.year}-${mmStr}-${ddStr}`;
+        } else {
+          formattedDate = formatDateMatchingSample(sampleVal, schedule);
+        }
+        await dateInput.click({ force: true, timeout: 5000 });
+        await abortableWait(200, signal);
+        await page.keyboard.press('Control+A');
+        await page.keyboard.press('Backspace');
+        await page.keyboard.type(formattedDate, { delay: 30 });
+        await abortableWait(200, signal);
+        await page.keyboard.press('Tab');
+        await abortableWait(300, signal);
+      }
     }
 
     const use12Hour = tagged.ampmSamples.length > 0;
@@ -1559,11 +1678,11 @@ async function configureMetaBusinessSchedule(
       const hourInput = page
         .locator(`[data-cpgp-sched-hour="${i}"]`)
         .first();
-      await hourInput.click({ timeout: 5000 });
-      await abortableWait(120, signal);
+      await hourInput.click({ force: true, timeout: 5000 });
+      await abortableWait(150, signal);
       await page.keyboard.press('Control+A');
-      await page.keyboard.type(hourValue, { delay: 25 });
-      await abortableWait(180, signal);
+      await page.keyboard.type(hourValue, { delay: 35 });
+      await abortableWait(200, signal);
     }
 
     for (let i = 0; i < tagged.minSamples.length; i += 1) {
@@ -1571,11 +1690,11 @@ async function configureMetaBusinessSchedule(
       const minInput = page
         .locator(`[data-cpgp-sched-min="${i}"]`)
         .first();
-      await minInput.click({ timeout: 5000 });
-      await abortableWait(120, signal);
+      await minInput.click({ force: true, timeout: 5000 });
+      await abortableWait(150, signal);
       await page.keyboard.press('Control+A');
-      await page.keyboard.type(minValue, { delay: 25 });
-      await abortableWait(180, signal);
+      await page.keyboard.type(minValue, { delay: 35 });
+      await abortableWait(200, signal);
     }
 
     for (let i = 0; i < tagged.ampmSamples.length; i += 1) {
@@ -1583,11 +1702,11 @@ async function configureMetaBusinessSchedule(
       const ampmInput = page
         .locator(`[data-cpgp-sched-ampm="${i}"]`)
         .first();
-      await ampmInput.click({ timeout: 5000 });
-      await abortableWait(120, signal);
+      await ampmInput.click({ force: true, timeout: 5000 });
+      await abortableWait(150, signal);
       await page.keyboard.press('Control+A');
-      await page.keyboard.type(meridiemValue, { delay: 25 });
-      await abortableWait(180, signal);
+      await page.keyboard.type(meridiemValue, { delay: 35 });
+      await abortableWait(200, signal);
     }
 
     for (let i = 0; i < tagged.timeSamples.length; i += 1) {
@@ -1600,12 +1719,12 @@ async function configureMetaBusinessSchedule(
       const timeInput = page
         .locator(`[data-cpgp-sched-time="${i}"]`)
         .first();
-      await timeInput.click({ timeout: 5000 });
-      await abortableWait(120, signal);
+      await timeInput.click({ force: true, timeout: 5000 });
+      await abortableWait(150, signal);
       await page.keyboard.press('Control+A');
       await page.keyboard.press('Backspace');
-      await page.keyboard.type(formattedTime, { delay: 25 });
-      await page.keyboard.press('Enter');
+      await page.keyboard.type(formattedTime, { delay: 30 });
+      await page.keyboard.press('Tab');
       await abortableWait(250, signal);
     }
 
@@ -1616,7 +1735,7 @@ async function configureMetaBusinessSchedule(
     onProgress({
       step: `Jadwal ${targetLabel} disetel ke ${schedule.displayLabel}`,
       progressPercent: 85,
-      log: `Tanggal & jam jadwal (${schedule.displayLabel}) berhasil diisi di ${Math.max(tagged.dateSamples.length, 1)} baris Meta Business Suite.`,
+      log: `Tanggal & jam jadwal (${schedule.displayLabel}) berhasil diisi di ${Math.max(tagged.dateMeta.length, 1)} baris Meta Business Suite.`,
       level: 'success',
     });
     return true;
@@ -1810,8 +1929,15 @@ export async function publishMetaBusinessSuiteViaBrowser(
     '[data-surface$="bizweb_create_reel:footer"] [role="button"]:not([aria-label])'
   );
   const getPrimaryFooterBtn = async (): Promise<Locator> => {
+    // On Step 0/1/2 the rightmost footer button is ALWAYS the primary CTA (Next / Share / Schedule),
+    // even when "Give us feedback" and "Back" precede it on Step 2.
     const count = await footerButtons.count().catch(() => 0);
-    return count >= 2 ? footerButtons.nth(1) : footerButtons.last();
+    if (count > 0) {
+      return footerButtons.last();
+    }
+    return page
+      .locator('[data-surface$="bizweb_create_reel:footer"] [role="button"]')
+      .last();
   };
 
   onProgress({
@@ -1941,9 +2067,34 @@ export async function publishMetaBusinessSuiteViaBrowser(
     );
   }
 
-  // Advance Reel wizard: Step 0 (Details) -> Step 1 (Edit) -> Step 2 (Share)
+  // Advance Reel wizard: Step 0 (Create) -> Step 1 (Edit, if enabled) -> Step 2 (Share).
+  // CRITICAL: When Instagram-only is selected (or Edit is skipped by Meta), clicking Next on Step 0
+  // jumps STRAIGHT to Step 2 (Share)! Always check whether we are already on the Share step
+  // BEFORE clicking Next so we NEVER accidentally click the final Share button early!
+  const isAlreadyOnShareStep = async (): Promise<boolean> => {
+    const shareNowBtn = reelSurface
+      .locator('[role="button"], [role="radio"], [role="tab"], button')
+      .filter({ hasText: /^(?:Share now|Bagikan sekarang)$/i })
+      .first();
+    if (await shareNowBtn.isVisible({ timeout: 350 }).catch(() => false)) {
+      return true;
+    }
+    const primaryBtn = await getPrimaryFooterBtn();
+    const ctaText = (await primaryBtn.innerText().catch(() => '')).trim();
+    if (
+      /^(?:Share|Bagikan|Schedule|Jadwalkan|Publish|Terbitkan)$/i.test(ctaText)
+    ) {
+      return true;
+    }
+    return false;
+  };
+
   for (let step = 0; step < 2; step += 1) {
     throwIfAborted(signal);
+    if (await isAlreadyOnShareStep()) {
+      break;
+    }
+
     const nextBtn = await getPrimaryFooterBtn();
     const ready = await waitForEnabledLocator(nextBtn, 120_000, signal);
     if (!ready) {
@@ -1961,10 +2112,15 @@ export async function publishMetaBusinessSuiteViaBrowser(
       };
     }
 
+    // Re-check right after waiting in case CTA label transitioned to Share/Schedule
+    if (await isAlreadyOnShareStep()) {
+      break;
+    }
+
     onProgress({
       step:
         step === 0
-          ? `Melanjutkan ke tahap Edit ${targetLabel}`
+          ? `Melanjutkan ke tahap berikutnya (${targetLabel})`
           : `Melanjutkan ke tahap Share ${targetLabel}`,
       progressPercent: step === 0 ? 75 : 82,
       log: `Menekan tombol Next langkah ${step + 1} di Meta Business Suite.`,
@@ -1977,6 +2133,9 @@ export async function publishMetaBusinessSuiteViaBrowser(
     const stepDeadline = Date.now() + 45_000;
     while (Date.now() < stepDeadline) {
       throwIfAborted(signal);
+      if (await isAlreadyOnShareStep()) {
+        break;
+      }
       const currStepMarker = await readFacebookActiveStepMarker(page);
       if (currStepMarker && currStepMarker !== prevStepMarker) {
         break;
@@ -2235,13 +2394,14 @@ async function configureYouTubeSchedule(
       await abortableWait(300, signal);
 
       // Click exact matching option in YouTube's 15-min dropdown if rendered
+      // Note: YouTube uses narrow no-break space (\u202f) between time and AM/PM, so match with \s+
+      const timePattern = formattedTime
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/\s+/g, '\\s+');
       const matchingOption = page
         .locator('tp-yt-paper-item:visible, tp-yt-paper-listbox [role="option"]:visible')
         .filter({
-          hasText: new RegExp(
-            `^${formattedTime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`,
-            'i'
-          ),
+          hasText: new RegExp(`^${timePattern}$`, 'i'),
         })
         .first();
       if (await matchingOption.isVisible({ timeout: 800 }).catch(() => false)) {

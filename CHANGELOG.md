@@ -4,6 +4,19 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.4.1] - 2026-11-25 (Live-Tested Meta Business Suite, YouTube & TikTok Auto-Post & Scheduling Fixes)
+
+### Perbaikan (Fixed — Diverifikasi Langsung di Chrome Asli)
+- **Perbaikan Total Alur Meta Business Suite (`server/autopost/browserPublishers.ts`)**:
+  - **Root Cause 1 — Dropdown `"Post to"` memakai ARIA Listbox**: Mengubah `selectMetaBusinessPostTargets()` agar menargetkan struktur asli Meta Business Suite (`[role="listbox"][aria-multiselectable="true"] [role="option"][aria-selected]`) alih-alih `<input type="checkbox">`, sehingga pemilihan FB saja, IG saja, maupun FB + IG sekaligus kini 100% akurat.
+  - **Root Cause 2 — `ReferenceError: __name is not defined` di `page.evaluate`**: Menghapus seluruh deklarasi fungsi helper di dalam callback `page.evaluate(...)` agar `tsx`/`esbuild` (`keepNames`) tidak menyuntikkan `__name(...)` ke konteks browser.
+  - **Root Cause 3 — IG-Only Melewati Langkah Edit**: Menambahkan guard `isAlreadyOnShareStep()` pada loop wizard Meta sehingga saat mode **Instagram saja** (yang langsung melompat dari `Create` ke `Share` tanpa tahap `Edit`), tombol **`Share`** tidak pernah salah diklik sebagai `Next`.
+  - **Root Cause 4 — Pemilihan Tanggal & Scroll Step 3 (`configureMetaBusinessSchedule`)**: Mereset posisi scroll ke atas (`scrollTop = 0`) sebelum mengklik tab **`Schedule`** agar tidak tertutup sticky header, memilih tanggal langsung melalui kalender `[role="grid"]` (karena mengetik + Enter di GeoDateInput Meta kembali ke hari ini), dan menggunakan tombol footer paling kanan (`footerButtons.last()`) agar tidak tergeser oleh tombol `Give us feedback` / `Back`.
+  - **Prioritas `<a role="link">Upload Image</a>`**: Memprioritaskan tautan biru `a[role="link"]` pada langkah kedua upload cover 9:16.
+- **Perbaikan Matching Jam YouTube Studio**: Menggunakan regex `\s+` saat mencocokkan opsi jam di dropdown YouTube (`tp-yt-paper-item`) agar kompatibel dengan karakter narrow no-break space (`\u202f`, misal `7:30\u202fPM`).
+
+---
+
 ## [v2.4.0] - 2026-11-25 (Native Social Media Scheduling Across TikTok, YouTube Shorts, Facebook & Instagram Reels + Web UI Date/Time Override)
 
 ### Fitur Baru (Added)
