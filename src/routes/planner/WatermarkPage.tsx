@@ -32,6 +32,7 @@ import {
   type WatermarkFontOption,
   type WatermarkPresetStore,
   type WatermarkRenderJob,
+  type WatermarkRenderSpeedMode,
   type WatermarkStyleConfig,
 } from '@/types/watermark';
 import { buildWatermarkSvg, clampNumber } from '../../../shared/watermarkSvg';
@@ -84,6 +85,8 @@ const FALLBACK_CAPABILITIES: WatermarkCapabilities = {
   ffmpegAvailable: true,
   ffprobeAvailable: true,
   nvencAvailable: false,
+  qsvAvailable: false,
+  amfAvailable: false,
   recommendedEncoder: 'x264',
 };
 
@@ -162,6 +165,7 @@ export function WatermarkPage() {
   );
   const [selectedPresetId, setSelectedPresetId] = useState<string>('');
   const [encoder, setEncoder] = useState<WatermarkEncoderMode>('auto');
+  const [speedMode, setSpeedMode] = useState<WatermarkRenderSpeedMode>('fast');
   const [outputMode, setOutputMode] = useState<WatermarkOutputMode>(
     watermarkPolicy === 'overwrite_source'
       ? 'overwrite_source'
@@ -617,6 +621,7 @@ export function WatermarkPage() {
         presetId: selectedPresetId || undefined,
         presetName: selectedPreset?.name,
         encoder,
+        speedMode,
         outputMode,
       });
       if (Array.isArray(data.jobs)) {
@@ -689,14 +694,38 @@ export function WatermarkPage() {
   const isSnappedY = Math.abs(config.yPercent - 50) < 0.01;
 
   const encoderLabel = useMemo(() => {
-    if (encoder === 'x264') return 'x264 (CRF 16)';
+    if (encoder === 'x264') return 'CPU x264 (CRF 16)';
     if (encoder === 'nvenc') {
       return capabilities.nvencAvailable
-        ? 'NVENC GPU (CQ 17)'
+        ? 'NVIDIA NVENC GPU (CQ 17)'
         : 'NVENC (Tidak tersedia)';
     }
-    return 'Otomatis (Rekomendasi)';
-  }, [encoder, capabilities.nvencAvailable]);
+    if (encoder === 'qsv') {
+      return capabilities.qsvAvailable
+        ? 'Intel QuickSync GPU (ICQ 17)'
+        : 'Intel QSV (Tidak tersedia)';
+    }
+    if (encoder === 'amf') {
+      return capabilities.amfAvailable
+        ? 'AMD AMF GPU (CQP 17)'
+        : 'AMD AMF (Tidak tersedia)';
+    }
+    const recName =
+      capabilities.recommendedEncoder === 'nvenc'
+        ? 'NVENC GPU'
+        : capabilities.recommendedEncoder === 'qsv'
+          ? 'Intel QSV GPU'
+          : capabilities.recommendedEncoder === 'amf'
+            ? 'AMD AMF GPU'
+            : 'CPU x264';
+    return `Otomatis (${recName})`;
+  }, [
+    encoder,
+    capabilities.nvencAvailable,
+    capabilities.qsvAvailable,
+    capabilities.amfAvailable,
+    capabilities.recommendedEncoder,
+  ]);
 
   const outputModeLabel =
     outputMode === 'overwrite_source'
@@ -1665,8 +1694,10 @@ export function WatermarkPage() {
                     onValueChange={(next) => {
                       if (
                         next === 'auto' ||
-                        next === 'x264' ||
-                        next === 'nvenc'
+                        next === 'nvenc' ||
+                        next === 'qsv' ||
+                        next === 'amf' ||
+                        next === 'x264'
                       ) {
                         setEncoder(next);
                       }
@@ -1680,10 +1711,16 @@ export function WatermarkPage() {
                     </SelectTrigger>
                     <SelectContent alignItemWithTrigger={false}>
                       <SelectItem value="auto" className="text-xs">
-                        Otomatis (Rekomendasi)
+                        Otomatis (GPU tercepat / CPU)
                       </SelectItem>
-                      <SelectItem value="x264" className="text-xs">
-                        x264 (CRF 16)
+                      <SelectItem
+                        value="qsv"
+                        disabled={!capabilities.qsvAvailable}
+                        className="text-xs"
+                      >
+                        {capabilities.qsvAvailable
+                          ? 'Intel QuickSync GPU (ICQ 17)'
+                          : 'Intel QSV (Tidak tersedia)'}
                       </SelectItem>
                       <SelectItem
                         value="nvenc"
@@ -1691,8 +1728,20 @@ export function WatermarkPage() {
                         className="text-xs"
                       >
                         {capabilities.nvencAvailable
-                          ? 'NVENC GPU (CQ 17)'
+                          ? 'NVIDIA NVENC GPU (CQ 17)'
                           : 'NVENC (Tidak tersedia)'}
+                      </SelectItem>
+                      <SelectItem
+                        value="amf"
+                        disabled={!capabilities.amfAvailable}
+                        className="text-xs"
+                      >
+                        {capabilities.amfAvailable
+                          ? 'AMD AMF GPU (CQP 17)'
+                          : 'AMD AMF (Tidak tersedia)'}
+                      </SelectItem>
+                      <SelectItem value="x264" className="text-xs">
+                        CPU x264 (CRF 16)
                       </SelectItem>
                     </SelectContent>
                   </Select>
@@ -1738,6 +1787,56 @@ export function WatermarkPage() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+
+              <div className="space-y-1.5 rounded-lg border border-border bg-muted/30 p-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-foreground">
+                    Kecepatan Render
+                  </span>
+                  <div
+                    role="group"
+                    aria-label="Kecepatan Render"
+                    className="inline-flex items-center gap-1 rounded-md border border-border bg-card p-0.5"
+                  >
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant={speedMode === 'fast' ? 'default' : 'ghost'}
+                      aria-pressed={speedMode === 'fast'}
+                      onClick={() => setSpeedMode('fast')}
+                    >
+                      Cepat (HQ)
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant={speedMode === 'balanced' ? 'default' : 'ghost'}
+                      aria-pressed={speedMode === 'balanced'}
+                      onClick={() => setSpeedMode('balanced')}
+                    >
+                      Seimbang
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant={
+                        speedMode === 'max_compression' ? 'default' : 'ghost'
+                      }
+                      aria-pressed={speedMode === 'max_compression'}
+                      onClick={() => setSpeedMode('max_compression')}
+                    >
+                      Hemat Ukuran
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-[11px] font-light text-muted-foreground/75">
+                  {speedMode === 'fast'
+                    ? 'Proses 3x-5x lebih cepat tanpa menurunkan kualitas visual (CRF 16 / ICQ 17, audio lossless copy). Ukuran file sedikit lebih besar.'
+                    : speedMode === 'balanced'
+                      ? 'Keseimbangan antara kecepatan proses dan ukuran file MP4 dengan kualitas visual tetap tinggi.'
+                      : 'Kompresi maksimal agar ukuran file MP4 paling kecil dengan kualitas visual tetap sama (proses lebih lama).'}
+                </p>
               </div>
 
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1">

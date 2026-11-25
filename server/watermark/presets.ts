@@ -38,8 +38,10 @@ const VALID_ANCHORS = new Set<WatermarkAnchor>([
 
 const VALID_ENCODERS = new Set<WatermarkEncoderMode>([
   'auto',
-  'x264',
   'nvenc',
+  'qsv',
+  'amf',
+  'x264',
 ]);
 
 function resolvePresetsFilePath(filePath?: string): string {

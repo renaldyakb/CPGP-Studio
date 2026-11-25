@@ -10,7 +10,11 @@ export type WatermarkAnchor =
   | 'bottom-right'
   | 'custom';
 
-export type WatermarkEncoderMode = 'auto' | 'x264' | 'nvenc';
+export type WatermarkEncoderMode = 'auto' | 'nvenc' | 'qsv' | 'amf' | 'x264';
+
+export type WatermarkResolvedEncoder = 'nvenc' | 'qsv' | 'amf' | 'x264';
+
+export type WatermarkRenderSpeedMode = 'fast' | 'balanced' | 'max_compression';
 
 export interface WatermarkFontOption {
   id: string;
@@ -57,6 +61,7 @@ export interface WatermarkPresetStore {
   schemaVersion: string;
   defaultPresetId: string;
   defaultEncoder: WatermarkEncoderMode;
+  defaultSpeedMode?: WatermarkRenderSpeedMode;
   presets: WatermarkPreset[];
 }
 
@@ -75,7 +80,8 @@ export interface WatermarkRenderJob {
   inputFile: string;
   outputFile: string;
   encoderRequested: WatermarkEncoderMode;
-  encoderUsed: 'x264' | 'nvenc' | null;
+  encoderUsed: WatermarkResolvedEncoder | null;
+  speedMode?: WatermarkRenderSpeedMode;
   presetName: string;
   status: WatermarkJobStatus;
   percent: number;
@@ -93,7 +99,9 @@ export interface WatermarkCapabilities {
   ffmpegAvailable: boolean;
   ffprobeAvailable: boolean;
   nvencAvailable: boolean;
-  recommendedEncoder: 'x264' | 'nvenc';
+  qsvAvailable: boolean;
+  amfAvailable: boolean;
+  recommendedEncoder: WatermarkResolvedEncoder;
 }
 
 export const ANCHOR_COORDINATES: Record<

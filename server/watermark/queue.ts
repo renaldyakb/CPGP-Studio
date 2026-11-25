@@ -6,6 +6,7 @@ import type { ContentPlannerItem } from '../../src/types/planner.ts';
 import type {
   WatermarkEncoderMode,
   WatermarkRenderJob,
+  WatermarkRenderSpeedMode,
   WatermarkStyleConfig,
 } from '../../src/types/watermark.ts';
 import { OVERWRITE_WATERMARK_MARKER_FILE } from '../scanner.ts';
@@ -31,6 +32,7 @@ export interface EnqueueBatchInput {
   config: WatermarkStyleConfig;
   presetName: string;
   encoder: WatermarkEncoderMode;
+  speedMode?: WatermarkRenderSpeedMode;
   outputMode?: WatermarkOutputMode;
 }
 
@@ -149,6 +151,11 @@ export class WatermarkQueueManager {
         : 'wm_final.mp4';
       const outputAbsPath = path.join(item.absolutePath, outputFileName);
 
+      const resolvedSpeedMode: WatermarkRenderSpeedMode =
+        input.speedMode === 'balanced' || input.speedMode === 'max_compression'
+          ? input.speedMode
+          : 'fast';
+
       const job: WatermarkRenderJob = {
         jobId,
         workspaceId: activeWs.id,
@@ -158,6 +165,7 @@ export class WatermarkQueueManager {
         outputFile: outputFileName,
         encoderRequested: input.encoder,
         encoderUsed: null,
+        speedMode: resolvedSpeedMode,
         presetName: input.presetName,
         status: 'queued',
         percent: 0,
@@ -205,6 +213,7 @@ export class WatermarkQueueManager {
                 outputFileName,
                 config: configSnapshot,
                 encoder: input.encoder,
+                speedMode: resolvedSpeedMode,
                 signal: controller.signal,
                 onEncoderResolved: (encoderUsed) => {
                   job.encoderUsed = encoderUsed;

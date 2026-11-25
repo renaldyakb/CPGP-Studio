@@ -5,6 +5,7 @@ import type {
   WatermarkPreset,
   WatermarkPresetStore,
   WatermarkRenderJob,
+  WatermarkRenderSpeedMode,
   WatermarkStyleConfig,
 } from '../types/watermark';
 
@@ -56,6 +57,7 @@ export interface StartWatermarkRenderInput {
   presetId?: string;
   presetName?: string;
   encoder?: WatermarkEncoderMode;
+  speedMode?: WatermarkRenderSpeedMode;
   outputMode?: WatermarkOutputMode;
   saveDefaultEncoder?: boolean;
 }

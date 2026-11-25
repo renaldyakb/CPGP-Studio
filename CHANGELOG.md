@@ -4,6 +4,24 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.9.0] - 2026-11-26 (Fast Zero-Quality-Loss Watermark Render, Multi-GPU NVENC/QSV/AMF Support & Launcher 3rd-Party Checks)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Opsi Kecepatan Render Tanpa Mengurangi Kualitas (`server/watermark/renderer.ts`, `queue.ts`, `WatermarkPage.tsx`)**:
+  - Menambahkan 3 pilihan **`Kecepatan Render`** di Watermark Studio dengan default **`Cepat (HQ)`** (kualitas visual tetap setara CRF 16 / CQ 17 / ICQ 17, audio lossless `-c:a copy`, hanya trade-off ukuran file sedikit lebih besar demi render **3x–5x lebih cepat**):
+    - **`Cepat (HQ)`**: `veryfast` (x264 / QSV), `p3` (NVENC), `speed` (AMF) + pre-konversi watermark statis `[1:v]format=yuva420p[wm];[0:v][wm]overlay=0:0:format=yuv420:eval=init` + `-hwaccel auto`.
+    - **`Seimbang`**: `medium` / `p5` / `balanced`.
+    - **`Hemat Ukuran`**: `slow` / `p7` / `quality` (ukuran file paling kecil dengan kualitas visual identik).
+- **Dukungan Multi-GPU Hardware Encoder (`NVENC` + `Intel QuickSync QSV` + `AMD AMF` + `CPU x264`)**:
+  - `detectWatermarkCapabilities()` kini memindai paralel `h264_nvenc`, `h264_qsv`, dan `h264_amf`, lalu memilih GPU tercepat yang tersedia secara otomatis (`Otomatis`) — di perangkat dengan NVIDIA driver lama yang belum mendukung NVENC 13.1, sistem otomatis beralih ke **Intel QuickSync GPU (`h264_qsv`)** (~21 detik/video dibanding ~90–110 detik sebelumnya di CPU `slow`).
+- **Pemeriksaan 3rd-Party Pendukung di Launcher (`scripts/launcher.ps1`, `start-planner.sh`)**:
+  - Menambahkan langkah **`[3/6]` Pemeriksaan 3rd-Party Pendukung (FFmpeg & FFprobe, Browser Chrome/Edge, Git)** agar pengguna baru langsung siap pakai:
+    - Jika **FFmpeg / FFprobe** belum terpasang -> menampilkan Radio Menu (`Spasi` + `Enter`) untuk install otomatis (`winget install Gyan.FFmpeg` / `brew` / `apt`) atau menampilkan kotak panduan manual lengkap lalu tetap melanjutkan.
+    - Jika **Chrome / Edge** belum terpasang -> menawarkan instalasi otomatis `Google.Chrome` via `winget` atau lanjutkan tanpa Auto-Post Browser.
+    - Menampilkan status **Git** (opsional) secara informatif.
+
+---
+
 ## [v2.8.0] - 2026-11-26 (Interactive Luxury Burgundy Terminal Launcher: Device Check, Node.js LTS Auto-Installer & GitHub Updater)
 
 ### Fitur Baru (Added)

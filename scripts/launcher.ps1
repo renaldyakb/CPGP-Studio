@@ -363,6 +363,47 @@ function Install-NodeJsLts {
   return $false
 }
 
+function Show-ManualFfmpegTutorial {
+  $w = 70
+  Write-Host ("  ${LINE_CLR}╭" + ('─' * $w) + "╮${RST}")
+  Write-Host (Format-BoxRow -Indent '  ' -InnerWidth $w -Content "  ${BURG_ROSE}${BOLD}PANDUAN INSTALL MANUAL FFMPEG (UNTUK WATERMARK STUDIO)${RST}")
+  Write-Host ("  ${LINE_CLR}├" + ('─' * $w) + "┤${RST}")
+  Write-Host (Format-BoxRow -Indent '  ' -InnerWidth $w -Content "  ${IVORY}1. Buka:${RST} ${SKY}https://www.gyan.dev/ffmpeg/builds/${RST}")
+  Write-Host (Format-BoxRow -Indent '  ' -InnerWidth $w -Content "  ${IVORY}2. Unduh${RST} ${EMERALD}${BOLD}ffmpeg-release-essentials.zip${RST} ${IVORY}lalu ekstrak (misal C:\ffmpeg)${RST}")
+  Write-Host (Format-BoxRow -Indent '  ' -InnerWidth $w -Content "  ${IVORY}3. Tambahkan folder${RST} ${BURG_SOFT}C:\ffmpeg\bin${RST} ${IVORY}ke System Environment PATH.${RST}")
+  Write-Host (Format-BoxRow -Indent '  ' -InnerWidth $w -Content "  ${IVORY}4. Atau via terminal:${RST} ${SKY}winget install Gyan.FFmpeg${RST}")
+  Write-Host ("  ${LINE_CLR}╰" + ('─' * $w) + "╯${RST}")
+  Write-Host ''
+}
+
+function Install-FfmpegWindows {
+  Write-StatusInfo 'Menyiapkan instalasi FFmpeg & FFprobe (Gyan.FFmpeg)...'
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if ($winget) {
+    Write-StatusInfo 'Memasang otomatis via winget (Gyan.FFmpeg)...'
+    Write-Host ''
+    & winget install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -eq 0) {
+      Refresh-SessionPath
+      if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+        return $true
+      }
+    }
+  }
+  return $false
+}
+
+function Install-ChromeWindows {
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if ($winget) {
+    Write-StatusInfo 'Memasang Google Chrome via winget (Google.Chrome)...'
+    Write-Host ''
+    & winget install --id Google.Chrome -e --accept-package-agreements --accept-source-agreements
+    return ($LASTEXITCODE -eq 0)
+  }
+  return $false
+}
+
 function Invoke-GitHubSelfUpdate {
   param(
     [string]$TargetTag,
@@ -446,7 +487,7 @@ Show-Banner -Version $localVersion
 # ------------------------------------------------------------------------------
 # STEP 1: CEK DEVICE
 # ------------------------------------------------------------------------------
-Write-StepHeader -StepTag '1/5' -Title 'Pemeriksaan Perangkat & Lingkungan'
+Write-StepHeader -StepTag '1/6' -Title 'Pemeriksaan Perangkat & Lingkungan'
 
 $osCaption = 'Windows'
 $osBuild   = [Environment]::OSVersion.Version.Build
@@ -499,7 +540,7 @@ Write-Host ''
 # ------------------------------------------------------------------------------
 # STEP 2: CEK NODE.JS & AUTO-INSTALL LTS
 # ------------------------------------------------------------------------------
-Write-StepHeader -StepTag '2/5' -Title 'Pemeriksaan Runtime Node.js'
+Write-StepHeader -StepTag '2/6' -Title 'Pemeriksaan Runtime Node.js'
 
 Refresh-SessionPath
 $nodeCmd      = Get-Command node -ErrorAction SilentlyContinue
@@ -563,9 +604,92 @@ if (-not $needsNode) {
 Write-Host ''
 
 # ------------------------------------------------------------------------------
-# STEP 3: CEK PEMBARUAN GITHUB
+# STEP 3: CEK 3RD-PARTY PENDUKUNG (FFmpeg, FFprobe, Browser, Git)
 # ------------------------------------------------------------------------------
-Write-StepHeader -StepTag '3/5' -Title 'Pemeriksaan Pembaruan GitHub'
+Write-StepHeader -StepTag '3/6' -Title 'Pemeriksaan 3rd-Party Pendukung (FFmpeg, Browser, Git)'
+
+# 3A. FFmpeg & FFprobe (Watermark Studio & Media Probe)
+$ffmpegCmd  = Get-Command ffmpeg -ErrorAction SilentlyContinue
+$ffprobeCmd = Get-Command ffprobe -ErrorAction SilentlyContinue
+if ($ffmpegCmd -and $ffprobeCmd) {
+  $ffFirstLine = ''
+  try {
+    $rawFf = (& ffmpeg -version 2>$null | Select-Object -First 1)
+    if ($rawFf -match 'ffmpeg version\s+([^\s]+)') {
+      $ffFirstLine = $Matches[1]
+    }
+  } catch {}
+  Write-StatusOk "FFmpeg & FFprobe terdeteksi$(if ($ffFirstLine) { " ($ffFirstLine)" }) - Watermark Studio siap."
+} else {
+  Write-StatusWarn 'FFmpeg / FFprobe belum terpasang (diperlukan untuk render Watermark Studio).'
+  $ffChoice = Show-RadioMenu `
+    -Title 'FFmpeg belum ditemukan di perangkat ini' `
+    -Subtitle 'Tanpa FFmpeg, fitur Planner & Auto-Post tetap jalan, tetapi Watermark Studio tidak bisa merender video.' `
+    -Options @(
+      @{
+        Label       = 'Install FFmpeg & FFprobe otomatis sekarang (winget)'
+        Description = 'Pasang Gyan.FFmpeg resmi dan aktifkan langsung di sesi ini'
+      },
+      @{
+        Label       = 'Nanti saja (tampilkan panduan manual & lanjutkan)'
+        Description = 'Lihat cara install manual FFmpeg lalu tetap buka CPGP Studio'
+      }
+    )
+
+  if ($ffChoice -eq 0) {
+    if (Install-FfmpegWindows) {
+      Write-StatusOk 'FFmpeg & FFprobe berhasil terpasang dan aktif!'
+    } else {
+      Write-StatusWarn 'Instalasi otomatis FFmpeg belum berhasil. Berikut panduan manualnya:'
+      Show-ManualFfmpegTutorial
+    }
+  } else {
+    Show-ManualFfmpegTutorial
+  }
+}
+
+# 3B. Browser Lokal (Chrome / Edge untuk Auto-Post tanpa API Key & Add-on MotionProvit)
+if ($browsers.Count -gt 0) {
+  Write-StatusOk "Browser lokal terdeteksi ($($browsers -join ', ')) - Auto-Post & MotionProvit siap."
+} else {
+  Write-StatusWarn 'Google Chrome / Microsoft Edge tidak terdeteksi (dibutuhkan untuk Auto-Post Browser & MotionProvit).'
+  $brChoice = Show-RadioMenu `
+    -Title 'Browser Chrome / Edge belum ditemukan' `
+    -Subtitle 'Pilih untuk memasang Google Chrome otomatis atau lanjutkan tanpa Auto-Post Browser.' `
+    -Options @(
+      @{
+        Label       = 'Install Google Chrome otomatis sekarang (winget)'
+        Description = 'Disarankan agar Auto-Post 4 platform tanpa API Key langsung siap pakai'
+      },
+      @{
+        Label       = 'Nanti saja, lanjutkan ke CPGP Studio'
+        Description = 'Anda tetap bisa memakai Content Planner & Watermark Studio'
+      }
+    )
+  if ($brChoice -eq 0) {
+    if (Install-ChromeWindows) {
+      Write-StatusOk 'Google Chrome berhasil terpasang!'
+    } else {
+      Write-StatusWarn 'Install Chrome manual di https://www.google.com/chrome/ lalu jalankan ulang.'
+    }
+  }
+}
+
+# 3C. Git (Opsional untuk update source repo)
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCmd) {
+  $gitVer = ''
+  try { $gitVer = (& git --version 2>$null).Trim() } catch {}
+  Write-StatusOk "$gitVer terdeteksi (mendukung auto-update via Git)."
+} else {
+  Write-StatusInfo 'Git tidak terpasang (opsional - update tetap bisa otomatis lewat rilis ZIP GitHub).'
+}
+Write-Host ''
+
+# ------------------------------------------------------------------------------
+# STEP 4: CEK PEMBARUAN GITHUB
+# ------------------------------------------------------------------------------
+Write-StepHeader -StepTag '4/6' -Title 'Pemeriksaan Pembaruan GitHub'
 Write-StatusInfo "Memeriksa rilis terbaru di $REPO_URL ..."
 
 $latestVersion = $null
@@ -649,9 +773,9 @@ if (-not $checkOk) {
 Write-Host ''
 
 # ------------------------------------------------------------------------------
-# STEP 4: VERIFIKASI FILE INTI & DEPENDENCIES (node_modules)
+# STEP 5: VERIFIKASI FILE INTI & DEPENDENCIES (node_modules)
 # ------------------------------------------------------------------------------
-Write-StepHeader -StepTag '4/5' -Title 'Pemeriksaan Struktur & Dependencies'
+Write-StepHeader -StepTag '5/6' -Title 'Pemeriksaan Struktur & Dependencies'
 
 if (-not (Test-Path -LiteralPath (Join-Path $AppRoot 'shared\captionParser.ts'))) {
   Write-StatusErr 'Folder "shared" tidak ditemukan!'
@@ -688,9 +812,9 @@ if (-not $hasNodeModules -or $didUpdate) {
 Write-Host ''
 
 # ------------------------------------------------------------------------------
-# STEP 5: JALANKAN CPGP STUDIO
+# STEP 6: JALANKAN CPGP STUDIO
 # ------------------------------------------------------------------------------
-Write-StepHeader -StepTag '5/5' -Title "Menjalankan CPGP Studio v$localVersion"
+Write-StepHeader -StepTag '6/6' -Title "Menjalankan CPGP Studio v$localVersion"
 
 if ($CheckOnly) {
   Write-StatusOk 'Pemeriksaan awal selesai (--CheckOnly aktif, server tidak dijalankan).'

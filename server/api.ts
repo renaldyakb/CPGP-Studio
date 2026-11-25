@@ -15,6 +15,7 @@ import type {
 import {
   DEFAULT_WATERMARK_CONFIG,
   type WatermarkEncoderMode,
+  type WatermarkRenderSpeedMode,
   type WatermarkStyleConfig,
 } from '../src/types/watermark.ts';
 import type {
@@ -1447,10 +1448,22 @@ export function createApiRouter(): Express {
       const requestedEncoder = body.encoder as WatermarkEncoderMode | undefined;
       const encoder: WatermarkEncoderMode =
         requestedEncoder === 'auto' ||
-        requestedEncoder === 'x264' ||
-        requestedEncoder === 'nvenc'
+        requestedEncoder === 'nvenc' ||
+        requestedEncoder === 'qsv' ||
+        requestedEncoder === 'amf' ||
+        requestedEncoder === 'x264'
           ? requestedEncoder
           : store.defaultEncoder;
+
+      const requestedSpeed = body.speedMode as
+        | WatermarkRenderSpeedMode
+        | undefined;
+      const speedMode: WatermarkRenderSpeedMode =
+        requestedSpeed === 'fast' ||
+        requestedSpeed === 'balanced' ||
+        requestedSpeed === 'max_compression'
+          ? requestedSpeed
+          : 'fast';
 
       if (body.saveDefaultEncoder === true && requestedEncoder) {
         setDefaultEncoder(encoder);
@@ -1514,6 +1527,7 @@ export function createApiRouter(): Express {
         config: finalConfig,
         presetName,
         encoder,
+        speedMode,
         outputMode,
       });
 

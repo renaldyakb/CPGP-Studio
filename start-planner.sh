@@ -255,6 +255,30 @@ install_node_lts() {
   return 1
 }
 
+show_manual_ffmpeg_tutorial() {
+  echo -e "  ${LINE_CLR}╭──────────────────────────────────────────────────────────────────────╮${RST}"
+  echo -e "  ${LINE_CLR}│${RST}  ${BURG_ROSE}${BOLD}PANDUAN INSTALL MANUAL FFMPEG (UNTUK WATERMARK STUDIO)${RST}              ${LINE_CLR}│${RST}"
+  echo -e "  ${LINE_CLR}├──────────────────────────────────────────────────────────────────────┤${RST}"
+  echo -e "  ${LINE_CLR}│${RST}  ${IVORY}macOS  :${RST} ${SKY}brew install ffmpeg${RST}                                        ${LINE_CLR}│${RST}"
+  echo -e "  ${LINE_CLR}│${RST}  ${IVORY}Ubuntu :${RST} ${SKY}sudo apt update && sudo apt install -y ffmpeg${RST}              ${LINE_CLR}│${RST}"
+  echo -e "  ${LINE_CLR}│${RST}  ${IVORY}Windows:${RST} ${SKY}winget install Gyan.FFmpeg${RST}                                 ${LINE_CLR}│${RST}"
+  echo -e "  ${LINE_CLR}╰──────────────────────────────────────────────────────────────────────╯${RST}"
+  echo ""
+}
+
+install_ffmpeg_unix() {
+  local os_type
+  os_type="$(uname -s)"
+  if [ "$os_type" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+    brew install ffmpeg && command -v ffmpeg >/dev/null 2>&1 && return 0
+  elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update && sudo apt-get install -y ffmpeg && command -v ffmpeg >/dev/null 2>&1 && return 0
+  elif command -v winget.exe >/dev/null 2>&1; then
+    winget.exe install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements && return 0
+  fi
+  return 1
+}
+
 # ==============================================================================
 # MAIN PIPELINE
 # ==============================================================================
@@ -264,7 +288,7 @@ show_banner "$LOCAL_VERSION"
 # ------------------------------------------------------------------------------
 # STEP 1: CEK DEVICE
 # ------------------------------------------------------------------------------
-step_header "1/5" "Pemeriksaan Perangkat & Lingkungan"
+step_header "1/6" "Pemeriksaan Perangkat & Lingkungan"
 
 OS_NAME="$(uname -s) $(uname -r)"
 ARCH_NAME="$(uname -m)"
@@ -283,7 +307,7 @@ echo ""
 # ------------------------------------------------------------------------------
 # STEP 2: CEK NODE.JS & AUTO-INSTALL LTS
 # ------------------------------------------------------------------------------
-step_header "2/5" "Pemeriksaan Runtime Node.js"
+step_header "2/6" "Pemeriksaan Runtime Node.js"
 
 NODE_VER=""
 NODE_MAJOR=0
@@ -332,9 +356,51 @@ fi
 echo ""
 
 # ------------------------------------------------------------------------------
-# STEP 3: CEK PEMBARUAN GITHUB
+# STEP 3: CEK 3RD-PARTY PENDUKUNG (FFmpeg, FFprobe, Browser, Git)
 # ------------------------------------------------------------------------------
-step_header "3/5" "Pemeriksaan Pembaruan GitHub"
+step_header "3/6" "Pemeriksaan 3rd-Party Pendukung (FFmpeg, Browser, Git)"
+
+if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+  FF_VER="$(ffmpeg -version 2>/dev/null | head -n 1 | awk '{print $3}' || true)"
+  status_ok "FFmpeg & FFprobe terdeteksi (${FF_VER:-OK}) - Watermark Studio siap."
+else
+  status_warn "FFmpeg / FFprobe belum terpasang (diperlukan untuk render Watermark Studio)."
+  radio_menu \
+    "FFmpeg belum ditemukan di perangkat ini" \
+    "Tanpa FFmpeg, Planner & Auto-Post tetap jalan, tetapi Watermark Studio tidak dapat merender video." \
+    "Install FFmpeg & FFprobe otomatis sekarang" "Pasang otomatis via Homebrew / apt / winget" \
+    "Nanti saja (tampilkan panduan manual & lanjutkan)" "Lihat cara install manual FFmpeg lalu tetap buka CPGP Studio"
+  if [ "$RADIO_RESULT" -eq 0 ]; then
+    if install_ffmpeg_unix; then
+      status_ok "FFmpeg & FFprobe berhasil terpasang!"
+    else
+      status_warn "Instalasi otomatis FFmpeg tidak tersedia. Berikut panduan manualnya:"
+      show_manual_ffmpeg_tutorial
+    fi
+  else
+    show_manual_ffmpeg_tutorial
+  fi
+fi
+
+if command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1 || [ -d "/Applications/Google Chrome.app" ] || [ -f "/c/Program Files/Google/Chrome/Application/chrome.exe" ]; then
+  status_ok "Google Chrome terdeteksi - Auto-Post Browser & MotionProvit siap."
+elif command -v microsoft-edge >/dev/null 2>&1 || [ -d "/Applications/Microsoft Edge.app" ] || [ -f "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" ]; then
+  status_ok "Microsoft Edge terdeteksi - Auto-Post Browser & MotionProvit siap."
+else
+  status_warn "Chrome/Edge tidak terdeteksi (opsional, dibutuhkan untuk Auto-Post tanpa API Key)."
+fi
+
+if command -v git >/dev/null 2>&1; then
+  status_ok "$(git --version) terdeteksi (mendukung auto-update via Git)."
+else
+  status_info "Git tidak terpasang (opsional - update tetap bisa lewat rilis ZIP GitHub)."
+fi
+echo ""
+
+# ------------------------------------------------------------------------------
+# STEP 4: CEK PEMBARUAN GITHUB
+# ------------------------------------------------------------------------------
+step_header "4/6" "Pemeriksaan Pembaruan GitHub"
 status_info "Memeriksa rilis terbaru di ${REPO_URL} ..."
 
 LATEST_TAG=""
@@ -390,9 +456,9 @@ fi
 echo ""
 
 # ------------------------------------------------------------------------------
-# STEP 4: VERIFIKASI FILE INTI & DEPENDENCIES
+# STEP 5: VERIFIKASI FILE INTI & DEPENDENCIES
 # ------------------------------------------------------------------------------
-step_header "4/5" "Pemeriksaan Struktur & Dependencies"
+step_header "5/6" "Pemeriksaan Struktur & Dependencies"
 
 if [ ! -f "shared/captionParser.ts" ]; then
   status_err "Folder 'shared' tidak ditemukan! Pastikan file ZIP rilis diekstrak secara penuh."
@@ -419,9 +485,9 @@ fi
 echo ""
 
 # ------------------------------------------------------------------------------
-# STEP 5: JALANKAN CPGP STUDIO
+# STEP 6: JALANKAN CPGP STUDIO
 # ------------------------------------------------------------------------------
-step_header "5/5" "Menjalankan CPGP Studio v${LOCAL_VERSION}"
+step_header "6/6" "Menjalankan CPGP Studio v${LOCAL_VERSION}"
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
   status_ok "Pemeriksaan awal selesai (--check-only aktif, server tidak dijalankan)."
