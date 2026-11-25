@@ -4,6 +4,20 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.5.0] - 2026-11-25 (AI-Generated Content Disclosure Alert Dialog, Workspace Default & Auto-Toggle on Platforms)
+
+### Fitur Baru (Added)
+- **Dialog Konfirmasi Konten AI-Generated Sebelum Upload (`AiContentAlertDialog.tsx`, `src/components/ui/alert-dialog.tsx`)**:
+  - Secara default (`Tanya tiap upload`), setiap kali pengguna menekan tombol Auto-Post atau Jadwalkan (baik semua platform, per platform, gabungan `FB + IG`, maupun dari tabel `Antrean Konten`), CPGP menampilkan **`AlertDialog`** konfirmasi **"Tandai sebagai Konten AI-Generated?"** dengan pilihan **`Bukan AI`**, **`Tandai AI-Generated`**, serta sakelar opsional **`Jadikan default workspace`**.
+- **Pengaturan Default & Override Cepat (`DashboardPage.tsx`, `NextContentCard.tsx`, `StudioPage.tsx`, `server/autopost/config.ts`)**:
+  - Menambahkan pengaturan workspace `aiContentDisclosure` (`ask` = Tanya tiap upload, `always_ai` = Selalu tandai AI, `always_non_ai` = Selalu bukan AI) yang bisa diatur baik langsung dari kartu **Konten Berikutnya** (`AI: Tanya | Ya | Tidak`) maupun di **`Koneksi -> Browser`**.
+- **Otomatisasi Label AI di Studio Sosial Media (`server/autopost/browserPublishers.ts`, live-tested)**:
+  - **YouTube Studio (`configureYouTubeAiDisclosure`)**: Otomatis membuka **`Show more`** pada tahap `Details` dan memilih radio **`VIDEO_HAS_ALTERED_CONTENT_YES`** (*Altered content: Yes*) saat ditandai AI, atau **`VIDEO_HAS_ALTERED_CONTENT_NO`** saat bukan AI — terkonfirmasi aktif (`aria-checked="true"`).
+  - **TikTok Studio (`configureTikTokAiLabel`)**: Otomatis membuka **`Show more`** dan mengaktifkan sakelar **`AI-generated content`** (`.Switch__content` -> `aria-checked="true"`, `data-state="checked"`) termasuk menangani modal konfirmasi jika muncul.
+  - **Meta Business Suite (`configureMetaAiLabel`)**: Pengecekan non-fatal untuk sakelar label AI di composer Reels (jika tersedia di Meta Business Suite web akan otomatis diaktifkan; jika belum tersedia di web composer, mencatat info transparan tanpa menghambat upload).
+
+---
+
 ## [v2.4.1] - 2026-11-25 (Live-Tested Meta Business Suite, YouTube & TikTok Auto-Post & Scheduling Fixes)
 
 ### Perbaikan (Fixed — Diverifikasi Langsung di Chrome Asli)

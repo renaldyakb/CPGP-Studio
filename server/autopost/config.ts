@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
+  AiContentDisclosureMode,
   AutoPostBrowserConfig,
   AutoPostCapabilities,
   AutoPostMetaApiConfig,
@@ -108,6 +109,7 @@ export interface InternalAutoPostMetaApiConfig {
 export interface InternalAutoPostConfig {
   schemaVersion: string;
   defaultMode: AutoPostMode;
+  aiContentDisclosure: AiContentDisclosureMode;
   browser: AutoPostBrowserConfig;
   youtubeApi: InternalAutoPostYouTubeApiConfig;
   metaApi: InternalAutoPostMetaApiConfig;
@@ -115,6 +117,7 @@ export interface InternalAutoPostConfig {
 
 export interface UpdateAutoPostSettingsPatch {
   defaultMode?: AutoPostMode;
+  aiContentDisclosure?: AiContentDisclosureMode;
   browser?: Partial<AutoPostBrowserConfig>;
   youtubeApi?: {
     enabled?: boolean;
@@ -241,6 +244,7 @@ function createDefaultInternalConfig(
   return {
     schemaVersion: SCHEMA_VERSION,
     defaultMode: 'review',
+    aiContentDisclosure: 'ask',
     browser: {
       channel: defaultChannel,
       profileDir: getExpectedBrowserProfileDir(workspaceId),
@@ -292,6 +296,13 @@ function normalizeInternalConfig(
       ? raw.defaultMode
       : defaults.defaultMode;
 
+  const aiContentDisclosure: AiContentDisclosureMode =
+    raw.aiContentDisclosure === 'ask' ||
+    raw.aiContentDisclosure === 'always_ai' ||
+    raw.aiContentDisclosure === 'always_non_ai'
+      ? raw.aiContentDisclosure
+      : defaults.aiContentDisclosure;
+
   const rawBrowser: Partial<AutoPostBrowserConfig> =
     raw.browser && typeof raw.browser === 'object' ? raw.browser : {};
   const channel: 'chrome' | 'msedge' =
@@ -317,6 +328,7 @@ function normalizeInternalConfig(
   return {
     schemaVersion: SCHEMA_VERSION,
     defaultMode,
+    aiContentDisclosure,
     browser: {
       channel,
       profileDir,
@@ -457,6 +469,7 @@ export function toPublicAutoPostSettings(
   return {
     schemaVersion: config.schemaVersion,
     defaultMode: config.defaultMode,
+    aiContentDisclosure: config.aiContentDisclosure,
     browser: {
       channel: config.browser.channel,
       profileDir: config.browser.profileDir,
@@ -508,6 +521,13 @@ export function updateAutoPostSettings(
     patch.defaultMode === 'publish' || patch.defaultMode === 'review'
       ? patch.defaultMode
       : current.defaultMode;
+
+  const nextAiContentDisclosure: AiContentDisclosureMode =
+    patch.aiContentDisclosure === 'ask' ||
+    patch.aiContentDisclosure === 'always_ai' ||
+    patch.aiContentDisclosure === 'always_non_ai'
+      ? patch.aiContentDisclosure
+      : current.aiContentDisclosure;
 
   const expectedProfileDir = getExpectedBrowserProfileDir();
   const nextBrowser: AutoPostBrowserConfig = {
@@ -684,6 +704,7 @@ export function updateAutoPostSettings(
   const saved = saveInternalConfig({
     schemaVersion: SCHEMA_VERSION,
     defaultMode: nextDefaultMode,
+    aiContentDisclosure: nextAiContentDisclosure,
     browser: nextBrowser,
     youtubeApi: nextYouTubeApi,
     metaApi: nextMetaApi,

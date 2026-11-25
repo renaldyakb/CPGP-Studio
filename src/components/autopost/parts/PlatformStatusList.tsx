@@ -39,6 +39,12 @@ export interface PlatformStatusListProps {
   data: UseAutoPostDataResult;
   mode: AutoPostMode;
   scheduledAt?: string | null;
+  onTriggerRequest: (
+    item: ContentPlannerItem,
+    platforms: PlatformKey[],
+    mode: AutoPostMode,
+    scheduledAt: string | null
+  ) => void;
 }
 
 function formatShortSchedulePill(scheduledAt?: string | null): string | null {
@@ -101,6 +107,7 @@ export function PlatformStatusList({
   data,
   mode,
   scheduledAt = null,
+  onTriggerRequest,
 }: PlatformStatusListProps) {
   const publishedCount = countPublishedPlatforms(item);
   const schedulePill = formatShortSchedulePill(scheduledAt);
@@ -233,12 +240,7 @@ export function PlatformStatusList({
                         }
                         disabled={!hasWmFinal || isBusy}
                         onClick={() =>
-                          void data.triggerPost(
-                            item.id,
-                            [key],
-                            'review',
-                            scheduledAt
-                          )
+                          onTriggerRequest(item, [key], 'review', scheduledAt)
                         }
                       />
                       <IconActionButton
@@ -251,12 +253,7 @@ export function PlatformStatusList({
                         variant="outline"
                         disabled={!hasWmFinal || isBusy}
                         onClick={() =>
-                          void data.triggerPost(
-                            item.id,
-                            [key],
-                            'publish',
-                            scheduledAt
-                          )
+                          onTriggerRequest(item, [key], 'publish', scheduledAt)
                         }
                       />
                     </div>
@@ -286,8 +283,8 @@ export function PlatformStatusList({
                       data.busyKey === `trigger:${item.id}`
                     }
                     onClick={() =>
-                      void data.triggerPost(
-                        item.id,
+                      onTriggerRequest(
+                        item,
                         ['fb_reels', 'ig_reels'],
                         mode,
                         scheduledAt

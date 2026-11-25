@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  AiContentDisclosureMode,
   AutoPostBrowserSessionStatus,
   AutoPostCapabilities,
   AutoPostJob,
@@ -62,6 +63,7 @@ function persistSessionChecks(
 
 export interface AutoPostSettingsPatch {
   defaultMode?: AutoPostMode;
+  aiContentDisclosure?: AiContentDisclosureMode;
   browser?: {
     channel?: 'chrome' | 'msedge';
     keepTabOpenOnReview?: boolean;
@@ -109,6 +111,7 @@ const EMPTY_CAPABILITIES: AutoPostCapabilities = {
 const EMPTY_SETTINGS: AutoPostSettings = {
   schemaVersion: '1.0.0',
   defaultMode: 'review',
+  aiContentDisclosure: 'ask',
   browser: {
     channel: 'chrome',
     profileDir: 'data/browser-profile',
@@ -201,7 +204,8 @@ export interface UseAutoPostDataResult {
     itemId: string,
     platforms: PlatformKey[],
     mode: AutoPostMode,
-    scheduledAt?: string | null
+    scheduledAt?: string | null,
+    aiGenerated?: boolean
   ) => Promise<boolean>;
   cancelJob: (jobId: string) => Promise<void>;
   confirmJob: (jobId: string, publishedUrl?: string) => Promise<void>;
@@ -376,7 +380,8 @@ export function useAutoPostData(
       itemId: string,
       platforms: PlatformKey[],
       mode: AutoPostMode,
-      scheduledAt?: string | null
+      scheduledAt?: string | null,
+      aiGenerated?: boolean
     ): Promise<boolean> => {
       if (platforms.length === 0) return false;
       setBusyKey(`trigger:${itemId}`);
@@ -386,9 +391,13 @@ export function useAutoPostData(
           platforms: PlatformKey[];
           mode: AutoPostMode;
           scheduledAt?: string;
+          aiGenerated?: boolean;
         } = { itemId, platforms, mode };
         if (scheduledAt && scheduledAt.trim()) {
           payload.scheduledAt = scheduledAt.trim();
+        }
+        if (typeof aiGenerated === 'boolean') {
+          payload.aiGenerated = aiGenerated;
         }
         const res = await requestJson<{ jobs?: AutoPostJob[] }>(
           '/api/autopost/trigger',
@@ -404,10 +413,12 @@ export function useAutoPostData(
             return Array.from(byId.values());
           });
         }
+        const aiSuffix =
+          payload.aiGenerated === true ? ' (Label AI aktif)' : '';
         onToast?.(
           payload.scheduledAt
-            ? `${platforms.length} jadwal Auto-Post (${payload.scheduledAt.replace('T', ' ')}) dimasukkan ke antrean.`
-            : `${platforms.length} proses Auto-Post dimasukkan ke antrean.`,
+            ? `${platforms.length} jadwal Auto-Post (${payload.scheduledAt.replace('T', ' ')})${aiSuffix} dimasukkan ke antrean.`
+            : `${platforms.length} proses Auto-Post${aiSuffix} dimasukkan ke antrean.`,
           'success'
         );
         return true;

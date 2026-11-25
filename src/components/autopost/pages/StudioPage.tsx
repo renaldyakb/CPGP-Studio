@@ -15,6 +15,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import type { AiContentDisclosureMode } from '@/types/autopost';
 import type { PlatformKey } from '@/types/planner';
 import type { AutoPostPageProps } from '../pageProps';
 import { IconActionButton } from '../parts/IconActionButton';
@@ -202,6 +203,37 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                 });
               }}
             />
+          </div>
+
+          <div className="flex flex-col justify-between gap-2 rounded-md border border-border bg-muted px-3.5 py-2.5 sm:flex-row sm:items-center">
+            <div className="space-y-0.5">
+              <label
+                htmlFor="autopost-ai-disclosure"
+                className="block text-xs font-medium text-foreground"
+              >
+                Label AI-Generated
+              </label>
+              <p className="text-[11px] font-light text-muted-foreground/75">
+                Atur default atau tampilkan dialog konfirmasi tiap kali hendak
+                upload otomatis.
+              </p>
+            </div>
+            <NativeSelect
+              id="autopost-ai-disclosure"
+              value={settings.aiContentDisclosure ?? 'ask'}
+              disabled={isSavingSettings}
+              onChange={(event) => {
+                const raw = event.target.value;
+                const next: AiContentDisclosureMode =
+                  raw === 'always_ai' || raw === 'always_non_ai' ? raw : 'ask';
+                void ctx.data.saveSettings({ aiContentDisclosure: next });
+              }}
+              className="w-full sm:w-48"
+            >
+              <option value="ask">Tanya tiap upload</option>
+              <option value="always_ai">Selalu tandai AI</option>
+              <option value="always_non_ai">Selalu bukan AI</option>
+            </NativeSelect>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 pt-1">

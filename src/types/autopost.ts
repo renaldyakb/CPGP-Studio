@@ -2,6 +2,8 @@ import type { PlatformKey } from './planner';
 
 export type AutoPostMode = 'review' | 'publish';
 
+export type AiContentDisclosureMode = 'ask' | 'always_ai' | 'always_non_ai';
+
 export type AutoPostEngine = 'browser' | 'youtube_api' | 'meta_api';
 
 export type AutoPostJobStatus =
@@ -94,6 +96,7 @@ export interface MetaConnectionTestResult {
 export interface AutoPostSettings {
   schemaVersion: string;
   defaultMode: AutoPostMode;
+  aiContentDisclosure: AiContentDisclosureMode;
   browser: AutoPostBrowserConfig;
   youtubeApi: AutoPostYouTubeApiConfig;
   metaApi: AutoPostMetaApiConfig;
@@ -115,6 +118,7 @@ export interface AutoPostJob {
   engine: AutoPostEngine;
   mode: AutoPostMode;
   scheduledAt?: string | null;
+  aiGenerated?: boolean | null;
   status: AutoPostJobStatus;
   step: string;
   progressPercent: number;

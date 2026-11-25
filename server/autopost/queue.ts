@@ -51,6 +51,7 @@ export interface EnqueueAutoPostBatchInput {
   mode?: AutoPostMode;
   youtubePrivacy?: 'public' | 'unlisted' | 'private';
   scheduledAt?: string | null;
+  aiGenerated?: boolean;
 }
 
 export interface AutoPostQueueOptions {
@@ -387,6 +388,10 @@ export class AutoPostQueueManager {
 
     const config = getInternalAutoPostConfig(activeWorkspace.id);
     const resolvedMode: AutoPostMode = input.mode ?? config.defaultMode;
+    const resolvedAiGenerated: boolean =
+      typeof input.aiGenerated === 'boolean'
+        ? input.aiGenerated
+        : config.aiContentDisclosure === 'always_ai';
     const resolvedScheduledAt: string | null =
       typeof input.scheduledAt === 'string' && input.scheduledAt.trim()
         ? input.scheduledAt.trim()
@@ -394,6 +399,7 @@ export class AutoPostQueueManager {
     const scheduleTag = resolvedScheduledAt
       ? `, jadwal: ${formatScheduledTimeForPlanner(resolvedScheduledAt)}`
       : '';
+    const aiTag = resolvedAiGenerated ? ', label AI: Ya' : '';
     const batchId = `apb-${randomUUID().slice(0, 10)}`;
     const createdJobs: AutoPostJob[] = [];
 
@@ -444,6 +450,7 @@ export class AutoPostQueueManager {
           engine: 'browser',
           mode: resolvedMode,
           scheduledAt: resolvedScheduledAt,
+          aiGenerated: resolvedAiGenerated,
           status: 'queued',
           step: resolvedScheduledAt
             ? 'Menunggu antrean jadwal Meta Business Suite (FB & IG)'
@@ -454,7 +461,7 @@ export class AutoPostQueueManager {
           logs: [
             {
               timestamp: nowIso,
-              message: `Masuk antrean gabungan Meta Business Suite (Facebook & Instagram sekaligus, mode: ${resolvedMode}${scheduleTag}).`,
+              message: `Masuk antrean gabungan Meta Business Suite (Facebook & Instagram sekaligus, mode: ${resolvedMode}${scheduleTag}${aiTag}).`,
               level: 'info',
             },
           ],
@@ -538,6 +545,7 @@ export class AutoPostQueueManager {
                   item: input.item,
                   mode: resolvedMode,
                   scheduledAt: resolvedScheduledAt,
+                  aiGenerated: resolvedAiGenerated,
                   signal: combinedController.signal,
                   onProgress: handleCombinedProgress,
                   workspace: capturedContext.workspace,
@@ -669,6 +677,7 @@ export class AutoPostQueueManager {
         engine,
         mode: resolvedMode,
         scheduledAt: resolvedScheduledAt,
+        aiGenerated: resolvedAiGenerated,
         status: 'queued',
         step: resolvedScheduledAt
           ? 'Menunggu antrean jadwal'
@@ -679,7 +688,7 @@ export class AutoPostQueueManager {
         logs: [
           {
             timestamp: nowIso,
-            message: `Masuk antrean Auto-Post (${platform}, engine: ${engine}, mode: ${resolvedMode}${scheduleTag}).`,
+            message: `Masuk antrean Auto-Post (${platform}, engine: ${engine}, mode: ${resolvedMode}${scheduleTag}${aiTag}).`,
             level: 'info',
           },
         ],
@@ -783,6 +792,7 @@ export class AutoPostQueueManager {
                   item: input.item,
                   mode: resolvedMode,
                   scheduledAt: resolvedScheduledAt,
+                  aiGenerated: resolvedAiGenerated,
                   signal: controller.signal,
                   onProgress: handleProgress,
                   workspace: capturedContext.workspace,

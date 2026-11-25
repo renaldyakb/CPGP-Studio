@@ -1,4 +1,5 @@
 import {
+  Bot,
   CalendarClock,
   Droplets,
   Ellipsis,
@@ -30,7 +31,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import type { AutoPostMode } from '@/types/autopost';
+import type { AiContentDisclosureMode, AutoPostMode } from '@/types/autopost';
 import type { ContentPlannerItem, PlatformKey } from '@/types/planner';
 import type { UseAutoPostDataResult } from '../useAutoPostData';
 import { pickNextContent } from '../useAutoPostData';
@@ -44,6 +45,8 @@ export interface NextContentCardProps {
   selectedId: string;
   mode: AutoPostMode;
   onModeChange: (mode: AutoPostMode) => void;
+  aiDisclosure: AiContentDisclosureMode;
+  onAiDisclosureChange: (next: AiContentDisclosureMode) => void;
   scheduleEnabled: boolean;
   scheduleDate: string;
   scheduleTime: string;
@@ -51,6 +54,12 @@ export interface NextContentCardProps {
   onScheduleDateChange: (dateIso: string) => void;
   onScheduleTimeChange: (timeHhMm: string) => void;
   onResetScheduleToSlot: () => void;
+  onTriggerRequest: (
+    item: ContentPlannerItem,
+    platforms: PlatformKey[],
+    mode: AutoPostMode,
+    scheduledAt: string | null
+  ) => void;
   onSelectChange: (itemId: string) => void;
   onEditCaption: (item: ContentPlannerItem) => void;
   onOpenWatermark: (item: ContentPlannerItem) => void;
@@ -90,6 +99,8 @@ export function NextContentCard({
   selectedId,
   mode,
   onModeChange,
+  aiDisclosure,
+  onAiDisclosureChange,
   scheduleEnabled,
   scheduleDate,
   scheduleTime,
@@ -97,6 +108,7 @@ export function NextContentCard({
   onScheduleDateChange,
   onScheduleTimeChange,
   onResetScheduleToSlot,
+  onTriggerRequest,
   onSelectChange,
   onEditCaption,
   onOpenWatermark,
@@ -312,6 +324,44 @@ export function NextContentCard({
               Langsung
             </Button>
           </div>
+
+          <div
+            role="group"
+            aria-label="Label Konten AI"
+            className="inline-flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-0.5"
+          >
+            <span className="inline-flex items-center gap-1 px-1.5 text-[11px] font-light text-muted-foreground">
+              <Bot className="size-3" aria-hidden="true" />
+              AI
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant={aiDisclosure === 'ask' ? 'default' : 'ghost'}
+              aria-pressed={aiDisclosure === 'ask'}
+              onClick={() => onAiDisclosureChange('ask')}
+            >
+              Tanya
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant={aiDisclosure === 'always_ai' ? 'default' : 'ghost'}
+              aria-pressed={aiDisclosure === 'always_ai'}
+              onClick={() => onAiDisclosureChange('always_ai')}
+            >
+              Ya
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant={aiDisclosure === 'always_non_ai' ? 'default' : 'ghost'}
+              aria-pressed={aiDisclosure === 'always_non_ai'}
+              onClick={() => onAiDisclosureChange('always_non_ai')}
+            >
+              Tidak
+            </Button>
+          </div>
         </div>
 
         {scheduleEnabled ? (
@@ -380,8 +430,8 @@ export function NextContentCard({
           className="w-full"
           disabled={!canSend}
           onClick={() =>
-            void data.triggerPost(
-              selected.id,
+            onTriggerRequest(
+              selected,
               pendingKeys,
               mode,
               scheduledAtPayload

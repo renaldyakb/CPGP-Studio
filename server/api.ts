@@ -2130,12 +2130,16 @@ export function createApiRouter(): Express {
         scheduledAt = candidate;
       }
 
+      const aiGenerated: boolean | undefined =
+        typeof body.aiGenerated === 'boolean' ? body.aiGenerated : undefined;
+
       const jobs = autoPostQueue.enqueueBatch({
         item,
         platforms: validPlatforms,
         mode,
         youtubePrivacy,
         scheduledAt,
+        aiGenerated,
       });
 
       res.json({

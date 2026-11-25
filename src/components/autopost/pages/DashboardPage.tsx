@@ -24,7 +24,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import type { AutoPostMode } from '@/types/autopost';
+import type { AiContentDisclosureMode, AutoPostMode } from '@/types/autopost';
 import type {
   ContentPlannerItem,
   PlatformKey,
@@ -33,6 +33,10 @@ import type {
 import type { AutoPostPageProps } from '../pageProps';
 import { useDerivedStats, pickNextContent } from '../useAutoPostData';
 import { ActivityFeed } from '../parts/ActivityFeed';
+import {
+  AiContentAlertDialog,
+  type PendingAutoPostConfirmation,
+} from '../parts/AiContentAlertDialog';
 import { IconActionButton } from '../parts/IconActionButton';
 import { NextContentCard } from '../parts/NextContentCard';
 import {
@@ -104,16 +108,83 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
   const [mode, setMode] = useState<AutoPostMode>(
     () => ctx.data.settings.defaultMode
   );
+  const [aiDisclosure, setAiDisclosure] = useState<AiContentDisclosureMode>(
+    () => ctx.data.settings.aiContentDisclosure ?? 'ask'
+  );
+  const [pendingUpload, setPendingUpload] =
+    useState<PendingAutoPostConfirmation | null>(null);
 
   useEffect(() => {
     setMode(ctx.data.settings.defaultMode);
   }, [ctx.data.settings.defaultMode]);
+
+  useEffect(() => {
+    setAiDisclosure(ctx.data.settings.aiContentDisclosure ?? 'ask');
+  }, [ctx.data.settings.aiContentDisclosure]);
 
   const handleModeChange = (nextMode: AutoPostMode) => {
     setMode(nextMode);
     if (ctx.data.settings.defaultMode !== nextMode) {
       void ctx.data.saveSettings({ defaultMode: nextMode });
     }
+  };
+
+  const handleAiDisclosureChange = (next: AiContentDisclosureMode) => {
+    setAiDisclosure(next);
+    if (ctx.data.settings.aiContentDisclosure !== next) {
+      void ctx.data.saveSettings({ aiContentDisclosure: next });
+    }
+  };
+
+  const requestTriggerPost = (
+    targetItem: ContentPlannerItem,
+    platforms: PlatformKey[],
+    requestedMode: AutoPostMode,
+    scheduledAt: string | null = null
+  ) => {
+    if (platforms.length === 0) return;
+    if (aiDisclosure === 'ask') {
+      setPendingUpload({
+        itemId: targetItem.id,
+        folderCode: targetItem.folderCode,
+        platforms,
+        mode: requestedMode,
+        scheduledAt,
+      });
+      return;
+    }
+    void ctx.data.triggerPost(
+      targetItem.id,
+      platforms,
+      requestedMode,
+      scheduledAt,
+      aiDisclosure === 'always_ai'
+    );
+  };
+
+  const handleConfirmAiDialog = (
+    aiGenerated: boolean,
+    saveAsDefault: boolean
+  ) => {
+    if (!pendingUpload) return;
+    const req = pendingUpload;
+    setPendingUpload(null);
+
+    if (saveAsDefault) {
+      const nextDefault: AiContentDisclosureMode = aiGenerated
+        ? 'always_ai'
+        : 'always_non_ai';
+      setAiDisclosure(nextDefault);
+      void ctx.data.saveSettings({ aiContentDisclosure: nextDefault });
+    }
+
+    void ctx.data.triggerPost(
+      req.itemId,
+      req.platforms,
+      req.mode,
+      req.scheduledAt,
+      aiGenerated
+    );
   };
 
   useEffect(() => {
@@ -191,6 +262,8 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
             selectedId={activeItem?.id ?? ''}
             mode={mode}
             onModeChange={handleModeChange}
+            aiDisclosure={aiDisclosure}
+            onAiDisclosureChange={handleAiDisclosureChange}
             scheduleEnabled={scheduleEnabled}
             scheduleDate={scheduleDate}
             scheduleTime={scheduleTime}
@@ -198,6 +271,7 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
             onScheduleDateChange={setScheduleDate}
             onScheduleTimeChange={setScheduleTime}
             onResetScheduleToSlot={handleResetScheduleToSlot}
+            onTriggerRequest={requestTriggerPost}
             onSelectChange={setSelectedId}
             onEditCaption={ctx.onEditCaption}
             onOpenWatermark={ctx.onOpenWatermark}
@@ -210,6 +284,7 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
             data={ctx.data}
             mode={mode}
             scheduledAt={activeScheduledAt}
+            onTriggerRequest={requestTriggerPost}
           />
         </div>
       </div>
@@ -381,8 +456,8 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
                                       : null;
                                   })()
                               : null;
-                            void ctx.data.triggerPost(
-                              item.id,
+                            requestTriggerPost(
+                              item,
                               pendingKeys,
                               mode,
                               rowScheduledAt
@@ -403,6 +478,12 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
           </TableBody>
         </Table>
       </section>
+
+      <AiContentAlertDialog
+        pending={pendingUpload}
+        onCancel={() => setPendingUpload(null)}
+        onConfirm={handleConfirmAiDialog}
+      />
     </div>
   );
 }

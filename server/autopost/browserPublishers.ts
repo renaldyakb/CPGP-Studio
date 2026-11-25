@@ -30,6 +30,7 @@ export interface BrowserPublishParams {
   workspace?: WorkspaceMetadata;
   metaTargets?: MetaBusinessTargets;
   scheduledAt?: string | null;
+  aiGenerated?: boolean;
 }
 
 interface ParsedScheduleParts {
@@ -1104,7 +1105,8 @@ export async function publishInstagramViaBrowser(
   mode: AutoPostMode,
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void,
-  scheduledAt?: string | null
+  scheduledAt?: string | null,
+  aiGenerated = false
 ): Promise<BrowserPublishResult> {
   return publishMetaBusinessSuiteViaBrowser(
     page,
@@ -1115,7 +1117,8 @@ export async function publishInstagramViaBrowser(
     signal,
     onProgress,
     { facebook: false, instagram: true },
-    scheduledAt
+    scheduledAt,
+    aiGenerated
   );
 }
 
@@ -1755,6 +1758,76 @@ async function configureMetaBusinessSchedule(
   }
 }
 
+async function configureMetaAiLabel(
+  page: Page,
+  reelSurface: Locator,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  try {
+    const aiSwitch = reelSurface
+      .locator('[role="switch"], input[type="checkbox"]')
+      .filter({
+        has: page.locator('*'),
+      });
+    void aiSwitch;
+
+    // Look for any switch/checkbox with an AI disclosure aria-label on Meta Business Suite
+    const toggled = await page.evaluate(() => {
+      const root =
+        document.querySelector('[data-surface$="lib:bizweb_create_reel"]') ??
+        document.body;
+      const aiRegex =
+        /\b(?:ai info|ai label|generated with ai|made with ai|ai-generated|info ai|label ai|buatan ai)\b/i;
+      const candidates = Array.from(
+        root.querySelectorAll('[role="switch"], input[type="checkbox"]')
+      );
+      for (const el of candidates) {
+        const label = (el.getAttribute('aria-label') ?? '').trim();
+        const nearby = (
+          el.closest('div')?.parentElement?.textContent ?? ''
+        ).trim();
+        if (!aiRegex.test(label) && !aiRegex.test(nearby)) continue;
+        if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+          if (!el.checked) {
+            el.click();
+          }
+          return true;
+        }
+        if (el.getAttribute('aria-checked') !== 'true') {
+          (el as HTMLElement).click();
+        }
+        return true;
+      }
+      return false;
+    });
+
+    if (toggled) {
+      await humanDelay(300, 500, signal);
+      onProgress({
+        step: 'Label AI-Generated diaktifkan di Meta Business Suite',
+        progressPercent: 84,
+        log: 'Sakelar label AI di Meta Business Suite berhasil diaktifkan.',
+        level: 'success',
+      });
+      return true;
+    }
+
+    onProgress({
+      step: 'Info label AI Meta Business Suite',
+      progressPercent: 84,
+      log: 'Meta Business Suite web belum menyediakan sakelar label AI manual pada composer Reels (dideteksi otomatis oleh Meta).',
+      level: 'info',
+    });
+    return false;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    return false;
+  }
+}
+
 export async function publishFacebookViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -1763,7 +1836,8 @@ export async function publishFacebookViaBrowser(
   mode: AutoPostMode,
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void,
-  scheduledAt?: string | null
+  scheduledAt?: string | null,
+  aiGenerated = false
 ): Promise<BrowserPublishResult> {
   return publishMetaBusinessSuiteViaBrowser(
     page,
@@ -1774,7 +1848,8 @@ export async function publishFacebookViaBrowser(
     signal,
     onProgress,
     { facebook: true, instagram: false },
-    scheduledAt
+    scheduledAt,
+    aiGenerated
   );
 }
 
@@ -1787,7 +1862,8 @@ export async function publishMetaBusinessSuiteViaBrowser(
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void,
   targets: MetaBusinessTargets = { facebook: true, instagram: false },
-  scheduledAt?: string | null
+  scheduledAt?: string | null,
+  aiGenerated = false
 ): Promise<BrowserPublishResult> {
   const targetLabel = formatMetaTargetLabel(targets);
   const parsedSchedule = parseScheduledAt(scheduledAt);
@@ -2147,6 +2223,11 @@ export async function publishMetaBusinessSuiteViaBrowser(
     await humanDelay(400, 750, signal);
   }
 
+  // Future-proof non-fatal AI label toggle check on Meta Business Suite Step 3
+  if (aiGenerated) {
+    await configureMetaAiLabel(page, reelSurface, signal, onProgress);
+  }
+
   // If native scheduling was requested, select "Schedule" on Step 3 and fill all date/time rows
   if (parsedSchedule) {
     const scheduleOk = await configureMetaBusinessSchedule(
@@ -2434,6 +2515,97 @@ async function configureYouTubeSchedule(
   }
 }
 
+async function configureYouTubeAiDisclosure(
+  page: Page,
+  aiGenerated: boolean,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  const targetRadioName = aiGenerated
+    ? 'VIDEO_HAS_ALTERED_CONTENT_YES'
+    : 'VIDEO_HAS_ALTERED_CONTENT_NO';
+
+  try {
+    onProgress({
+      step: aiGenerated
+        ? 'Mengaktifkan label Altered Content (AI) YouTube'
+        : 'Menyetel Altered Content YouTube (Non-AI)',
+      progressPercent: 64,
+      log: `Membuka Show more untuk menyetel Altered content = ${aiGenerated ? 'Yes (AI-Generated)' : 'No'}.`,
+      level: 'info',
+    });
+
+    const targetRadio = page
+      .locator(`tp-yt-paper-radio-button[name="${targetRadioName}"]`)
+      .first();
+
+    if (!(await targetRadio.isVisible({ timeout: 800 }).catch(() => false))) {
+      const showMoreBtn = page
+        .locator('#toggle-button, ytcp-button#toggle-button')
+        .first();
+      if (await showMoreBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await showMoreBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+        await showMoreBtn.click({ timeout: 5000 });
+        await humanDelay(600, 900, signal);
+      }
+    }
+
+    if (await targetRadio.isVisible({ timeout: 4000 }).catch(() => false)) {
+      await targetRadio.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+      await targetRadio.click({ timeout: 5000 });
+      await humanDelay(300, 500, signal);
+
+      // Verify Polymer tp-yt-paper-radio-button actually toggled aria-checked="true"
+      const isNowChecked =
+        (await targetRadio.getAttribute('aria-checked').catch(() => null)) ===
+        'true';
+      if (!isNowChecked) {
+        const innerRadio = targetRadio.locator('#radioContainer').first();
+        if (await innerRadio.isVisible({ timeout: 1000 }).catch(() => false)) {
+          await innerRadio.click({ force: true, timeout: 3000 }).catch(() => {});
+          await humanDelay(250, 400, signal);
+        } else {
+          await targetRadio.click({ force: true, timeout: 3000 }).catch(() => {});
+          await humanDelay(250, 400, signal);
+        }
+      }
+
+      const verified =
+        (await targetRadio.getAttribute('aria-checked').catch(() => null)) ===
+        'true';
+      onProgress({
+        step: aiGenerated
+          ? 'Label Altered Content (AI) YouTube aktif'
+          : 'Altered Content YouTube disetel ke No',
+        progressPercent: 66,
+        log: `Opsi Altered content YouTube Studio (${targetRadioName}) ${verified ? 'terkonfirmasi aktif' : 'sudah diklik'}.`,
+        level: verified ? 'success' : 'warning',
+      });
+      return verified;
+    }
+
+    onProgress({
+      step: 'Opsi Altered Content YouTube tidak terlihat',
+      progressPercent: 65,
+      log: 'Bagian Altered content (#altered-content) tidak ditemukan di halaman Details YouTube Studio.',
+      level: 'warning',
+    });
+    return false;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Gagal mengatur label AI YouTube (non-fatal)',
+      progressPercent: 65,
+      log: `Pengaturan Altered content YouTube dilewati: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
+}
+
 export async function publishYouTubeViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -2442,7 +2614,8 @@ export async function publishYouTubeViaBrowser(
   mode: AutoPostMode,
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void,
-  scheduledAt?: string | null
+  scheduledAt?: string | null,
+  aiGenerated = false
 ): Promise<BrowserPublishResult> {
   const parsedSchedule = parseScheduledAt(scheduledAt);
   onProgress({
@@ -2584,6 +2757,8 @@ export async function publishYouTubeViaBrowser(
     5000,
     signal
   );
+
+  await configureYouTubeAiDisclosure(page, aiGenerated, signal, onProgress);
 
   onProgress({
     step: 'Menuju tahap Visibilitas YouTube',
@@ -3031,6 +3206,115 @@ async function configureTikTokSchedule(
   }
 }
 
+async function configureTikTokAiLabel(
+  page: Page,
+  root: Page | FrameLocator,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  try {
+    onProgress({
+      step: 'Mengaktifkan label AI-generated content TikTok',
+      progressPercent: 69,
+      log: 'Membuka Show more di TikTok Studio untuk mengaktifkan label AI-generated content.',
+      level: 'info',
+    });
+
+    const AI_LABEL_REGEX = /^(?:AI-generated content|Konten buatan AI)$/i;
+    const aiLabelVisible = await root
+      .getByText(AI_LABEL_REGEX)
+      .first()
+      .isVisible({ timeout: 800 })
+      .catch(() => false);
+
+    if (!aiLabelVisible) {
+      const showMoreBtn = root
+        .locator('button, div[role="button"], span')
+        .filter({ hasText: /^(?:Show more|Tampilkan lebih banyak)$/i })
+        .first();
+      if (await showMoreBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await showMoreBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+        await showMoreBtn.click({ timeout: 5000 });
+        await humanDelay(650, 950, signal);
+      }
+    }
+
+    // Locate the Switch__content inside the row containing "AI-generated content"
+    // Verified live DOM: <div class="Switch__content Switch__content--checked-false" aria-checked="false" data-state="unchecked">
+    const aiRow = root
+      .locator('div, section, label')
+      .filter({ hasText: /^(?:AI-generated content|Konten buatan AI)/i })
+      .filter({ has: root.locator('.Switch__content, [role="switch"]') })
+      .last();
+
+    const switchTarget = aiRow
+      .locator('.Switch__content, [role="switch"]')
+      .first();
+
+    if (await switchTarget.isVisible({ timeout: 4000 }).catch(() => false)) {
+      const alreadyOn =
+        (await switchTarget.getAttribute('aria-checked').catch(() => null)) ===
+          'true' ||
+        (await switchTarget.getAttribute('data-state').catch(() => null)) ===
+          'checked';
+
+      if (!alreadyOn) {
+        await switchTarget.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+        await switchTarget.click({ force: true, timeout: 5000 });
+        await humanDelay(500, 800, signal);
+
+        // Handle optional TikTok disclosure confirmation modal if shown
+        const confirmSelectors = [
+          'div.TUXButton-content:has-text("Turn on")',
+          'button:has-text("Turn on")',
+          'div.TUXButton-content:has-text("Aktifkan")',
+          'button:has-text("Aktifkan")',
+          'button:has-text("Confirm")',
+          'button:has-text("Allow")',
+        ];
+        const clickedInRoot = await tryClickAny(
+          root,
+          confirmSelectors,
+          1500,
+          signal
+        );
+        if (!clickedInRoot) {
+          await tryClickAny(page, confirmSelectors, 1000, signal);
+        }
+        await abortableWait(300, signal);
+      }
+
+      onProgress({
+        step: 'Label AI-generated content TikTok aktif',
+        progressPercent: 71,
+        log: 'Sakelar AI-generated content di TikTok Studio berhasil diaktifkan.',
+        level: 'success',
+      });
+      return true;
+    }
+
+    onProgress({
+      step: 'Sakelar AI-generated content TikTok tidak terlihat',
+      progressPercent: 70,
+      log: 'Opsi AI-generated content tidak ditemukan di bawah Show more TikTok Studio.',
+      level: 'warning',
+    });
+    return false;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Gagal mengatur label AI TikTok (non-fatal)',
+      progressPercent: 70,
+      log: `Pengaturan AI-generated content TikTok dilewati: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
+}
+
 export async function publishTikTokViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -3039,7 +3323,8 @@ export async function publishTikTokViaBrowser(
   mode: AutoPostMode,
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void,
-  scheduledAt?: string | null
+  scheduledAt?: string | null,
+  aiGenerated = false
 ): Promise<BrowserPublishResult> {
   const parsedSchedule = parseScheduledAt(scheduledAt);
   onProgress({
@@ -3179,6 +3464,10 @@ export async function publishTikTokViaBrowser(
   await page.keyboard.press('Delete');
   await humanDelay(150, 300, signal);
   await page.keyboard.insertText(caption);
+
+  if (aiGenerated) {
+    await configureTikTokAiLabel(page, root, signal, onProgress);
+  }
 
   if (parsedSchedule) {
     const scheduleOk = await configureTikTokSchedule(
@@ -3344,6 +3633,7 @@ export async function publishViaBrowser(
     workspace,
     metaTargets,
     scheduledAt,
+    aiGenerated = false,
   } = params;
   throwIfAborted(signal);
 
@@ -3378,7 +3668,8 @@ export async function publishViaBrowser(
         mode,
         signal,
         onProgress,
-        scheduledAt
+        scheduledAt,
+        aiGenerated
       );
     }
     if (platform === 'tiktok') {
@@ -3390,7 +3681,8 @@ export async function publishViaBrowser(
         mode,
         signal,
         onProgress,
-        scheduledAt
+        scheduledAt,
+        aiGenerated
       );
     }
     if (platform === 'ig_reels' || platform === 'fb_reels') {
@@ -3407,7 +3699,8 @@ export async function publishViaBrowser(
         signal,
         onProgress,
         resolvedMetaTargets,
-        scheduledAt
+        scheduledAt,
+        aiGenerated
       );
     }
     return await publishMetaBusinessSuiteViaBrowser(
@@ -3419,7 +3712,8 @@ export async function publishViaBrowser(
       signal,
       onProgress,
       { facebook: true, instagram: false },
-      scheduledAt
+      scheduledAt,
+      aiGenerated
     );
   } catch (error) {
     if (
