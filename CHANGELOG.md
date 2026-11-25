@@ -4,6 +4,13 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.2.1] - 2026-11-25 (Auto-Upload Custom 9:16 Cover Thumbnail on Facebook Reels)
+
+### Peningkatan (Improved)
+- **Upload Cover Otomatis di Meta Business Suite (Facebook Reels)**: Menambahkan `uploadFacebookReelCover()` di `server/autopost/browserPublishers.ts` yang otomatis menggulir ke bagian **Thumbnail**, mengklik tombol **`Upload image`** (`Unggah gambar` / multi-bahasa), dan menyuntikkan file `cover-*.jpg` langsung melalui `filechooser` maupun `input[type="file"][accept*="image"]` sebelum melangkah ke tahap Edit & Share.
+
+---
+
 ## [v2.2.0] - 2026-11-25 (Zero-API-Key Browser Auto-Post Engine v2 — Ported from social-auto-upload)
 
 ### Fitur Baru & Peningkatan (Added / Improved)

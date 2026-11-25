@@ -781,6 +781,178 @@ export async function publishInstagramViaBrowser(
   }
 }
 
+async function uploadFacebookReelCover(
+  page: Page,
+  reelSurface: Locator,
+  coverPath: string,
+  coverFileName: string,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  const UPLOAD_IMAGE_LABEL =
+    /^(?:Upload image|Unggah gambar|Upload thumbnail|Unggah thumbnail|Upload cover|Unggah sampul|上传图片)$/i;
+
+  const findUploadImageTrigger = async (): Promise<Locator | null> => {
+    const candidates: Locator[] = [
+      reelSurface
+        .locator('[role="button"], [role="radio"], [role="tab"], button')
+        .filter({ hasText: UPLOAD_IMAGE_LABEL })
+        .first(),
+      page
+        .locator(
+          '[data-surface$="bizweb_create_reel:left_panel"] [role="button"], [data-surface$="bizweb_create_reel:left_panel"] [role="radio"], [data-surface$="bizweb_create_reel:left_panel"] [role="tab"], [data-surface$="bizweb_create_reel:left_panel"] button'
+        )
+        .filter({ hasText: UPLOAD_IMAGE_LABEL })
+        .first(),
+      reelSurface.getByText(UPLOAD_IMAGE_LABEL).first(),
+      page.getByText(UPLOAD_IMAGE_LABEL).first(),
+    ];
+
+    for (const candidate of candidates) {
+      const visible = await candidate
+        .isVisible({ timeout: 1200 })
+        .catch(() => false);
+      if (visible) {
+        return candidate;
+      }
+    }
+    return null;
+  };
+
+  try {
+    onProgress({
+      step: `Mengunggah cover ${coverFileName} ke Thumbnail Facebook Reels`,
+      progressPercent: 71,
+      log: `Mencari tombol Upload image untuk memasang cover ${coverFileName}.`,
+      level: 'info',
+    });
+
+    // Scroll left panel down slightly in case Thumbnail section is lazy-rendered below caption
+    const leftPanel = page
+      .locator('[data-surface$="bizweb_create_reel:left_panel"]')
+      .first();
+    if (await leftPanel.isVisible({ timeout: 800 }).catch(() => false)) {
+      await leftPanel
+        .evaluate((el) => {
+          el.scrollTop = Math.min(el.scrollHeight, 520);
+        })
+        .catch(() => {});
+      await abortableWait(350, signal);
+    }
+
+    const trigger = await findUploadImageTrigger();
+    if (!trigger) {
+      onProgress({
+        step: 'Tombol Upload image thumbnail tidak ditemukan',
+        progressPercent: 72,
+        log: 'Tombol Upload image pada bagian Thumbnail tidak terlihat. Melanjutkan tanpa mengganti thumbnail.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    await trigger.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+    await abortableWait(250, signal);
+
+    // Click Upload image while listening for an immediate native filechooser dialog
+    const immediateChooserPromise = page
+      .waitForEvent('filechooser', { timeout: 3500 })
+      .catch(() => null);
+
+    await trigger.click({ timeout: 8000 });
+    const immediateChooser = await raceWithAbort(immediateChooserPromise, signal);
+
+    if (immediateChooser) {
+      await immediateChooser.setFiles([coverPath]);
+      await humanDelay(2000, 2800, signal);
+      onProgress({
+        step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
+        progressPercent: 73,
+        log: `Cover ${coverFileName} terpasang melalui tombol Upload image.`,
+        level: 'success',
+      });
+      return true;
+    }
+
+    // If clicking switched to an Upload Image sub-panel, inject via image file input or secondary button
+    await abortableWait(500, signal);
+
+    const imageInputCandidates: Locator[] = [
+      reelSurface
+        .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
+        .last(),
+      page
+        .locator(
+          '[data-surface*="bizweb_create_reel"] input[type="file"][accept*="image"]:not([accept*="video"])'
+        )
+        .last(),
+      page
+        .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
+        .last(),
+    ];
+
+    for (const imgInput of imageInputCandidates) {
+      const count = await imgInput.count().catch(() => 0);
+      if (count > 0) {
+        await imgInput.setInputFiles(coverPath);
+        await humanDelay(2000, 2800, signal);
+        onProgress({
+          step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
+          progressPercent: 73,
+          log: `Cover ${coverFileName} terpasang melalui input gambar Thumbnail.`,
+          level: 'success',
+        });
+        return true;
+      }
+    }
+
+    // Secondary upload button inside revealed Upload Image panel
+    const allUploadBtns = reelSurface
+      .locator('[role="button"], button')
+      .filter({ hasText: UPLOAD_IMAGE_LABEL });
+    const btnCount = await allUploadBtns.count().catch(() => 0);
+    if (btnCount >= 2) {
+      const secondBtn = allUploadBtns.last();
+      const [secondChooser] = await raceWithAbort(
+        Promise.all([
+          page.waitForEvent('filechooser', { timeout: 8000 }),
+          secondBtn.click({ timeout: 6000 }),
+        ]),
+        signal
+      );
+      await secondChooser.setFiles([coverPath]);
+      await humanDelay(2000, 2800, signal);
+      onProgress({
+        step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
+        progressPercent: 73,
+        log: `Cover ${coverFileName} terpasang melalui panel Upload image.`,
+        level: 'success',
+      });
+      return true;
+    }
+
+    onProgress({
+      step: 'Input file cover thumbnail tidak muncul',
+      progressPercent: 72,
+      log: 'Tab Upload image sudah diklik tetapi input gambar tidak terdeteksi. Melanjutkan ke langkah berikutnya.',
+      level: 'warning',
+    });
+    return false;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Gagal mengunggah cover thumbnail (non-fatal)',
+      progressPercent: 72,
+      log: `Upload cover Facebook Reels dilewati: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
+}
+
 export async function publishFacebookViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -1002,6 +1174,25 @@ export async function publishFacebookViaBrowser(
         level: 'warning',
       });
     }
+  }
+
+  // Upload custom 9:16 Cover / Thumbnail via "Upload image" button if cover file exists
+  const coverPath = item.autoMetadata.assets.cover.absolutePath;
+  const coverFileName =
+    item.autoMetadata.assets.cover.fileName ?? 'cover-9x16.jpg';
+  if (
+    item.autoMetadata.assets.cover.exists &&
+    coverPath &&
+    fs.existsSync(coverPath)
+  ) {
+    await uploadFacebookReelCover(
+      page,
+      reelSurface,
+      coverPath,
+      coverFileName,
+      signal,
+      onProgress
+    );
   }
 
   // Advance Reel wizard: Step 0 (Details) -> Step 1 (Edit) -> Step 2 (Share)
