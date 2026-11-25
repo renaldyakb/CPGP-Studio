@@ -4,6 +4,22 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.3.0] - 2026-11-25 (Unified Meta Business Suite Auto-Post for Facebook & Instagram Reels)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Unifikasi Upload Facebook & Instagram Reels via Meta Business Suite (`server/autopost/browserPublishers.ts`)**:
+  - Menghapus alur login & upload terpisah ke `instagram.com`. Kini baik **Facebook Reels**, **Instagram Reels**, maupun **Facebook + Instagram sekaligus** berjalan dari satu gerbang **Meta Business Suite** (`business.facebook.com/latest/composer/`).
+  - Menambahkan `selectMetaBusinessPostTargets()` untuk membuka dropdown `"Post to"` (`Post to Facebook and Instagram`) dan mengatur checkbox Facebook & Instagram secara otomatis sesuai target (mendukung FB saja, IG saja, atau keduanya sekaligus; mengaktifkan target yang diinginkan terlebih dahulu sebelum menonaktifkan target lain agar tidak diblokir validasi Meta, serta otomatis berhenti di mode tinjau jika akun IG belum terhubung ke Facebook Page).
+  - Tetap mendukung upload Cover 9:16 2-langkah (`Upload image` -> `Upload Image`), pengisian deskripsi/caption, wizard 3 langkah (`Create` -> `Edit` -> `Share`), serta mode `Tinjau` dan `Langsung`.
+- **Penggabungan Batch Otomatis FB + IG (`server/autopost/queue.ts`)**:
+  - Saat mengirim **FB + IG** bersamaan (atau **Kirim ke Semua** dengan engine browser), antrean otomatis menggabungkan keduanya menjadi **1 sesi Meta Business Suite** yang menyinkronkan progress, konfirmasi review, pembatalan, serta status `published` ke kedua platform di `planner.json`.
+- **Penyederhanaan Sesi Browser Studio & Tombol Cepat `FB + IG` (`browserSession.ts`, `StudioPage.tsx`, `PlatformStatusList.tsx`, `useAutoPostData.ts`)**:
+  - Menghilangkan kartu sesi login `Instagram` terpisah di `Koneksi -> Browser`. Kini hanya ada 3 sesi browser: **YouTube Studio**, **TikTok Studio**, dan **Meta Business (Facebook & Instagram Reels)**; `Buka Semua` dan `Cek Sesi` hanya membuka/memeriksa Meta Business Suite satu kali tanpa duplikasi.
+  - Menambahkan tombol cepat **`FB + IG`** di footer kartu **Status Platform** untuk langsung mengunggah ke Facebook & Instagram sekaligus via Meta Business Suite.
+  - Memperbaiki penggabungan status cek sesi per kartu agar tidak menimpa hasil cek sesi studio lainnya.
+
+---
+
 ## [v2.2.2] - 2026-11-25 (Fix 2-Step "Upload image" -> "Upload Image" Thumbnail Flow on Facebook Reels)
 
 ### Perbaikan (Fixed)

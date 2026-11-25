@@ -15,17 +15,50 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import type { PlatformKey } from '@/types/planner';
 import type { AutoPostPageProps } from '../pageProps';
 import { IconActionButton } from '../parts/IconActionButton';
-import {
-  PLATFORM_META,
-  PLATFORM_ORDER,
-  PlatformIcon,
-} from '../parts/platformMeta';
+import { PlatformIcon } from '../parts/platformMeta';
 import {
   resolvePlatformEngine,
   type PlatformSessionCheckResult,
 } from '../useAutoPostData';
+
+interface StudioSessionCardDef {
+  id: 'yt_shorts' | 'tiktok' | 'meta';
+  label: string;
+  subtitle: string;
+  icons: PlatformKey[];
+  platforms: PlatformKey[];
+  primaryPlatform: PlatformKey;
+}
+
+const STUDIO_SESSION_CARDS: StudioSessionCardDef[] = [
+  {
+    id: 'yt_shorts',
+    label: 'YouTube Studio',
+    subtitle: 'YouTube Shorts',
+    icons: ['yt_shorts'],
+    platforms: ['yt_shorts'],
+    primaryPlatform: 'yt_shorts',
+  },
+  {
+    id: 'tiktok',
+    label: 'TikTok Studio',
+    subtitle: 'TikTok Video',
+    icons: ['tiktok'],
+    platforms: ['tiktok'],
+    primaryPlatform: 'tiktok',
+  },
+  {
+    id: 'meta',
+    label: 'Meta Business',
+    subtitle: 'Facebook & Instagram Reels',
+    icons: ['fb_reels', 'ig_reels'],
+    platforms: ['fb_reels', 'ig_reels'],
+    primaryPlatform: 'fb_reels',
+  },
+];
 
 function renderSessionBadge(check?: PlatformSessionCheckResult) {
   if (!check) {
@@ -89,8 +122,9 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-xs font-light text-muted-foreground/75">
-            Tanpa API Key. Cukup login sekali di Chrome/Edge, sesi disimpan
-            lokal dan mendukung upload video + cover 9:16 ke 4 platform.
+            Tanpa API Key. Cukup login sekali di YouTube, TikTok, dan Meta
+            Business Suite untuk upload video + cover 9:16 ke 4 platform (FB &amp;
+            IG langsung dari Meta Business Suite).
           </p>
 
           <div className="flex flex-wrap items-center gap-1.5">
@@ -223,49 +257,72 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {PLATFORM_ORDER.map((key) => {
-          const meta = PLATFORM_META[key];
-          const engine = resolvePlatformEngine(key, capabilities);
-          const sessionCheck = sessionChecks[key];
-          const isCheckingThis = busyKey === `check-sessions:${key}`;
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        {STUDIO_SESSION_CARDS.map((card) => {
+          const engine = resolvePlatformEngine(
+            card.primaryPlatform,
+            capabilities
+          );
+          const sessionCheck =
+            card.id === 'meta'
+              ? (sessionChecks.fb_reels ?? sessionChecks.ig_reels)
+              : sessionChecks[card.primaryPlatform];
+          const isCheckingThis =
+            card.id === 'meta'
+              ? busyKey === 'check-sessions:meta'
+              : busyKey === `check-sessions:${card.primaryPlatform}`;
 
           return (
-            <Card key={key}>
-              <CardHeader className="flex flex-row items-center justify-between gap-2 p-4 pb-2">
-                <CardTitle className="flex min-w-0 items-center gap-2 text-sm">
-                  <PlatformIcon platform={key} size={16} />
-                  <span className="truncate">{meta.label}</span>
-                </CardTitle>
+            <Card key={card.id}>
+              <CardHeader className="flex flex-row items-start justify-between gap-2 p-4 pb-2">
+                <div className="min-w-0 space-y-0.5">
+                  <CardTitle className="flex min-w-0 items-center gap-1.5 text-sm">
+                    <span className="inline-flex shrink-0 items-center gap-1">
+                      {card.icons.map((iconKey) => (
+                        <PlatformIcon
+                          key={iconKey}
+                          platform={iconKey}
+                          size={15}
+                        />
+                      ))}
+                    </span>
+                    <span className="truncate">{card.label}</span>
+                  </CardTitle>
+                  <p className="truncate text-[11px] font-light text-muted-foreground/75">
+                    {card.subtitle}
+                  </p>
+                </div>
                 <Badge variant={engine.variant} size="xs">
                   {engine.label}
                 </Badge>
               </CardHeader>
-              <CardContent className="flex items-center justify-between gap-2 p-4 pt-0">
+              <CardContent className="flex items-center justify-between gap-2 p-4 pt-1">
                 {renderSessionBadge(sessionCheck)}
                 <div className="flex shrink-0 items-center gap-1.5">
                   <IconActionButton
                     icon={isCheckingThis ? Loader2 : ShieldCheck}
                     iconClassName={isCheckingThis ? 'animate-spin' : undefined}
-                    label={`Cek status login ${meta.label}`}
+                    label={`Cek status login ${card.label}`}
                     variant="outline"
                     disabled={
                       isCheckingAnySession ||
                       isOpeningProfile ||
                       !anyBrowserAvailable
                     }
-                    onClick={() => void ctx.data.checkStudioSessions([key])}
+                    onClick={() =>
+                      void ctx.data.checkStudioSessions(card.platforms)
+                    }
                   />
                   <IconActionButton
                     icon={ExternalLink}
-                    label={`Buka login ${meta.label}`}
+                    label={`Buka login ${card.label}`}
                     variant="outline"
                     disabled={
                       isOpeningProfile ||
                       isCheckingAnySession ||
                       !anyBrowserAvailable
                     }
-                    onClick={() => void ctx.data.openProfile([key])}
+                    onClick={() => void ctx.data.openProfile(card.platforms)}
                   />
                 </div>
               </CardContent>
@@ -286,7 +343,8 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                     menjalankan browser profil lokal.
                   </li>
                   <li>
-                    Login manual di tiap platform termasuk 2FA dan captcha;
+                    Login manual di YouTube, TikTok, dan Meta Business Suite
+                    (pastikan akun Instagram sudah terhubung ke Facebook Page);
                     sandi tidak pernah disimpan aplikasi.
                   </li>
                   <li>

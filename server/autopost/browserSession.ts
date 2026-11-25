@@ -12,7 +12,7 @@ import {
 export const PLATFORM_STUDIO_URLS: Record<PlatformKey, string> = {
   yt_shorts: 'https://studio.youtube.com',
   tiktok: 'https://www.tiktok.com/tiktokstudio/upload?lang=en',
-  ig_reels: 'https://www.instagram.com/',
+  ig_reels: 'https://business.facebook.com/latest/composer/',
   fb_reels: 'https://business.facebook.com/latest/composer/',
 };
 
@@ -300,6 +300,7 @@ export async function openLoginProfile(
     }) ?? null;
 
   const openedUrls: string[] = [];
+  const visitedUrls = new Set<string>();
 
   for (const platform of finalPlatforms) {
     // Stop opening additional tabs immediately if user already closed the browser window
@@ -308,6 +309,11 @@ export async function openLoginProfile(
     }
 
     const targetUrl = PLATFORM_STUDIO_URLS[platform];
+    if (visitedUrls.has(targetUrl)) {
+      continue;
+    }
+    visitedUrls.add(targetUrl);
+
     let page: Page;
 
     try {
@@ -384,6 +390,9 @@ export async function checkPlatformLoginSessions(
   const checkPage = await context.newPage();
 
   try {
+    let metaBusinessResult: Omit<PlatformSessionCheckResult, 'platform'> | null =
+      null;
+
     for (const platform of targetPlatforms) {
       if (!isContextAlive(context) || checkPage.isClosed()) {
         results[platform] = {
@@ -391,6 +400,22 @@ export async function checkPlatformLoginSessions(
           state: 'unknown',
           detail: 'Sesi browser ditutup saat pemeriksaan berlangsung.',
           checkedAt: new Date().toISOString(),
+        };
+        continue;
+      }
+
+      if (platform === 'fb_reels' || platform === 'ig_reels') {
+        if (!metaBusinessResult) {
+          const checked = await checkSinglePlatformSession(checkPage, platform);
+          metaBusinessResult = {
+            state: checked.state,
+            detail: checked.detail,
+            checkedAt: checked.checkedAt,
+          };
+        }
+        results[platform] = {
+          platform,
+          ...metaBusinessResult,
         };
         continue;
       }
@@ -490,37 +515,7 @@ async function checkSinglePlatformSession(
       };
     }
 
-    if (platform === 'ig_reels') {
-      await page.goto(PLATFORM_STUDIO_URLS.ig_reels, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-      await page
-        .locator(
-          'a[href^="/direct/inbox/"], input[name="username"], a[href^="/accounts/login/"]'
-        )
-        .first()
-        .waitFor({ state: 'attached', timeout: 15000 })
-        .catch(() => {});
-
-      const inboxCount = await page.locator('a[href^="/direct/inbox/"]').count();
-      if (inboxCount > 0) {
-        return {
-          platform,
-          state: 'logged_in',
-          detail: 'Sesi Instagram aktif.',
-          checkedAt: checkedAt(),
-        };
-      }
-      return {
-        platform,
-        state: 'logged_out',
-        detail: 'Belum login Instagram.',
-        checkedAt: checkedAt(),
-      };
-    }
-
-    // fb_reels
+    // fb_reels & ig_reels both run through Meta Business Suite
     await page.goto(PLATFORM_STUDIO_URLS.fb_reels, {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
@@ -542,7 +537,7 @@ async function checkSinglePlatformSession(
       return {
         platform,
         state: 'logged_out',
-        detail: 'Belum login Meta Business Suite / Facebook.',
+        detail: 'Belum login Meta Business Suite (Facebook & Instagram).',
         checkedAt: checkedAt(),
       };
     }
@@ -564,7 +559,7 @@ async function checkSinglePlatformSession(
       return {
         platform,
         state: 'logged_in',
-        detail: 'Sesi Meta Business Suite aktif.',
+        detail: 'Sesi Meta Business Suite aktif (Facebook & Instagram).',
         checkedAt: checkedAt(),
       };
     }

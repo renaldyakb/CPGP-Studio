@@ -16,6 +16,11 @@ export interface BrowserPublishProgressUpdate {
   level?: 'info' | 'success' | 'warning' | 'error';
 }
 
+export interface MetaBusinessTargets {
+  facebook: boolean;
+  instagram: boolean;
+}
+
 export interface BrowserPublishParams {
   platform: PlatformKey;
   item: ContentPlannerItem;
@@ -23,6 +28,7 @@ export interface BrowserPublishParams {
   signal: AbortSignal;
   onProgress: (update: BrowserPublishProgressUpdate) => void;
   workspace?: WorkspaceMetadata;
+  metaTargets?: MetaBusinessTargets;
 }
 
 export interface BrowserPublishResult {
@@ -380,6 +386,469 @@ async function extractYouTubeVideoUrl(page: Page): Promise<string | null> {
   return null;
 }
 
+function formatMetaTargetLabel(targets: MetaBusinessTargets): string {
+  if (targets.facebook && targets.instagram) {
+    return 'Facebook & Instagram Reels';
+  }
+  if (targets.instagram) {
+    return 'Instagram Reels';
+  }
+  return 'Facebook Reels';
+}
+
+interface MetaTargetSelectionResult {
+  applied: boolean;
+  foundFacebook: boolean;
+  foundInstagram: boolean;
+  facebookChecked: boolean;
+  instagramChecked: boolean;
+}
+
+async function selectMetaBusinessPostTargets(
+  page: Page,
+  reelSurface: Locator,
+  targets: MetaBusinessTargets,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<MetaTargetSelectionResult> {
+  const targetLabel = formatMetaTargetLabel(targets);
+
+  const cleanupTags = async () => {
+    await page
+      .evaluate(() => {
+        document
+          .querySelectorAll('[data-cpgp-meta-target], [data-cpgp-meta-row]')
+          .forEach((el) => {
+            el.removeAttribute('data-cpgp-meta-target');
+            el.removeAttribute('data-cpgp-meta-row');
+          });
+      })
+      .catch(() => {});
+  };
+
+  try {
+    onProgress({
+      step: `Memilih target ${targetLabel} di Meta Business Suite`,
+      progressPercent: 58,
+      log: `Mengatur checklist "Post to" Meta Business Suite (Facebook: ${targets.facebook ? 'Ya' : 'Tidak'}, Instagram: ${targets.instagram ? 'Ya' : 'Tidak'}).`,
+      level: 'info',
+    });
+
+    // Scroll left panel to top so the "Post to" combobox is visible
+    const leftPanel = page
+      .locator('[data-surface$="bizweb_create_reel:left_panel"]')
+      .first();
+    if (await leftPanel.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await leftPanel
+        .evaluate((el) => {
+          el.scrollTop = 0;
+        })
+        .catch(() => {});
+      await abortableWait(250, signal);
+    }
+
+    // Find the "Post to" dropdown trigger at the top of the left panel
+    const triggerCandidates: Locator[] = [
+      page
+        .locator('[data-surface$="bizweb_create_reel:left_panel"] [role="combobox"]')
+        .first(),
+      reelSurface.locator('[role="combobox"]').first(),
+      page
+        .locator(
+          '[data-surface$="bizweb_create_reel:left_panel"] [aria-haspopup="listbox"], [data-surface$="bizweb_create_reel:left_panel"] [aria-haspopup="menu"], [data-surface$="bizweb_create_reel:left_panel"] [aria-haspopup="dialog"], [data-surface$="bizweb_create_reel:left_panel"] [aria-haspopup="true"]'
+        )
+        .first(),
+      reelSurface
+        .locator(
+          '[aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="dialog"], [aria-haspopup="true"]'
+        )
+        .first(),
+    ];
+
+    let trigger: Locator | null = null;
+    for (const candidate of triggerCandidates) {
+      if (await candidate.isVisible({ timeout: 1200 }).catch(() => false)) {
+        trigger = candidate;
+        break;
+      }
+    }
+
+    if (!trigger) {
+      onProgress({
+        step: 'Dropdown "Post to" Meta tidak ditemukan',
+        progressPercent: 59,
+        log: 'Dropdown "Post to" tidak terlihat di panel Meta Business Suite.',
+        level: 'warning',
+      });
+      return {
+        applied: false,
+        foundFacebook: false,
+        foundInstagram: false,
+        facebookChecked: false,
+        instagramChecked: false,
+      };
+    }
+
+    await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await trigger.click({ timeout: 8000 });
+    await humanDelay(500, 800, signal);
+
+    // Inspect the opened popover and tag Facebook & Instagram checkbox targets
+    const inspectAndTag = async () =>
+      page.evaluate(() => {
+        document
+          .querySelectorAll('[data-cpgp-meta-target], [data-cpgp-meta-row]')
+          .forEach((el) => {
+            el.removeAttribute('data-cpgp-meta-target');
+            el.removeAttribute('data-cpgp-meta-row');
+          });
+
+        const isVisible = (el: Element): boolean => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          const style = window.getComputedStyle(el);
+          return style.visibility !== 'hidden' && style.display !== 'none';
+        };
+
+        const readChecked = (el: Element): boolean => {
+          if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+            return el.checked;
+          }
+          const ariaChecked = el.getAttribute('aria-checked');
+          if (ariaChecked === 'true') return true;
+          if (ariaChecked === 'false') return false;
+          const ariaSelected = el.getAttribute('aria-selected');
+          if (ariaSelected === 'true') return true;
+          const nestedInput = el.querySelector<HTMLInputElement>(
+            'input[type="checkbox"]'
+          );
+          if (nestedInput) return nestedInput.checked;
+          const nestedAria = el.querySelector('[aria-checked]');
+          if (nestedAria) {
+            return nestedAria.getAttribute('aria-checked') === 'true';
+          }
+          return false;
+        };
+
+        // Locate the "Post to Facebook and Instagram" floating popover first
+        let scope: Element | null = null;
+        const headerRegex =
+          /post to facebook and instagram|posting ke facebook dan instagram|post to facebook|posting ke facebook/i;
+
+        const allNodes = Array.from(document.querySelectorAll('div, section, ul'));
+        let bestPopover: Element | null = null;
+        let bestArea = Number.POSITIVE_INFINITY;
+
+        for (const node of allNodes) {
+          if (!isVisible(node)) continue;
+          const rect = node.getBoundingClientRect();
+          if (rect.width < 180 || rect.height < 60 || rect.width > 760) continue;
+          const text = (node.textContent ?? '').trim();
+          if (!headerRegex.test(text)) continue;
+
+          const boxes = node.querySelectorAll(
+            'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
+          );
+          if (boxes.length >= 1 && boxes.length <= 8) {
+            const area = rect.width * rect.height;
+            if (area < bestArea) {
+              bestArea = area;
+              bestPopover = node;
+            }
+          }
+        }
+
+        if (bestPopover) {
+          scope = bestPopover;
+        } else {
+          // Fallback to visible floating menu/listbox/dialog with checkboxes
+          const popups = Array.from(
+            document.querySelectorAll(
+              '[role="dialog"], [role="listbox"], [role="menu"], [data-visualcompletion="ignore-dynamic"]'
+            )
+          ).filter((el) => isVisible(el));
+          for (const popup of popups) {
+            const boxes = popup.querySelectorAll(
+              'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
+            );
+            if (boxes.length >= 1 && boxes.length <= 8) {
+              scope = popup;
+              break;
+            }
+          }
+        }
+
+        if (!scope) {
+          return {
+            foundFacebook: false,
+            foundInstagram: false,
+            facebookChecked: false,
+            instagramChecked: false,
+            totalBoxes: 0,
+          };
+        }
+
+        const rawBoxes = Array.from(
+          scope.querySelectorAll(
+            'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
+          )
+        ).filter((el) => {
+          // Avoid duplicates when a [role="checkbox"] wraps an <input type="checkbox">
+          if (
+            el.tagName !== 'INPUT' &&
+            el.querySelector('input[type="checkbox"]')
+          ) {
+            return false;
+          }
+          const rect = el.getBoundingClientRect();
+          const parentRect = el.parentElement?.getBoundingClientRect();
+          return (
+            (rect.width > 0 && rect.height > 0) ||
+            (parentRect ? parentRect.width > 0 && parentRect.height > 0 : false)
+          );
+        });
+
+        const getRowElement = (box: Element): Element => {
+          const explicitRow = box.closest(
+            '[role="option"], [role="menuitemcheckbox"], label, li'
+          );
+          if (explicitRow && scope!.contains(explicitRow)) {
+            return explicitRow;
+          }
+          let curr: Element | null = box.parentElement;
+          let candidate: Element = box.parentElement ?? box;
+          for (let depth = 0; depth < 5 && curr && curr !== scope; depth += 1) {
+            const r = curr.getBoundingClientRect();
+            const siblingBoxes = curr.querySelectorAll(
+              'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
+            );
+            // Stop before ascending to a container that holds multiple rows
+            const uniqueInputs = Array.from(siblingBoxes).filter(
+              (b) =>
+                !(
+                  b.tagName !== 'INPUT' &&
+                  b.querySelector('input[type="checkbox"]')
+                )
+            );
+            if (uniqueInputs.length > 1) break;
+            if (r.height >= 28 && r.height <= 96 && r.width >= 140) {
+              candidate = curr;
+            }
+            curr = curr.parentElement;
+          }
+          return candidate;
+        };
+
+        const rowHint = (row: Element): 'facebook' | 'instagram' | null => {
+          const parts: string[] = [];
+          parts.push(row.getAttribute('aria-label') ?? '');
+          parts.push(row.textContent ?? '');
+          row.querySelectorAll('img, svg, i, [aria-label], [alt], [title]').forEach(
+            (child) => {
+              parts.push(child.getAttribute('aria-label') ?? '');
+              parts.push(child.getAttribute('alt') ?? '');
+              parts.push(child.getAttribute('title') ?? '');
+              parts.push(child.getAttribute('src') ?? '');
+            }
+          );
+          const combined = parts.join(' ').toLowerCase();
+          if (combined.includes('instagram')) return 'instagram';
+          if (combined.includes('facebook')) return 'facebook';
+          return null;
+        };
+
+        let fbBox: Element | null = null;
+        let igBox: Element | null = null;
+        const unassigned: Element[] = [];
+
+        for (const box of rawBoxes) {
+          const row = getRowElement(box);
+          const hint = rowHint(row);
+          if (hint === 'facebook' && !fbBox) {
+            fbBox = box;
+          } else if (hint === 'instagram' && !igBox) {
+            igBox = box;
+          } else {
+            unassigned.push(box);
+          }
+        }
+
+        // Meta Business Suite lists Facebook Page first (index 0) and Instagram account second (index 1)
+        if (!fbBox && unassigned.length > 0) {
+          fbBox = unassigned.shift() ?? null;
+        }
+        if (!igBox && unassigned.length > 0) {
+          igBox = unassigned.shift() ?? null;
+        }
+
+        if (fbBox) {
+          fbBox.setAttribute('data-cpgp-meta-target', 'facebook');
+          getRowElement(fbBox).setAttribute('data-cpgp-meta-row', 'facebook');
+        }
+        if (igBox) {
+          igBox.setAttribute('data-cpgp-meta-target', 'instagram');
+          getRowElement(igBox).setAttribute('data-cpgp-meta-row', 'instagram');
+        }
+
+        return {
+          foundFacebook: Boolean(fbBox),
+          foundInstagram: Boolean(igBox),
+          facebookChecked: fbBox ? readChecked(fbBox) : false,
+          instagramChecked: igBox ? readChecked(igBox) : false,
+          totalBoxes: rawBoxes.length,
+        };
+      });
+
+    let state = await inspectAndTag();
+
+    const readTargetChecked = async (
+      channel: 'facebook' | 'instagram'
+    ): Promise<boolean> =>
+      page
+        .evaluate((ch) => {
+          const el = document.querySelector(`[data-cpgp-meta-target="${ch}"]`);
+          if (!el) return false;
+          if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+            return el.checked;
+          }
+          const ariaChecked = el.getAttribute('aria-checked');
+          if (ariaChecked === 'true') return true;
+          if (ariaChecked === 'false') return false;
+          const nested = el.querySelector<HTMLInputElement>(
+            'input[type="checkbox"]'
+          );
+          return nested ? nested.checked : false;
+        }, channel)
+        .catch(() => false);
+
+    const setChannelState = async (
+      channel: 'facebook' | 'instagram',
+      desired: boolean
+    ): Promise<boolean> => {
+      const current = await readTargetChecked(channel);
+      if (current === desired) {
+        return current;
+      }
+
+      const targetLoc = page
+        .locator(`[data-cpgp-meta-target="${channel}"]`)
+        .first();
+      if ((await targetLoc.count().catch(() => 0)) > 0) {
+        await targetLoc
+          .click({ timeout: 5000, force: true })
+          .catch(() => {});
+        await abortableWait(350, signal);
+      }
+
+      let after = await readTargetChecked(channel);
+      if (after === desired) {
+        return after;
+      }
+
+      // Fallback: click the row wrapper if the raw input is visually obscured
+      const rowLoc = page
+        .locator(`[data-cpgp-meta-row="${channel}"]`)
+        .first();
+      if ((await rowLoc.count().catch(() => 0)) > 0) {
+        await rowLoc.click({ timeout: 5000 }).catch(() => {});
+        await abortableWait(350, signal);
+        after = await readTargetChecked(channel);
+      }
+      return after;
+    };
+
+    // CRITICAL: Always enable desired target(s) FIRST before disabling undesired target(s),
+    // because Meta Business Suite does not allow unchecking the last active account!
+    const enableFirst: Array<{ channel: 'facebook' | 'instagram'; desired: boolean }> = [];
+    const disableAfter: Array<{ channel: 'facebook' | 'instagram'; desired: boolean }> = [];
+
+    if (state.foundFacebook) {
+      if (targets.facebook) {
+        enableFirst.push({ channel: 'facebook', desired: true });
+      } else {
+        disableAfter.push({ channel: 'facebook', desired: false });
+      }
+    }
+    if (state.foundInstagram) {
+      if (targets.instagram) {
+        enableFirst.push({ channel: 'instagram', desired: true });
+      } else {
+        disableAfter.push({ channel: 'instagram', desired: false });
+      }
+    }
+
+    for (const op of [...enableFirst, ...disableAfter]) {
+      throwIfAborted(signal);
+      await setChannelState(op.channel, op.desired);
+      await humanDelay(250, 450, signal);
+    }
+
+    const finalFb = state.foundFacebook
+      ? await readTargetChecked('facebook')
+      : false;
+    const finalIg = state.foundInstagram
+      ? await readTargetChecked('instagram')
+      : false;
+
+    await cleanupTags();
+
+    // Close the "Post to" dropdown cleanly so it doesn't obstruct Description/Cover
+    await page.keyboard.press('Escape').catch(() => {});
+    await abortableWait(300, signal);
+    const expanded = await trigger
+      .getAttribute('aria-expanded')
+      .catch(() => null);
+    if (expanded === 'true') {
+      await trigger.click({ timeout: 3000 }).catch(() => {});
+      await abortableWait(250, signal);
+    }
+
+    await humanDelay(450, 750, signal);
+
+    const applied =
+      (!targets.facebook || finalFb) &&
+      (!targets.instagram || finalIg) &&
+      (targets.facebook || !finalFb) &&
+      (targets.instagram || !finalIg);
+
+    onProgress({
+      step: applied
+        ? `Target ${targetLabel} terpilih`
+        : `Verifikasi target ${targetLabel} perlu dicek`,
+      progressPercent: 61,
+      log: `Status checklist "Post to": Facebook=${finalFb ? 'Aktif' : 'Nonaktif'}, Instagram=${finalIg ? 'Aktif' : 'Nonaktif'}.`,
+      level: applied ? 'success' : 'warning',
+    });
+
+    return {
+      applied,
+      foundFacebook: state.foundFacebook,
+      foundInstagram: state.foundInstagram,
+      facebookChecked: finalFb,
+      instagramChecked: finalIg,
+    };
+  } catch (err) {
+    await cleanupTags();
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Gagal mengatur checklist Post to (non-fatal)',
+      progressPercent: 60,
+      log: `Pengaturan checklist "Post to" Meta Business Suite terkendala: ${msg}`,
+      level: 'warning',
+    });
+    return {
+      applied: false,
+      foundFacebook: false,
+      foundInstagram: false,
+      facebookChecked: false,
+      instagramChecked: false,
+    };
+  }
+}
+
 export async function publishInstagramViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -389,396 +858,16 @@ export async function publishInstagramViaBrowser(
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void
 ): Promise<BrowserPublishResult> {
-  onProgress({
-    step: 'Membuka Instagram',
-    progressPercent: 12,
-    log: 'Membuka Instagram Web di browser lokal.',
-    level: 'info',
-  });
-
-  await raceWithAbort(
-    page.goto(PLATFORM_STUDIO_URLS.ig_reels, {
-      waitUntil: 'domcontentloaded',
-      timeout: 120_000,
-    }),
-    signal
+  return publishMetaBusinessSuiteViaBrowser(
+    page,
+    item,
+    videoPath,
+    videoFileName,
+    mode,
+    signal,
+    onProgress,
+    { facebook: false, instagram: true }
   );
-
-  await raceWithAbort(
-    page
-      .locator(
-        'a[href^="/direct/inbox/"], input[name="username"], a[href^="/accounts/login/"]'
-      )
-      .first()
-      .waitFor({ state: 'attached', timeout: 20_000 })
-      .catch(() => {}),
-    signal
-  );
-
-  const inboxCount = await page.locator('a[href^="/direct/inbox/"]').count();
-  if (inboxCount === 0) {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Menunggu login Instagram',
-      progressPercent: 25,
-      log: 'Belum login Instagram. Silakan login di tab Chrome yang terbuka.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: null,
-      summary:
-        'Belum login Instagram. Silakan login di tab Chrome yang terbuka.',
-    };
-  }
-
-  const notifDialog = page.getByRole('dialog').filter({
-    has: page.locator(
-      'img[src^="/images/instagram/xig/ico/xxhdpi_launcher.png"]'
-    ),
-  });
-
-  await page.addLocatorHandler(notifDialog, async () => {
-    await notifDialog.locator('._a9-z > button').nth(1).click().catch(() => {});
-  });
-
-  try {
-    onProgress({
-      step: 'Membuka dialog Create di Instagram',
-      progressPercent: 26,
-      log: 'Mencari tombol Create di sidebar Instagram (selector struktural).',
-      level: 'info',
-    });
-
-    const navPopups = page
-      .locator('a._a6hd[href="#"]')
-      .filter({ has: page.locator('[aria-selected]') });
-
-    let createClicked = false;
-    if ((await navPopups.count()) === 4) {
-      try {
-        await navPopups.nth(1).click({ timeout: 8000 });
-        createClicked = true;
-      } catch {
-        createClicked = false;
-      }
-    }
-
-    if (!createClicked) {
-      createClicked = await tryClickAny(
-        page,
-        [
-          'svg[aria-label="New post"]',
-          'svg[aria-label="Postingan baru"]',
-          'a[role="link"]:has(svg[aria-label*="Create"])',
-          'a[role="link"]:has(svg[aria-label*="Buat"])',
-        ],
-        10_000,
-        signal
-      );
-    }
-
-    if (!createClicked) {
-      await safeBringToFront(page);
-      onProgress({
-        step: 'Tombol Create Instagram tidak ditemukan',
-        progressPercent: 30,
-        log: 'Tombol Create Instagram tidak ditemukan otomatis. Tab dibiarkan terbuka.',
-        level: 'warning',
-      });
-      return {
-        status: 'awaiting_review',
-        publishedUrl: null,
-        summary:
-          'Tombol Create Instagram tidak terdeteksi otomatis. Silakan klik Create secara manual di tab browser.',
-      };
-    }
-
-    await humanDelay(700, 1100, signal);
-
-    const dialog = page.getByRole('dialog');
-    const mp4FileInput = dialog
-      .locator('input[type="file"][accept*="video/mp4"]')
-      .first();
-
-    // If a submenu opened instead of the upload dialog, click its first item (Post/Postingan)
-    if ((await mp4FileInput.count()) === 0) {
-      await tryClickAny(
-        page,
-        [
-          '[role="menu"] [role="menuitem"]',
-          'a[role="link"]:has(svg[aria-label*="Post"])',
-          'a[role="link"]:has(svg[aria-label*="Postingan"])',
-          'span:has-text("Post")',
-          'span:has-text("Postingan")',
-          'a:has-text("Post")',
-          'div[role="button"]:has-text("Post")',
-          'div[role="button"]:has-text("Postingan")',
-        ],
-        3000,
-        signal
-      );
-      await humanDelay(500, 900, signal);
-    }
-
-    let fileInput: Locator | null = mp4FileInput;
-    try {
-      await raceWithAbort(
-        mp4FileInput.waitFor({ state: 'attached', timeout: 15_000 }),
-        signal
-      );
-    } catch (err) {
-      if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
-        throw createAbortError();
-      }
-      const fallbackInput = dialog.locator('input[type="file"]').first();
-      if ((await fallbackInput.count()) > 0) {
-        fileInput = fallbackInput;
-      } else {
-        fileInput = null;
-      }
-    }
-
-    if (!fileInput) {
-      await safeBringToFront(page);
-      onProgress({
-        step: 'Input file Instagram tidak ditemukan',
-        progressPercent: 38,
-        log: 'Input file unggahan Instagram tidak ditemukan otomatis. Tab tetap dibuka.',
-        level: 'warning',
-      });
-      return {
-        status: 'awaiting_review',
-        publishedUrl: null,
-        summary: `Input file upload Instagram tidak ditemukan. Silakan pilih ${videoFileName} secara manual di tab Instagram.`,
-      };
-    }
-
-    onProgress({
-      step: `Mengunggah video ${videoFileName} ke Instagram`,
-      progressPercent: 45,
-      log: `Memasukkan file ${videoFileName} langsung ke input upload Instagram.`,
-      level: 'info',
-    });
-
-    await fileInput.setInputFiles(videoPath);
-
-    // Dismiss optional Reels NUX modal (bounded 2s check)
-    const reelsNuxDialog = page.getByRole('dialog').filter({
-      has: page.locator(
-        'img[src^="/images/instagram/clips/reels_nux_icon.png"]'
-      ),
-    });
-    try {
-      await raceWithAbort(
-        reelsNuxDialog.first().waitFor({ state: 'visible', timeout: 2000 }),
-        signal
-      );
-      await reelsNuxDialog
-        .locator('._a9-z div > button')
-        .first()
-        .click({ timeout: 3000 })
-        .catch(() => {});
-    } catch (err) {
-      if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
-        throw createAbortError();
-      }
-      // Optional NUX modal not displayed
-    }
-
-    const PRIMARY_ACTION = '._ac76 [role="button"]:not(:has(svg))';
-    const primaryActionBtn = dialog.locator(PRIMARY_ACTION).first();
-
-    await raceWithAbort(
-      primaryActionBtn.waitFor({ state: 'visible', timeout: 45_000 }),
-      signal
-    );
-
-    const coverPath = getCoverPathForItem(item);
-
-    // Step 0: Crop -> Edit, Step 1: Edit (+ cover) -> Caption
-    for (let step = 0; step < 2; step += 1) {
-      throwIfAborted(signal);
-
-      if (step === 1 && coverPath) {
-        const coverInput = dialog.locator(
-          'input[type="file"][accept="image/jpeg,image/png"]'
-        );
-        if ((await coverInput.count()) === 1) {
-          try {
-            await coverInput.setInputFiles(coverPath);
-            onProgress({
-              step: 'Cover 9:16 dipasang di Instagram Reels',
-              progressPercent: 64,
-              log: 'Cover 9:16 berhasil dipasang di Instagram Reels!',
-              level: 'success',
-            });
-            await humanDelay(600, 1000, signal);
-          } catch {
-            // Non-fatal if cover upload fails
-          }
-        }
-      }
-
-      onProgress({
-        step:
-          step === 0
-            ? 'Melewati tahap Crop Instagram Reels'
-            : 'Melanjutkan ke form caption Instagram Reels',
-        progressPercent: step === 0 ? 56 : 68,
-        log: `Menekan tombol wizard langkah ${step + 1} di dialog Instagram.`,
-        level: 'info',
-      });
-
-      const prevHeading = (
-        await dialog
-          .locator('._ac76 [role="heading"]')
-          .first()
-          .innerText()
-          .catch(() => '')
-      ).trim();
-
-      await primaryActionBtn.click({ timeout: 10_000 });
-
-      const stepDeadline = Date.now() + 45_000;
-      while (Date.now() < stepDeadline) {
-        throwIfAborted(signal);
-        const lexicalVisible = await dialog
-          .locator('[data-lexical-editor="true"]')
-          .first()
-          .isVisible({ timeout: 150 })
-          .catch(() => false);
-        if (lexicalVisible) {
-          break;
-        }
-        const currHeading = (
-          await dialog
-            .locator('._ac76 [role="heading"]')
-            .first()
-            .innerText()
-            .catch(() => '')
-        ).trim();
-        if (currHeading && currHeading !== prevHeading) {
-          break;
-        }
-        await abortableWait(300, signal);
-      }
-
-      await humanDelay(350, 650, signal);
-    }
-
-    const caption = getCaptionForItem(item).slice(0, 2200);
-    const captionBox = dialog
-      .locator(
-        '[contenteditable="true"][role="textbox"][data-lexical-editor="true"], div[aria-label*="caption" i], div[aria-label*="keterangan" i]'
-      )
-      .first();
-
-    let captionVisible = false;
-    try {
-      await raceWithAbort(
-        captionBox.waitFor({ state: 'visible', timeout: 15_000 }),
-        signal
-      );
-      captionVisible = true;
-    } catch (err) {
-      if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
-        throw createAbortError();
-      }
-    }
-
-    if (captionVisible) {
-      onProgress({
-        step: 'Mengisi caption Instagram Reels',
-        progressPercent: 76,
-        log: `Mengisi caption Instagram (${caption.length} karakter).`,
-        level: 'info',
-      });
-      await fillTextWithInsertFallback(page, captionBox, caption, signal);
-      await humanDelay(500, 900, signal);
-    } else {
-      onProgress({
-        step: 'Kolom caption Instagram belum terlihat',
-        progressPercent: 76,
-        log: 'Kolom caption Instagram tidak ditemukan otomatis. Tab tetap dibuka agar Anda bisa menempelkan caption.',
-        level: 'warning',
-      });
-    }
-
-    if (mode === 'review') {
-      await safeBringToFront(page);
-      onProgress({
-        step: 'Siap direview di Instagram Reels',
-        progressPercent: 85,
-        log: 'Video, cover, dan caption Instagram Reels sudah siap. Silakan review lalu klik Share / Bagikan.',
-        level: 'success',
-      });
-      return {
-        status: 'awaiting_review',
-        publishedUrl: null,
-        summary:
-          'Video dan caption sudah disiapkan di Instagram Reels. Cek tab browser untuk konfirmasi akhir.',
-      };
-    }
-
-    onProgress({
-      step: 'Membagikan Instagram Reels',
-      progressPercent: 90,
-      log: 'Menekan tombol Share dan menunggu konfirmasi API configure Instagram.',
-      level: 'info',
-    });
-
-    const configureResponsePromise = page.waitForResponse(
-      (resp) => {
-        if (resp.request().method() !== 'POST') return false;
-        if (!resp.url().includes('/api/v1/media/configure')) return false;
-        if (resp.status() === 202) return false;
-        return true;
-      },
-      { timeout: 120_000 }
-    );
-
-    await primaryActionBtn.click({ timeout: 10_000 });
-    const configureResponse = await raceWithAbort(
-      configureResponsePromise,
-      signal
-    );
-
-    let publishedUrl: string | null = null;
-    try {
-      const rawBody = await configureResponse.text();
-      const cleanedBody = rawBody.replace(/^for\s*\(;;\);\s*/, '').trim();
-      const parsed = JSON.parse(cleanedBody) as {
-        media?: { code?: string };
-        code?: string;
-      };
-      const code = parsed?.media?.code ?? parsed?.code;
-      if (typeof code === 'string' && code.trim()) {
-        publishedUrl = `https://www.instagram.com/reel/${code.trim()}/`;
-      }
-    } catch {
-      publishedUrl = null;
-    }
-
-    onProgress({
-      step: 'Instagram Reels dibagikan',
-      progressPercent: 100,
-      log: publishedUrl
-        ? `Instagram Reels berhasil dipublikasikan: ${publishedUrl}`
-        : 'Instagram Reels berhasil dipublikasikan.',
-      level: 'success',
-    });
-
-    return {
-      status: 'completed',
-      publishedUrl,
-      summary: publishedUrl
-        ? `Berhasil publish Instagram Reels: ${publishedUrl}`
-        : 'Berhasil publish Instagram Reels.',
-    };
-  } finally {
-    await page.removeLocatorHandler(notifDialog).catch(() => {});
-  }
 }
 
 async function uploadFacebookReelCover(
@@ -977,10 +1066,34 @@ export async function publishFacebookViaBrowser(
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void
 ): Promise<BrowserPublishResult> {
+  return publishMetaBusinessSuiteViaBrowser(
+    page,
+    item,
+    videoPath,
+    videoFileName,
+    mode,
+    signal,
+    onProgress,
+    { facebook: true, instagram: false }
+  );
+}
+
+export async function publishMetaBusinessSuiteViaBrowser(
+  page: Page,
+  item: ContentPlannerItem,
+  videoPath: string,
+  videoFileName: string,
+  mode: AutoPostMode,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void,
+  targets: MetaBusinessTargets = { facebook: true, instagram: false }
+): Promise<BrowserPublishResult> {
+  const targetLabel = formatMetaTargetLabel(targets);
+
   onProgress({
-    step: 'Membuka Meta Business Suite',
+    step: `Membuka Meta Business Suite (${targetLabel})`,
     progressPercent: 12,
-    log: 'Membuka Meta Business Suite Composer di browser lokal.',
+    log: `Membuka Meta Business Suite Composer untuk ${targetLabel}.`,
     level: 'info',
   });
 
@@ -1010,14 +1123,14 @@ export async function publishFacebookViaBrowser(
     onProgress({
       step: 'Menunggu login Meta Business Suite',
       progressPercent: 25,
-      log: 'Belum login Meta Business Suite / Facebook. Silakan login di tab Chrome yang terbuka.',
+      log: 'Belum login Meta Business Suite (Facebook & Instagram). Silakan login di tab Chrome yang terbuka.',
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
       summary:
-        'Sesi login Facebook / Meta Business Suite diperlukan. Silakan login di tab browser yang terbuka.',
+        'Sesi login Meta Business Suite diperlukan. Silakan login di tab browser yang terbuka.',
     };
   }
 
@@ -1026,7 +1139,7 @@ export async function publishFacebookViaBrowser(
   onProgress({
     step: `Mengunggah video ${videoFileName} ke Meta Business Suite`,
     progressPercent: 30,
-    log: `Memasukkan file ${videoFileName} ke Composer Meta Business Suite.`,
+    log: `Memasukkan file ${videoFileName} ke Composer Meta Business Suite untuk ${targetLabel}.`,
     level: 'info',
   });
 
@@ -1083,13 +1196,13 @@ export async function publishFacebookViaBrowser(
     onProgress({
       step: 'Input video Meta Business Suite tidak ditemukan',
       progressPercent: 35,
-      log: 'Input file video Facebook Reels tidak ditemukan otomatis. Tab dibiarkan terbuka untuk upload manual.',
+      log: `Input file video ${targetLabel} tidak ditemukan otomatis. Tab dibiarkan terbuka untuk upload manual.`,
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary: `Input file Facebook Reels tidak ditemukan otomatis. Silakan pilih ${videoFileName} di tab Meta Business Suite.`,
+      summary: `Input file ${targetLabel} tidak ditemukan otomatis. Silakan pilih ${videoFileName} di tab Meta Business Suite.`,
     };
   }
 
@@ -1113,10 +1226,14 @@ export async function publishFacebookViaBrowser(
   const footerButtons = page.locator(
     '[data-surface$="bizweb_create_reel:footer"] [role="button"]:not([aria-label])'
   );
+  const getPrimaryFooterBtn = async (): Promise<Locator> => {
+    const count = await footerButtons.count().catch(() => 0);
+    return count >= 2 ? footerButtons.nth(1) : footerButtons.last();
+  };
 
   onProgress({
-    step: 'Menunggu proses upload video Facebook Reels (100%)',
-    progressPercent: 55,
+    step: `Menunggu proses upload video ${targetLabel} (100%)`,
+    progressPercent: 54,
     log: 'Menunggu proses unggah video mencapai 100% atau tombol Next aktif.',
     level: 'info',
   });
@@ -1129,7 +1246,8 @@ export async function publishFacebookViaBrowser(
       .first()
       .isVisible({ timeout: 250 })
       .catch(() => false);
-    const nextReady = await isLocatorEnabled(footerButtons.nth(1));
+    const nextBtnCandidate = await getPrimaryFooterBtn();
+    const nextReady = await isLocatorEnabled(nextBtnCandidate);
     if (has100Percent || nextReady) {
       break;
     }
@@ -1137,6 +1255,36 @@ export async function publishFacebookViaBrowser(
   }
 
   await sweepGeoGuidanceCards(page);
+
+  // Select target channels ("Post to Facebook and Instagram" checkboxes)
+  const targetSelection = await selectMetaBusinessPostTargets(
+    page,
+    reelSurface,
+    targets,
+    signal,
+    onProgress
+  );
+
+  // Guard: If Instagram was explicitly requested but no IG account is connected in Meta Business Suite,
+  // stop cleanly in awaiting_review instead of publishing to Facebook alone by mistake!
+  if (
+    targets.instagram &&
+    (!targetSelection.foundInstagram || !targetSelection.instagramChecked)
+  ) {
+    await safeBringToFront(page);
+    onProgress({
+      step: 'Akun Instagram di Meta Business Suite perlu dicek',
+      progressPercent: 62,
+      log: 'Checklist Instagram di dropdown "Post to" belum terpilih atau akun IG belum terhubung ke Facebook Page. Tab dibiarkan terbuka untuk pengecekan.',
+      level: 'warning',
+    });
+    return {
+      status: 'awaiting_review',
+      publishedUrl: null,
+      summary:
+        'Checklist Instagram di Meta Business Suite belum dapat dicentang otomatis. Pastikan akun Instagram terhubung ke Facebook Page lalu lanjutkan di tab browser.',
+    };
+  }
 
   const title = getTitleForItem(item);
   const caption = getCaptionForItem(item);
@@ -1163,9 +1311,9 @@ export async function publishFacebookViaBrowser(
 
   if (captionVisible) {
     onProgress({
-      step: 'Mengisi deskripsi Facebook Reels',
+      step: `Mengisi deskripsi ${targetLabel}`,
       progressPercent: 68,
-      log: `Mengisi deskripsi Facebook Reels (${caption.length} karakter).`,
+      log: `Mengisi deskripsi ${targetLabel} (${caption.length} karakter).`,
       level: 'info',
     });
     await fillTextWithInsertFallback(page, captionBox, caption, signal);
@@ -1183,9 +1331,9 @@ export async function publishFacebookViaBrowser(
       );
     } else {
       onProgress({
-        step: 'Kolom deskripsi Facebook belum terlihat',
+        step: `Kolom deskripsi ${targetLabel} belum terlihat`,
         progressPercent: 68,
-        log: 'Kolom deskripsi Facebook Reels tidak ditemukan otomatis. Video sudah diunggah.',
+        log: `Kolom deskripsi ${targetLabel} tidak ditemukan otomatis. Video sudah diunggah.`,
         level: 'warning',
       });
     }
@@ -1213,12 +1361,12 @@ export async function publishFacebookViaBrowser(
   // Advance Reel wizard: Step 0 (Details) -> Step 1 (Edit) -> Step 2 (Share)
   for (let step = 0; step < 2; step += 1) {
     throwIfAborted(signal);
-    const nextBtn = footerButtons.nth(1);
+    const nextBtn = await getPrimaryFooterBtn();
     const ready = await waitForEnabledLocator(nextBtn, 120_000, signal);
     if (!ready) {
       await safeBringToFront(page);
       onProgress({
-        step: 'Tombol Next Facebook Reels belum aktif',
+        step: `Tombol Next ${targetLabel} belum aktif`,
         progressPercent: 78,
         log: `Tombol Next pada langkah ${step + 1} belum aktif dalam batas waktu. Tab dibiarkan terbuka.`,
         level: 'warning',
@@ -1226,16 +1374,15 @@ export async function publishFacebookViaBrowser(
       return {
         status: 'awaiting_review',
         publishedUrl: null,
-        summary:
-          'Tombol Next Facebook Reels belum aktif. Silakan lanjutkan manual di tab Meta Business Suite.',
+        summary: `Tombol Next ${targetLabel} belum aktif. Silakan lanjutkan manual di tab Meta Business Suite.`,
       };
     }
 
     onProgress({
       step:
         step === 0
-          ? 'Melanjutkan ke tahap Edit Facebook Reels'
-          : 'Melanjutkan ke tahap Share Facebook Reels',
+          ? `Melanjutkan ke tahap Edit ${targetLabel}`
+          : `Melanjutkan ke tahap Share ${targetLabel}`,
       progressPercent: step === 0 ? 75 : 82,
       log: `Menekan tombol Next langkah ${step + 1} di Meta Business Suite.`,
       level: 'info',
@@ -1261,41 +1408,39 @@ export async function publishFacebookViaBrowser(
   if (mode === 'review') {
     await safeBringToFront(page);
     onProgress({
-      step: 'Siap direview di tahap Share Facebook Reels',
+      step: `Siap direview di tahap Share ${targetLabel}`,
       progressPercent: 85,
-      log: 'Facebook Reels sudah sampai di tahap Share (Langkah 3). Silakan review lalu klik Share / Bagikan.',
+      log: `${targetLabel} sudah sampai di tahap Share (Langkah 3). Silakan review lalu klik Share / Bagikan.`,
       level: 'success',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary:
-        'Video dan deskripsi sudah siap di langkah Share Meta Business Suite. Cek tab browser untuk konfirmasi akhir.',
+      summary: `Video, cover, dan deskripsi ${targetLabel} sudah siap di langkah Share Meta Business Suite. Cek tab browser untuk konfirmasi akhir.`,
     };
   }
 
-  const shareBtn = footerButtons.nth(1);
+  const shareBtn = await getPrimaryFooterBtn();
   const shareReady = await waitForEnabledLocator(shareBtn, 120_000, signal);
   if (!shareReady) {
     await safeBringToFront(page);
     onProgress({
-      step: 'Tombol Share Facebook belum siap',
+      step: `Tombol Share ${targetLabel} belum siap`,
       progressPercent: 85,
-      log: 'Tombol Share / Bagikan Facebook Reels belum aktif. Tab dibiarkan terbuka untuk review manual.',
+      log: `Tombol Share / Bagikan ${targetLabel} belum aktif. Tab dibiarkan terbuka untuk review manual.`,
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary:
-        'Tombol Share Facebook Reels belum siap diklik otomatis. Video dan deskripsi tetap terbuka di tab browser.',
+      summary: `Tombol Share ${targetLabel} belum siap diklik otomatis. Video dan deskripsi tetap terbuka di tab browser.`,
     };
   }
 
   onProgress({
-    step: 'Mempublikasikan Facebook Reels',
+    step: `Mempublikasikan ${targetLabel}`,
     progressPercent: 92,
-    log: 'Menekan tombol Share dan menunggu mutasi GraphQL Meta Business Suite.',
+    log: `Menekan tombol Share untuk ${targetLabel} dan menunggu konfirmasi GraphQL Meta Business Suite.`,
     level: 'info',
   });
 
@@ -1303,8 +1448,10 @@ export async function publishFacebookViaBrowser(
     (resp) => {
       if (!resp.url().includes('/api/graphql')) return false;
       const postData = resp.request().postData() ?? '';
-      return postData.includes(
-        'fb_api_req_friendly_name=BusinessComposerStoryCreationMutation'
+      return (
+        postData.includes('BusinessComposerStoryCreationMutation') ||
+        postData.includes('ComposerStoryCreation') ||
+        postData.includes('CreateReel')
       );
     },
     { timeout: 90_000 }
@@ -1337,16 +1484,16 @@ export async function publishFacebookViaBrowser(
   }
 
   onProgress({
-    step: 'Terpublikasi di Facebook Reels',
+    step: `Terpublikasi di ${targetLabel}`,
     progressPercent: 100,
-    log: 'Facebook Reels berhasil dipublikasikan via Meta Business Suite.',
+    log: `${targetLabel} berhasil dipublikasikan via Meta Business Suite.`,
     level: 'success',
   });
 
   return {
     status: 'completed',
     publishedUrl: null,
-    summary: 'Berhasil publish Facebook Reels via Meta Business Suite.',
+    summary: `Berhasil publish ${targetLabel} via Meta Business Suite.`,
   };
 }
 
@@ -1931,7 +2078,8 @@ export async function publishTikTokViaBrowser(
 export async function publishViaBrowser(
   params: BrowserPublishParams
 ): Promise<BrowserPublishResult> {
-  const { platform, item, mode, signal, onProgress, workspace } = params;
+  const { platform, item, mode, signal, onProgress, workspace, metaTargets } =
+    params;
   throwIfAborted(signal);
 
   const resolvedVideo = resolveUploadVideoForItem(item, workspace);
@@ -1978,25 +2126,31 @@ export async function publishViaBrowser(
         onProgress
       );
     }
-    if (platform === 'ig_reels') {
-      return await publishInstagramViaBrowser(
+    if (platform === 'ig_reels' || platform === 'fb_reels') {
+      const resolvedMetaTargets: MetaBusinessTargets = metaTargets ?? {
+        facebook: platform === 'fb_reels',
+        instagram: platform === 'ig_reels',
+      };
+      return await publishMetaBusinessSuiteViaBrowser(
         page,
         item,
         videoPath,
         videoFileName,
         mode,
         signal,
-        onProgress
+        onProgress,
+        resolvedMetaTargets
       );
     }
-    return await publishFacebookViaBrowser(
+    return await publishMetaBusinessSuiteViaBrowser(
       page,
       item,
       videoPath,
       videoFileName,
       mode,
       signal,
-      onProgress
+      onProgress,
+      { facebook: true, instagram: false }
     );
   } catch (error) {
     if (

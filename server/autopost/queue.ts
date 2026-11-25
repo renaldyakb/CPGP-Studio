@@ -86,6 +86,7 @@ export class AutoPostQueueManager {
   private readonly jobs: AutoPostJob[] = [];
   private readonly controllers = new Map<string, AbortController>();
   private readonly pendingIgContainers = new Map<string, string>();
+  private readonly combinedMetaPartners = new Map<string, string>();
   private readonly jobWorkspaces = new Map<string, CapturedWorkspaceContext>();
   private readonly listeners = new Set<AutoPostQueueListener>();
   private readonly lastEmitAt = new Map<string, number>();
@@ -361,8 +362,257 @@ export class AutoPostQueueManager {
     const batchId = `apb-${randomUUID().slice(0, 10)}`;
     const createdJobs: AutoPostJob[] = [];
 
-    for (const platform of input.platforms) {
-      const engine = this.resolveEngineForPlatform(platform, activeWorkspace.id);
+    const uniquePlatforms: PlatformKey[] = [];
+    for (const p of input.platforms) {
+      if (!uniquePlatforms.includes(p)) {
+        uniquePlatforms.push(p);
+      }
+    }
+
+    const resolvedEngines = new Map<PlatformKey, AutoPostEngine>();
+    for (const p of uniquePlatforms) {
+      resolvedEngines.set(p, this.resolveEngineForPlatform(p, activeWorkspace.id));
+    }
+
+    const combineMetaViaBrowser =
+      uniquePlatforms.includes('fb_reels') &&
+      uniquePlatforms.includes('ig_reels') &&
+      resolvedEngines.get('fb_reels') === 'browser' &&
+      resolvedEngines.get('ig_reels') === 'browser';
+
+    let combinedMetaScheduled = false;
+
+    for (const platform of uniquePlatforms) {
+      if (
+        combineMetaViaBrowser &&
+        (platform === 'fb_reels' || platform === 'ig_reels')
+      ) {
+        if (combinedMetaScheduled) {
+          continue;
+        }
+        combinedMetaScheduled = true;
+
+        const nowIso = new Date().toISOString();
+        const fbJobId = `ap-${randomUUID().slice(0, 12)}`;
+        const igJobId = `ap-${randomUUID().slice(0, 12)}`;
+
+        const makeCombinedJob = (
+          jobId: string,
+          targetPlatform: 'fb_reels' | 'ig_reels'
+        ): AutoPostJob => ({
+          jobId,
+          batchId,
+          workspaceId: activeWorkspace.id,
+          itemId: input.item.id,
+          folderCode: input.item.folderCode,
+          platform: targetPlatform,
+          engine: 'browser',
+          mode: resolvedMode,
+          status: 'queued',
+          step: 'Menunggu antrean Meta Business Suite (FB & IG)',
+          progressPercent: 0,
+          publishedUrl: null,
+          error: null,
+          logs: [
+            {
+              timestamp: nowIso,
+              message: `Masuk antrean gabungan Meta Business Suite (Facebook & Instagram sekaligus, mode: ${resolvedMode}).`,
+              level: 'info',
+            },
+          ],
+          createdAt: nowIso,
+          startedAt: null,
+          finishedAt: null,
+        });
+
+        const fbJob = makeCombinedJob(fbJobId, 'fb_reels');
+        const igJob = makeCombinedJob(igJobId, 'ig_reels');
+        const metaJobs: AutoPostJob[] = [fbJob, igJob];
+
+        const combinedController = new AbortController();
+        this.controllers.set(fbJobId, combinedController);
+        this.controllers.set(igJobId, combinedController);
+        this.jobWorkspaces.set(fbJobId, capturedContext);
+        this.jobWorkspaces.set(igJobId, capturedContext);
+        this.combinedMetaPartners.set(fbJobId, igJobId);
+        this.combinedMetaPartners.set(igJobId, fbJobId);
+
+        for (const metaJob of metaJobs) {
+          this.jobs.unshift(metaJob);
+          this.trimOldJobs();
+          createdJobs.push(cloneJob(metaJob));
+          this.emitJobUpdate(metaJob, true);
+        }
+
+        void this.queue
+          .add(
+            async ({ signal }) => {
+              if (
+                combinedController.signal.aborted ||
+                signal?.aborted ||
+                metaJobs.every((j) => j.status === 'cancelled')
+              ) {
+                const finishedAt = new Date().toISOString();
+                for (const metaJob of metaJobs) {
+                  metaJob.status = 'cancelled';
+                  metaJob.step = 'Dibatalkan';
+                  metaJob.finishedAt = metaJob.finishedAt ?? finishedAt;
+                  this.emitJobUpdate(metaJob, true);
+                }
+                return;
+              }
+
+              const startedAt = new Date().toISOString();
+              for (const metaJob of metaJobs) {
+                metaJob.status = 'running';
+                metaJob.startedAt = startedAt;
+                metaJob.step = 'Memulai upload Meta Business Suite (FB & IG)';
+                metaJob.progressPercent = 2;
+                this.emitJobUpdate(metaJob, true);
+              }
+
+              const handleCombinedProgress = (update: {
+                step: string;
+                progressPercent: number;
+                log?: string;
+                level?: 'info' | 'success' | 'warning' | 'error';
+              }) => {
+                const clamped = Math.max(
+                  0,
+                  Math.min(100, Math.round(update.progressPercent))
+                );
+                const hasLog = Boolean(update.log);
+                for (const metaJob of metaJobs) {
+                  if (metaJob.status !== 'running') continue;
+                  metaJob.step = update.step;
+                  metaJob.progressPercent = clamped;
+                  if (update.log) {
+                    this.appendLog(metaJob, update.log, update.level ?? 'info');
+                  }
+                  this.emitJobUpdate(metaJob, hasLog || clamped >= 100);
+                }
+              };
+
+              try {
+                const result = await publishViaBrowser({
+                  platform: 'fb_reels',
+                  metaTargets: { facebook: true, instagram: true },
+                  item: input.item,
+                  mode: resolvedMode,
+                  signal: combinedController.signal,
+                  onProgress: handleCombinedProgress,
+                  workspace: capturedContext.workspace,
+                });
+
+                if (
+                  combinedController.signal.aborted ||
+                  metaJobs.some(
+                    (j) => (j.status as AutoPostJobStatus) === 'cancelled'
+                  )
+                ) {
+                  const finishedAt = new Date().toISOString();
+                  for (const metaJob of metaJobs) {
+                    metaJob.status = 'cancelled';
+                    metaJob.step = 'Dibatalkan';
+                    metaJob.finishedAt = finishedAt;
+                    this.emitJobUpdate(metaJob, true);
+                  }
+                  return;
+                }
+
+                const finishedAt = new Date().toISOString();
+                for (const metaJob of metaJobs) {
+                  metaJob.publishedUrl = result.publishedUrl ?? null;
+                  metaJob.finishedAt = finishedAt;
+                  metaJob.error = null;
+
+                  if (result.status === 'completed') {
+                    metaJob.status = 'completed';
+                    metaJob.progressPercent = 100;
+                    metaJob.step = 'Selesai dipublikasikan (FB & IG)';
+                    this.appendLog(metaJob, result.summary, 'success');
+                    this.emitJobUpdate(metaJob, true);
+                    this.syncPlannerAfterCompletion(
+                      input.item.id,
+                      metaJob.platform,
+                      result.publishedUrl,
+                      metaJob.jobId
+                    );
+                  } else {
+                    metaJob.status = 'awaiting_review';
+                    metaJob.progressPercent = Math.max(
+                      metaJob.progressPercent,
+                      85
+                    );
+                    metaJob.step = 'Menunggu review manual (FB & IG)';
+                    this.appendLog(metaJob, result.summary, 'warning');
+                    this.emitJobUpdate(metaJob, true);
+                    this.syncPlannerAfterReview(
+                      input.item.id,
+                      metaJob.platform,
+                      result.publishedUrl,
+                      metaJob.jobId
+                    );
+                  }
+                }
+              } catch (err) {
+                const isAbort =
+                  combinedController.signal.aborted ||
+                  (err instanceof Error && err.name === 'AbortError');
+                const finishedAt = new Date().toISOString();
+
+                for (const metaJob of metaJobs) {
+                  if (isAbort) {
+                    metaJob.status = 'cancelled';
+                    metaJob.step = 'Dibatalkan';
+                    metaJob.error = null;
+                    this.appendLog(
+                      metaJob,
+                      'Job dibatalkan oleh pengguna.',
+                      'warning'
+                    );
+                  } else {
+                    const message =
+                      err instanceof Error ? err.message : String(err);
+                    metaJob.status = 'failed';
+                    metaJob.step = 'Gagal';
+                    metaJob.error = message;
+                    this.appendLog(metaJob, `Gagal: ${message}`, 'error');
+                  }
+                  metaJob.finishedAt = finishedAt;
+                  this.emitJobUpdate(metaJob, true);
+                }
+              } finally {
+                this.controllers.delete(fbJobId);
+                this.controllers.delete(igJobId);
+              }
+            },
+            { signal: combinedController.signal }
+          )
+          .catch(() => {
+            this.controllers.delete(fbJobId);
+            this.controllers.delete(igJobId);
+            const finishedAt = new Date().toISOString();
+            for (const metaJob of metaJobs) {
+              if (
+                metaJob.status !== 'completed' &&
+                metaJob.status !== 'awaiting_review' &&
+                metaJob.status !== 'failed'
+              ) {
+                metaJob.status = 'cancelled';
+                metaJob.step = 'Dibatalkan';
+                metaJob.finishedAt = metaJob.finishedAt ?? finishedAt;
+                this.emitJobUpdate(metaJob, true);
+              }
+            }
+          });
+
+        continue;
+      }
+
+      const engine =
+        resolvedEngines.get(platform) ??
+        this.resolveEngineForPlatform(platform, activeWorkspace.id);
       const jobId = `ap-${randomUUID().slice(0, 12)}`;
       const nowIso = new Date().toISOString();
 
@@ -610,6 +860,29 @@ export class AutoPostQueueManager {
       this.controllers.delete(jobId);
     }
 
+    const partnerId = this.combinedMetaPartners.get(jobId);
+    if (partnerId) {
+      const partnerJob = this.jobs.find((entry) => entry.jobId === partnerId);
+      this.controllers.delete(partnerId);
+      if (
+        partnerJob &&
+        partnerJob.status !== 'completed' &&
+        partnerJob.status !== 'failed' &&
+        partnerJob.status !== 'cancelled'
+      ) {
+        partnerJob.status = 'cancelled';
+        partnerJob.step = 'Dibatalkan';
+        partnerJob.finishedAt = new Date().toISOString();
+        partnerJob.error = null;
+        this.appendLog(
+          partnerJob,
+          'Job gabungan Meta Business Suite dibatalkan oleh pengguna.',
+          'warning'
+        );
+        this.emitJobUpdate(partnerJob, true);
+      }
+    }
+
     this.emitJobUpdate(job, true);
     return cloneJob(job);
   }
@@ -702,19 +975,46 @@ export class AutoPostQueueManager {
       patch.publishedUrl = resolvedUrl;
     }
 
-    const updated = updateItemPlatformState(
+    let updated = updateItemPlatformState(
       job.itemId,
       job.platform,
       patch,
       wsCtx.plannerFile,
       wsCtx.workspace
     );
+    this.emitJobUpdate(job, true);
+
+    // If this job ran as a combined FB+IG Meta Business Suite upload, confirm its partner too
+    const partnerId = this.combinedMetaPartners.get(jobId);
+    if (partnerId) {
+      const partnerJob = this.jobs.find((entry) => entry.jobId === partnerId);
+      if (partnerJob && partnerJob.status === 'awaiting_review') {
+        partnerJob.status = 'completed';
+        partnerJob.progressPercent = 100;
+        partnerJob.step = 'Dikonfirmasi tayang (FB & IG)';
+        partnerJob.error = null;
+        partnerJob.finishedAt = new Date().toISOString();
+        this.appendLog(
+          partnerJob,
+          'Dikonfirmasi tayang bersama sesi Meta Business Suite.',
+          'success'
+        );
+        updated = updateItemPlatformState(
+          partnerJob.itemId,
+          partnerJob.platform,
+          { status: 'published' },
+          wsCtx.plannerFile,
+          wsCtx.workspace
+        );
+        this.emitJobUpdate(partnerJob, true);
+      }
+    }
+
     this.onPlannerUpdated?.(
       `autopost-confirmed:${job.itemId}:${job.platform}`,
       updated.db,
       wsCtx.workspaceId
     );
-    this.emitJobUpdate(job, true);
 
     return {
       job: cloneJob(job),

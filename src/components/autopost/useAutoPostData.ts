@@ -515,8 +515,14 @@ export function useAutoPostData(
 
   const checkStudioSessions = useCallback(
     async (platforms?: PlatformKey[]) => {
-      const targetBusyKey =
-        platforms && platforms.length === 1
+      const isMetaPair =
+        platforms &&
+        platforms.length === 2 &&
+        platforms.includes('fb_reels') &&
+        platforms.includes('ig_reels');
+      const targetBusyKey = isMetaPair
+        ? 'check-sessions:meta'
+        : platforms && platforms.length === 1
           ? `check-sessions:${platforms[0]}`
           : 'check-sessions';
       setBusyKey(targetBusyKey);
@@ -535,20 +541,42 @@ export function useAutoPostData(
         if (res.capabilities) setCapabilities(res.capabilities);
 
         const incoming = res.sessions ?? {};
+        const targetList =
+          platforms && platforms.length > 0
+            ? platforms
+            : (['yt_shorts', 'tiktok', 'ig_reels', 'fb_reels'] as PlatformKey[]);
+
         setSessionChecks((prev) => {
-          const next = { ...prev, ...incoming };
+          const next = { ...prev };
+          for (const key of targetList) {
+            if (incoming[key]) {
+              next[key] = incoming[key];
+            }
+          }
           persistSessionChecks(next);
           return next;
         });
 
-        const checkedEntries = Object.values(incoming).filter(
-          (entry): entry is PlatformSessionCheckResult => Boolean(entry)
-        );
+        const checkedEntries = targetList
+          .map((key) => incoming[key])
+          .filter((entry): entry is PlatformSessionCheckResult =>
+            Boolean(entry)
+          );
         const loggedInCount = checkedEntries.filter(
           (entry) => entry.state === 'logged_in'
         ).length;
 
-        if (checkedEntries.length > 0) {
+        if (isMetaPair) {
+          const metaOk = checkedEntries.some(
+            (entry) => entry.state === 'logged_in'
+          );
+          onToast?.(
+            metaOk
+              ? 'Sesi Meta Business Suite (FB & IG) aktif.'
+              : 'Sesi Meta Business Suite (FB & IG) belum login.',
+            metaOk ? 'success' : 'info'
+          );
+        } else if (checkedEntries.length > 0) {
           onToast?.(
             `Cek sesi selesai: ${loggedInCount} dari ${checkedEntries.length} platform sudah login.`,
             loggedInCount === checkedEntries.length ? 'success' : 'info'

@@ -1,5 +1,6 @@
 import { ExternalLink, Monitor, Play, Zap } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import {
   Card,
   CardContent,
@@ -93,7 +94,9 @@ export function PlatformStatusList({ item, data }: PlatformStatusListProps) {
               ? key === 'yt_shorts'
                 ? 'YouTube API'
                 : 'Meta Graph API'
-              : 'Chrome / Edge Lokal';
+              : key === 'fb_reels' || key === 'ig_reels'
+                ? 'Meta Business Suite'
+                : 'Chrome / Edge Lokal';
             const status = platformStatusMeta(platformState.status);
             const hasWmFinal = item.autoMetadata.readiness.hasWmFinal;
             const isBusy = data.busyKey === `trigger:${item.id}`;
@@ -173,10 +176,43 @@ export function PlatformStatusList({ item, data }: PlatformStatusListProps) {
         )}
       </CardContent>
 
-      <CardFooter className="border-t border-border px-4 py-2">
+      <CardFooter className="flex items-center justify-between gap-2 border-t border-border px-4 py-2">
         <span className="text-[11px] font-light text-muted-foreground/75">
           {publishedCount}/4 selesai
         </span>
+        {item ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={
+                    !item.autoMetadata.readiness.hasWmFinal ||
+                    data.busyKey === `trigger:${item.id}`
+                  }
+                  onClick={() =>
+                    void data.triggerPost(
+                      item.id,
+                      ['fb_reels', 'ig_reels'],
+                      data.settings.defaultMode
+                    )
+                  }
+                />
+              }
+            >
+              <span className="inline-flex items-center gap-1">
+                <PlatformIcon platform="fb_reels" size={12} />
+                <PlatformIcon platform="ig_reels" size={12} />
+                <span>FB + IG</span>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              Upload Facebook &amp; Instagram sekaligus via Meta Business Suite
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
       </CardFooter>
     </Card>
   );
