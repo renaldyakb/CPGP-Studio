@@ -50,6 +50,7 @@ export interface EnqueueAutoPostBatchInput {
   platforms: PlatformKey[];
   mode?: AutoPostMode;
   youtubePrivacy?: 'public' | 'unlisted' | 'private';
+  scheduledAt?: string | null;
 }
 
 export interface AutoPostQueueOptions {
@@ -72,6 +73,16 @@ interface CapturedWorkspaceContext {
   defaultYear: number;
   plannerFile: string;
   workspace: WorkspaceMetadata;
+}
+
+function formatScheduledTimeForPlanner(scheduledAt?: string | null): string {
+  if (!scheduledAt || !scheduledAt.trim()) return '';
+  const cleaned = scheduledAt.trim();
+  const match = cleaned.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2})/);
+  if (match) {
+    return `${match[1]} ${match[2]}`;
+  }
+  return cleaned;
 }
 
 function cloneJob(job: AutoPostJob): AutoPostJob {
@@ -257,15 +268,24 @@ export class AutoPostQueueManager {
     itemId: string,
     platform: PlatformKey,
     publishedUrl?: string | null,
-    jobId?: string
+    jobId?: string,
+    scheduledAt?: string | null
   ): void {
     try {
       const wsCtx = jobId
         ? this.resolveWorkspaceContextForJob(jobId)
         : this.resolveWorkspaceContextForJob('');
-      const patch: { status: 'published'; publishedUrl?: string } = {
-        status: 'published',
+      const isScheduled = Boolean(scheduledAt && scheduledAt.trim());
+      const patch: {
+        status: 'published' | 'scheduled';
+        publishedUrl?: string;
+        scheduledTime?: string;
+      } = {
+        status: isScheduled ? 'scheduled' : 'published',
       };
+      if (isScheduled) {
+        patch.scheduledTime = formatScheduledTimeForPlanner(scheduledAt);
+      }
       if (publishedUrl && publishedUrl.trim()) {
         patch.publishedUrl = publishedUrl.trim();
       }
@@ -277,7 +297,7 @@ export class AutoPostQueueManager {
         wsCtx.workspace
       );
       this.onPlannerUpdated?.(
-        `autopost-published:${itemId}:${platform}`,
+        `autopost-${isScheduled ? 'scheduled' : 'published'}:${itemId}:${platform}`,
         updated.db,
         wsCtx.workspaceId
       );
@@ -290,7 +310,8 @@ export class AutoPostQueueManager {
     itemId: string,
     platform: PlatformKey,
     publishedUrl?: string | null,
-    jobId?: string
+    jobId?: string,
+    scheduledAt?: string | null
   ): void {
     try {
       const wsCtx = jobId
@@ -307,9 +328,16 @@ export class AutoPostQueueManager {
         currentItem?.userProperties.platforms[platform]?.status ?? 'not_started';
 
       if (currentStatus === 'not_started') {
-        const patch: { status: 'uploaded_draft'; publishedUrl?: string } = {
+        const patch: {
+          status: 'uploaded_draft';
+          publishedUrl?: string;
+          scheduledTime?: string;
+        } = {
           status: 'uploaded_draft',
         };
+        if (scheduledAt && scheduledAt.trim()) {
+          patch.scheduledTime = formatScheduledTimeForPlanner(scheduledAt);
+        }
         if (publishedUrl && publishedUrl.trim()) {
           patch.publishedUrl = publishedUrl.trim();
         }
@@ -359,6 +387,13 @@ export class AutoPostQueueManager {
 
     const config = getInternalAutoPostConfig(activeWorkspace.id);
     const resolvedMode: AutoPostMode = input.mode ?? config.defaultMode;
+    const resolvedScheduledAt: string | null =
+      typeof input.scheduledAt === 'string' && input.scheduledAt.trim()
+        ? input.scheduledAt.trim()
+        : null;
+    const scheduleTag = resolvedScheduledAt
+      ? `, jadwal: ${formatScheduledTimeForPlanner(resolvedScheduledAt)}`
+      : '';
     const batchId = `apb-${randomUUID().slice(0, 10)}`;
     const createdJobs: AutoPostJob[] = [];
 
@@ -408,15 +443,18 @@ export class AutoPostQueueManager {
           platform: targetPlatform,
           engine: 'browser',
           mode: resolvedMode,
+          scheduledAt: resolvedScheduledAt,
           status: 'queued',
-          step: 'Menunggu antrean Meta Business Suite (FB & IG)',
+          step: resolvedScheduledAt
+            ? 'Menunggu antrean jadwal Meta Business Suite (FB & IG)'
+            : 'Menunggu antrean Meta Business Suite (FB & IG)',
           progressPercent: 0,
           publishedUrl: null,
           error: null,
           logs: [
             {
               timestamp: nowIso,
-              message: `Masuk antrean gabungan Meta Business Suite (Facebook & Instagram sekaligus, mode: ${resolvedMode}).`,
+              message: `Masuk antrean gabungan Meta Business Suite (Facebook & Instagram sekaligus, mode: ${resolvedMode}${scheduleTag}).`,
               level: 'info',
             },
           ],
@@ -499,6 +537,7 @@ export class AutoPostQueueManager {
                   metaTargets: { facebook: true, instagram: true },
                   item: input.item,
                   mode: resolvedMode,
+                  scheduledAt: resolvedScheduledAt,
                   signal: combinedController.signal,
                   onProgress: handleCombinedProgress,
                   workspace: capturedContext.workspace,
@@ -529,14 +568,17 @@ export class AutoPostQueueManager {
                   if (result.status === 'completed') {
                     metaJob.status = 'completed';
                     metaJob.progressPercent = 100;
-                    metaJob.step = 'Selesai dipublikasikan (FB & IG)';
+                    metaJob.step = resolvedScheduledAt
+                      ? 'Terjadwal di Meta Business Suite (FB & IG)'
+                      : 'Selesai dipublikasikan (FB & IG)';
                     this.appendLog(metaJob, result.summary, 'success');
                     this.emitJobUpdate(metaJob, true);
                     this.syncPlannerAfterCompletion(
                       input.item.id,
                       metaJob.platform,
                       result.publishedUrl,
-                      metaJob.jobId
+                      metaJob.jobId,
+                      resolvedScheduledAt
                     );
                   } else {
                     metaJob.status = 'awaiting_review';
@@ -551,7 +593,8 @@ export class AutoPostQueueManager {
                       input.item.id,
                       metaJob.platform,
                       result.publishedUrl,
-                      metaJob.jobId
+                      metaJob.jobId,
+                      resolvedScheduledAt
                     );
                   }
                 }
@@ -625,15 +668,18 @@ export class AutoPostQueueManager {
         platform,
         engine,
         mode: resolvedMode,
+        scheduledAt: resolvedScheduledAt,
         status: 'queued',
-        step: 'Menunggu antrean',
+        step: resolvedScheduledAt
+          ? 'Menunggu antrean jadwal'
+          : 'Menunggu antrean',
         progressPercent: 0,
         publishedUrl: null,
         error: null,
         logs: [
           {
             timestamp: nowIso,
-            message: `Masuk antrean Auto-Post (${platform}, engine: ${engine}, mode: ${resolvedMode}).`,
+            message: `Masuk antrean Auto-Post (${platform}, engine: ${engine}, mode: ${resolvedMode}${scheduleTag}).`,
             level: 'info',
           },
         ],
@@ -704,6 +750,7 @@ export class AutoPostQueueManager {
                   item: input.item,
                   mode: resolvedMode,
                   privacy: input.youtubePrivacy,
+                  scheduledAt: resolvedScheduledAt,
                   signal: controller.signal,
                   onProgress: handleProgress,
                   workspace: capturedContext.workspace,
@@ -735,6 +782,7 @@ export class AutoPostQueueManager {
                   platform,
                   item: input.item,
                   mode: resolvedMode,
+                  scheduledAt: resolvedScheduledAt,
                   signal: controller.signal,
                   onProgress: handleProgress,
                   workspace: capturedContext.workspace,
@@ -761,14 +809,17 @@ export class AutoPostQueueManager {
                 this.pendingIgContainers.delete(jobId);
                 job.status = 'completed';
                 job.progressPercent = 100;
-                job.step = 'Selesai dipublikasikan';
+                job.step = resolvedScheduledAt
+                  ? 'Selesai dijadwalkan'
+                  : 'Selesai dipublikasikan';
                 this.appendLog(job, result.summary, 'success');
                 this.emitJobUpdate(job, true);
                 this.syncPlannerAfterCompletion(
                   input.item.id,
                   platform,
                   result.publishedUrl,
-                  jobId
+                  jobId,
+                  resolvedScheduledAt
                 );
               } else {
                 if (result.pendingIgContainerId) {
@@ -786,7 +837,8 @@ export class AutoPostQueueManager {
                   input.item.id,
                   platform,
                   result.publishedUrl,
-                  jobId
+                  jobId,
+                  resolvedScheduledAt
                 );
               }
             } catch (err) {
@@ -941,11 +993,14 @@ export class AutoPostQueueManager {
       }
     }
 
+    const isScheduledConfirm = Boolean(job.scheduledAt && job.scheduledAt.trim());
     job.status = 'completed';
     job.progressPercent = 100;
     job.step = publishedViaIgContainer
       ? 'Selesai dipublikasikan via Meta API'
-      : 'Dikonfirmasi tayang';
+      : isScheduledConfirm
+        ? 'Dikonfirmasi terjadwal'
+        : 'Dikonfirmasi tayang';
     job.publishedUrl = resolvedUrl ?? null;
     job.error = null;
     job.finishedAt = new Date().toISOString();
@@ -958,6 +1013,12 @@ export class AutoPostQueueManager {
           : `Instagram Reels berhasil diterbitkan via Meta API (Media ID: ${publishedIgMediaId ?? '-'}).`,
         'success'
       );
+    } else if (isScheduledConfirm) {
+      this.appendLog(
+        job,
+        `Dikonfirmasi terjadwal (${formatScheduledTimeForPlanner(job.scheduledAt)}) oleh pengguna.`,
+        'success'
+      );
     } else {
       this.appendLog(
         job,
@@ -968,9 +1029,16 @@ export class AutoPostQueueManager {
       );
     }
 
-    const patch: { status: 'published'; publishedUrl?: string } = {
-      status: 'published',
+    const patch: {
+      status: 'published' | 'scheduled';
+      publishedUrl?: string;
+      scheduledTime?: string;
+    } = {
+      status: isScheduledConfirm ? 'scheduled' : 'published',
     };
+    if (isScheduledConfirm) {
+      patch.scheduledTime = formatScheduledTimeForPlanner(job.scheduledAt);
+    }
     if (resolvedUrl) {
       patch.publishedUrl = resolvedUrl;
     }
@@ -991,18 +1059,27 @@ export class AutoPostQueueManager {
       if (partnerJob && partnerJob.status === 'awaiting_review') {
         partnerJob.status = 'completed';
         partnerJob.progressPercent = 100;
-        partnerJob.step = 'Dikonfirmasi tayang (FB & IG)';
+        partnerJob.step = isScheduledConfirm
+          ? 'Dikonfirmasi terjadwal (FB & IG)'
+          : 'Dikonfirmasi tayang (FB & IG)';
         partnerJob.error = null;
         partnerJob.finishedAt = new Date().toISOString();
         this.appendLog(
           partnerJob,
-          'Dikonfirmasi tayang bersama sesi Meta Business Suite.',
+          isScheduledConfirm
+            ? `Dikonfirmasi terjadwal (${formatScheduledTimeForPlanner(job.scheduledAt)}) bersama sesi Meta Business Suite.`
+            : 'Dikonfirmasi tayang bersama sesi Meta Business Suite.',
           'success'
         );
         updated = updateItemPlatformState(
           partnerJob.itemId,
           partnerJob.platform,
-          { status: 'published' },
+          isScheduledConfirm
+            ? {
+                status: 'scheduled',
+                scheduledTime: formatScheduledTimeForPlanner(job.scheduledAt),
+              }
+            : { status: 'published' },
           wsCtx.plannerFile,
           wsCtx.workspace
         );

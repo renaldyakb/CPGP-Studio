@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
+  CalendarClock,
   Check,
   CheckCheck,
   Clock,
@@ -24,7 +25,11 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import type { AutoPostMode } from '@/types/autopost';
-import type { PlatformKey, WorkflowStatus } from '@/types/planner';
+import type {
+  ContentPlannerItem,
+  PlatformKey,
+  WorkflowStatus,
+} from '@/types/planner';
 import type { AutoPostPageProps } from '../pageProps';
 import { useDerivedStats, pickNextContent } from '../useAutoPostData';
 import { ActivityFeed } from '../parts/ActivityFeed';
@@ -53,6 +58,31 @@ const WORKFLOW_SHORT_LABEL: Record<WorkflowStatus, string> = {
 
 function workflowShortLabel(status: WorkflowStatus): string {
   return WORKFLOW_SHORT_LABEL[status] ?? status;
+}
+
+function deriveDefaultScheduleForItem(item: ContentPlannerItem | null): {
+  date: string;
+  time: string;
+} {
+  if (!item) {
+    const fallback = new Date(Date.now() + 60 * 60 * 1000);
+    const yyyy = fallback.getFullYear();
+    const mm = String(fallback.getMonth() + 1).padStart(2, '0');
+    const dd = String(fallback.getDate()).padStart(2, '0');
+    return { date: `${yyyy}-${mm}-${dd}`, time: '19:30' };
+  }
+
+  const date = item.schedule.isoDate || '';
+  const recMatch = (item.schedule.recommendedTimeWib || '').match(
+    /(\d{1,2})[:.](\d{2})/
+  );
+  if (recMatch) {
+    const hh = String(Number(recMatch[1])).padStart(2, '0');
+    const mm = String(Number(recMatch[2])).padStart(2, '0');
+    return { date, time: `${hh}:${mm}` };
+  }
+  const time = item.schedule.slotCode === '01' ? '11:30' : '19:30';
+  return { date, time };
 }
 
 export function DashboardPage({ ctx }: AutoPostPageProps) {
@@ -99,6 +129,31 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
   const activeItem =
     ctx.items.find((item) => item.id === selectedId) ?? selectedItem;
 
+  const [scheduleEnabled, setScheduleEnabled] = useState<boolean>(false);
+  const [scheduleDate, setScheduleDate] = useState<string>(
+    () => deriveDefaultScheduleForItem(activeItem).date
+  );
+  const [scheduleTime, setScheduleTime] = useState<string>(
+    () => deriveDefaultScheduleForItem(activeItem).time
+  );
+
+  useEffect(() => {
+    const defaults = deriveDefaultScheduleForItem(activeItem);
+    setScheduleDate(defaults.date);
+    setScheduleTime(defaults.time);
+  }, [activeItem?.id]);
+
+  const activeScheduledAt = useMemo(() => {
+    if (!scheduleEnabled || !scheduleDate || !scheduleTime) return null;
+    return `${scheduleDate}T${scheduleTime}`;
+  }, [scheduleEnabled, scheduleDate, scheduleTime]);
+
+  const handleResetScheduleToSlot = () => {
+    const defaults = deriveDefaultScheduleForItem(activeItem);
+    setScheduleDate(defaults.date);
+    setScheduleTime(defaults.time);
+  };
+
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -136,6 +191,13 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
             selectedId={activeItem?.id ?? ''}
             mode={mode}
             onModeChange={handleModeChange}
+            scheduleEnabled={scheduleEnabled}
+            scheduleDate={scheduleDate}
+            scheduleTime={scheduleTime}
+            onScheduleEnabledChange={setScheduleEnabled}
+            onScheduleDateChange={setScheduleDate}
+            onScheduleTimeChange={setScheduleTime}
+            onResetScheduleToSlot={handleResetScheduleToSlot}
             onSelectChange={setSelectedId}
             onEditCaption={ctx.onEditCaption}
             onOpenWatermark={ctx.onOpenWatermark}
@@ -143,7 +205,12 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
           />
         </div>
         <div className="xl:col-span-5">
-          <PlatformStatusList item={activeItem} data={ctx.data} mode={mode} />
+          <PlatformStatusList
+            item={activeItem}
+            data={ctx.data}
+            mode={mode}
+            scheduledAt={activeScheduledAt}
+          />
         </div>
       </div>
 
@@ -282,24 +349,45 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
                         <IconActionButton
-                          icon={mode === 'publish' ? Send : Play}
+                          icon={
+                            scheduleEnabled
+                              ? CalendarClock
+                              : mode === 'publish'
+                                ? Send
+                                : Play
+                          }
                           label={
-                            mode === 'publish'
-                              ? 'Langsung publish konten ini'
-                              : 'Tinjau auto-post konten ini'
+                            scheduleEnabled
+                              ? mode === 'publish'
+                                ? 'Langsung jadwalkan konten ini'
+                                : 'Tinjau jadwal konten ini'
+                              : mode === 'publish'
+                                ? 'Langsung publish konten ini'
+                                : 'Tinjau auto-post konten ini'
                           }
                           disabled={
                             pendingKeys.length === 0 ||
                             !hasWmFinal ||
                             isTriggering
                           }
-                          onClick={() =>
+                          onClick={() => {
+                            const rowScheduledAt = scheduleEnabled
+                              ? item.id === activeItem?.id
+                                ? activeScheduledAt
+                                : (() => {
+                                    const d = deriveDefaultScheduleForItem(item);
+                                    return d.date && d.time
+                                      ? `${d.date}T${d.time}`
+                                      : null;
+                                  })()
+                              : null;
                             void ctx.data.triggerPost(
                               item.id,
                               pendingKeys,
-                              mode
-                            )
-                          }
+                              mode,
+                              rowScheduledAt
+                            );
+                          }}
                         />
                         <IconActionButton
                           icon={ExternalLink}

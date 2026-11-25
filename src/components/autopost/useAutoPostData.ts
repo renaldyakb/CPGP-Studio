@@ -200,7 +200,8 @@ export interface UseAutoPostDataResult {
   triggerPost: (
     itemId: string,
     platforms: PlatformKey[],
-    mode: AutoPostMode
+    mode: AutoPostMode,
+    scheduledAt?: string | null
   ) => Promise<boolean>;
   cancelJob: (jobId: string) => Promise<void>;
   confirmJob: (jobId: string, publishedUrl?: string) => Promise<void>;
@@ -374,16 +375,26 @@ export function useAutoPostData(
     async (
       itemId: string,
       platforms: PlatformKey[],
-      mode: AutoPostMode
+      mode: AutoPostMode,
+      scheduledAt?: string | null
     ): Promise<boolean> => {
       if (platforms.length === 0) return false;
       setBusyKey(`trigger:${itemId}`);
       try {
+        const payload: {
+          itemId: string;
+          platforms: PlatformKey[];
+          mode: AutoPostMode;
+          scheduledAt?: string;
+        } = { itemId, platforms, mode };
+        if (scheduledAt && scheduledAt.trim()) {
+          payload.scheduledAt = scheduledAt.trim();
+        }
         const res = await requestJson<{ jobs?: AutoPostJob[] }>(
           '/api/autopost/trigger',
           {
             method: 'POST',
-            body: JSON.stringify({ itemId, platforms, mode }),
+            body: JSON.stringify(payload),
           }
         );
         if (Array.isArray(res.jobs)) {
@@ -394,7 +405,9 @@ export function useAutoPostData(
           });
         }
         onToast?.(
-          `${platforms.length} proses Auto-Post dimasukkan ke antrean.`,
+          payload.scheduledAt
+            ? `${platforms.length} jadwal Auto-Post (${payload.scheduledAt.replace('T', ' ')}) dimasukkan ke antrean.`
+            : `${platforms.length} proses Auto-Post dimasukkan ke antrean.`,
           'success'
         );
         return true;

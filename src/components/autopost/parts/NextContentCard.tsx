@@ -1,8 +1,10 @@
 import {
+  CalendarClock,
   Droplets,
   Ellipsis,
   Eye,
   FilePenLine,
+  RotateCcw,
   Send,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -13,12 +15,14 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { DatePicker } from '@/components/ui/date-picker';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Input } from '@/components/ui/input';
 import {
   Select,
   SelectContent,
@@ -40,10 +44,31 @@ export interface NextContentCardProps {
   selectedId: string;
   mode: AutoPostMode;
   onModeChange: (mode: AutoPostMode) => void;
+  scheduleEnabled: boolean;
+  scheduleDate: string;
+  scheduleTime: string;
+  onScheduleEnabledChange: (enabled: boolean) => void;
+  onScheduleDateChange: (dateIso: string) => void;
+  onScheduleTimeChange: (timeHhMm: string) => void;
+  onResetScheduleToSlot: () => void;
   onSelectChange: (itemId: string) => void;
   onEditCaption: (item: ContentPlannerItem) => void;
   onOpenWatermark: (item: ContentPlannerItem) => void;
   onOpenContentDetail: (item: ContentPlannerItem) => void;
+}
+
+function parseIsoDateLocal(iso: string): Date | undefined {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return undefined;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isNaN(d.getTime()) ? undefined : d;
+}
+
+function toIsoDateLocal(date: Date): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 function formatItemOption(item: ContentPlannerItem): string {
@@ -65,6 +90,13 @@ export function NextContentCard({
   selectedId,
   mode,
   onModeChange,
+  scheduleEnabled,
+  scheduleDate,
+  scheduleTime,
+  onScheduleEnabledChange,
+  onScheduleDateChange,
+  onScheduleTimeChange,
+  onResetScheduleToSlot,
   onSelectChange,
   onEditCaption,
   onOpenWatermark,
@@ -106,11 +138,42 @@ export function NextContentCard({
   const coverUrl = assets.cover.mediaUrl;
   const hasWmFinal = readiness.hasWmFinal;
 
-  const pendingKeys: PlatformKey[] = PLATFORM_ORDER.filter(
-    (key) => selected.userProperties.platforms[key].status !== 'published'
-  );
+  const pendingKeys: PlatformKey[] = PLATFORM_ORDER.filter((key) => {
+    const st = selected.userProperties.platforms[key].status;
+    if (scheduleEnabled) {
+      return st !== 'published' && st !== 'scheduled';
+    }
+    return st !== 'published';
+  });
   const busy = data.busyKey === `trigger:${selected.id}`;
-  const canSend = hasWmFinal && pendingKeys.length > 0 && !busy;
+  const scheduledAtPayload =
+    scheduleEnabled && scheduleDate && scheduleTime
+      ? `${scheduleDate}T${scheduleTime}`
+      : null;
+
+  const scheduleDateObj = parseIsoDateLocal(scheduleDate);
+  const scheduleTimestampMs = (() => {
+    if (!scheduleEnabled || !scheduleDateObj || !scheduleTime) return null;
+    const tm = scheduleTime.match(/^(\d{2}):(\d{2})$/);
+    if (!tm) return null;
+    return new Date(
+      scheduleDateObj.getFullYear(),
+      scheduleDateObj.getMonth(),
+      scheduleDateObj.getDate(),
+      Number(tm[1]),
+      Number(tm[2])
+    ).getTime();
+  })();
+  const isScheduleTooSoon =
+    scheduleEnabled &&
+    scheduleTimestampMs !== null &&
+    scheduleTimestampMs < Date.now() + 20 * 60 * 1000;
+
+  const canSend =
+    hasWmFinal &&
+    pendingKeys.length > 0 &&
+    !busy &&
+    (!scheduleEnabled || Boolean(scheduledAtPayload));
 
   return (
     <Card>
@@ -199,42 +262,144 @@ export function NextContentCard({
           </div>
         </div>
 
-        <div
-          role="group"
-          aria-label="Mode Auto-Post"
-          className="inline-flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-0.5"
-        >
-          <Button
-            type="button"
-            size="xs"
-            variant={mode === 'review' ? 'default' : 'ghost'}
-            aria-pressed={mode === 'review'}
-            onClick={() => onModeChange('review')}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div
+            role="group"
+            aria-label="Waktu Tayang"
+            className="inline-flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-0.5"
           >
-            Tinjau
-          </Button>
-          <Button
-            type="button"
-            size="xs"
-            variant={mode === 'publish' ? 'default' : 'ghost'}
-            aria-pressed={mode === 'publish'}
-            onClick={() => onModeChange('publish')}
+            <Button
+              type="button"
+              size="xs"
+              variant={!scheduleEnabled ? 'default' : 'ghost'}
+              aria-pressed={!scheduleEnabled}
+              onClick={() => onScheduleEnabledChange(false)}
+            >
+              Sekarang
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant={scheduleEnabled ? 'default' : 'ghost'}
+              aria-pressed={scheduleEnabled}
+              onClick={() => onScheduleEnabledChange(true)}
+            >
+              Jadwalkan
+            </Button>
+          </div>
+
+          <div
+            role="group"
+            aria-label="Mode Auto-Post"
+            className="inline-flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-0.5"
           >
-            Langsung
-          </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant={mode === 'review' ? 'default' : 'ghost'}
+              aria-pressed={mode === 'review'}
+              onClick={() => onModeChange('review')}
+            >
+              Tinjau
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant={mode === 'publish' ? 'default' : 'ghost'}
+              aria-pressed={mode === 'publish'}
+              onClick={() => onModeChange('publish')}
+            >
+              Langsung
+            </Button>
+          </div>
         </div>
+
+        {scheduleEnabled ? (
+          <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-2.5">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_118px_auto]">
+              <DatePicker
+                value={scheduleDateObj}
+                onChange={(nextDate) => {
+                  if (nextDate) {
+                    onScheduleDateChange(toIsoDateLocal(nextDate));
+                  }
+                }}
+                placeholder="Pilih tanggal"
+                ariaLabel="Tanggal jadwal tayang"
+              />
+              <Input
+                type="time"
+                step={300}
+                value={scheduleTime}
+                aria-label="Jam jadwal tayang"
+                onChange={(e) => onScheduleTimeChange(e.target.value)}
+                className="min-h-9 font-mono text-xs"
+              />
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  size="xs"
+                  variant={scheduleTime === '11:30' ? 'default' : 'outline'}
+                  onClick={() => onScheduleTimeChange('11:30')}
+                >
+                  11:30
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant={scheduleTime === '19:30' ? 'default' : 'outline'}
+                  onClick={() => onScheduleTimeChange('19:30')}
+                >
+                  19:30
+                </Button>
+                <IconActionButton
+                  icon={RotateCcw}
+                  label="Reset ke jadwal slot folder"
+                  variant="outline"
+                  onClick={onResetScheduleToSlot}
+                />
+              </div>
+            </div>
+            {isScheduleTooSoon ? (
+              <p className="text-[11px] font-medium text-[#b45309] dark:text-[#fcd34d]">
+                Waktu terlalu dekat. Meta &amp; TikTok mensyaratkan minimal 20
+                menit dari sekarang.
+              </p>
+            ) : (
+              <p className="text-[11px] font-light text-muted-foreground/75">
+                Override waktu aktif untuk semua tombol platform. YouTube
+                kelipatan 15m, TikTok 5m, Meta presisi menit.
+              </p>
+            )}
+          </div>
+        ) : null}
 
         <Button
           variant="editorial"
           size="lg"
           className="w-full"
           disabled={!canSend}
-          onClick={() => void data.triggerPost(selected.id, pendingKeys, mode)}
+          onClick={() =>
+            void data.triggerPost(
+              selected.id,
+              pendingKeys,
+              mode,
+              scheduledAtPayload
+            )
+          }
         >
-          <Send className="size-3.5" aria-hidden="true" />
-          {mode === 'publish'
-            ? `Publish (${pendingKeys.length} Platform)`
-            : `Tinjau (${pendingKeys.length} Platform)`}
+          {scheduleEnabled ? (
+            <CalendarClock className="size-3.5" aria-hidden="true" />
+          ) : (
+            <Send className="size-3.5" aria-hidden="true" />
+          )}
+          {scheduleEnabled
+            ? mode === 'publish'
+              ? `Jadwalkan (${pendingKeys.length} Platform)`
+              : `Tinjau Jadwal (${pendingKeys.length} Platform)`
+            : mode === 'publish'
+              ? `Publish (${pendingKeys.length} Platform)`
+              : `Tinjau (${pendingKeys.length} Platform)`}
         </Button>
 
         <div className="flex items-center gap-1">

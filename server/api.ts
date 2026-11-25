@@ -2117,11 +2117,25 @@ export function createApiRouter(): Express {
           ? requestedPrivacy
           : undefined;
 
+      let scheduledAt: string | null = null;
+      if (typeof body.scheduledAt === 'string' && body.scheduledAt.trim()) {
+        const candidate = body.scheduledAt.trim();
+        const parsed = new Date(candidate);
+        if (Number.isNaN(parsed.getTime())) {
+          res.status(400).json({
+            error: `Format waktu jadwal tidak valid: ${candidate}`,
+          });
+          return;
+        }
+        scheduledAt = candidate;
+      }
+
       const jobs = autoPostQueue.enqueueBatch({
         item,
         platforms: validPlatforms,
         mode,
         youtubePrivacy,
+        scheduledAt,
       });
 
       res.json({

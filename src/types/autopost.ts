@@ -114,6 +114,7 @@ export interface AutoPostJob {
   platform: PlatformKey;
   engine: AutoPostEngine;
   mode: AutoPostMode;
+  scheduledAt?: string | null;
   status: AutoPostJobStatus;
   step: string;
   progressPercent: number;

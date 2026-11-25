@@ -4,6 +4,22 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.4.0] - 2026-11-25 (Native Social Media Scheduling Across TikTok, YouTube Shorts, Facebook & Instagram Reels + Web UI Date/Time Override)
+
+### Fitur Baru (Added)
+- **Penjadwalan Native Langsung di 4 Platform Sosial Media (`server/autopost/browserPublishers.ts`, `youtubeApi.ts`)**:
+  - **TikTok Studio (`configureTikTokSchedule`)**: Memilih radio **`Schedule`** di bawah `When to post`, otomatis menekan **`Allow`** pada modal konfirmasi `"Allow your video to be saved for scheduled posting?"`, mengatur tanggal via kalender `div.calendar-wrapper`, menyetel jam & menit (otomatis dibulatkan ke kelipatan 5 menit, memperbaiki bug format menit `social-auto-upload`), dan mendukung klik otomatis tombol **`Schedule`**.
+  - **YouTube Studio (`configureYouTubeSchedule`)**: Membuka panel **`Schedule`** di tahap `Visibility`, otomatis mendeteksi format tanggal & jam locale (`MMM d, yyyy` / `d MMM yyyy`, `12h AM/PM` / `24h`), menyetel tanggal via `#datepicker-trigger` dan jam via `#time-of-day-container` (kelipatan 15 menit), lalu menunggu upload 100% dan menekan tombol **`Schedule`** (`#done-button`). Mendukung juga `publishAt` saat memakai YouTube Data API v3.
+  - **Meta Business Suite FB / IG / FB+IG (`configureMetaBusinessSchedule`)**: Memilih tab **`Schedule`** di bawah `Scheduling options` pada Langkah 3 (`Share`), lalu otomatis mengisi **semua baris tanggal & jam** (baik 1 baris untuk FB/IG saja maupun **2 baris terpisah Facebook & Instagram** saat upload gabungan `FB + IG`), serta mendukung klik otomatis tombol **`Schedule`**.
+- **Override Tanggal & Jam Jadwal di Web UI CPGP (`NextContentCard.tsx`, `PlatformStatusList.tsx`, `DashboardPage.tsx`)**:
+  - Menambahkan kontrol **`Sekarang` | `Jadwalkan`** berdampingan dengan **`Tinjau` | `Langsung`**.
+  - Saat **`Jadwalkan`** aktif, otomatis terisi dari tanggal & slot konten (`01` = `11:30`, `02` = `19:30`), dan dapat langsung di-override memakai **`DatePicker`**, input jam 24-jam, tombol cepat **`11:30`** / **`19:30`**, serta tombol **Reset ke slot folder** lengkap dengan peringatan batas minimum 20 menit untuk Meta & TikTok.
+  - Berlaku untuk semua tombol: **`Jadwalkan (N Platform)`**, tombol per platform (**YouTube**, **TikTok**, **Instagram**, **Facebook** — baik mode tinjau maupun langsung jadwalkan), tombol gabungan **`Jadwalkan FB + IG`**, dan tombol aksi di tabel **Antrean Konten**.
+- **Sinkronisasi Status `scheduled` & `scheduledTime` ke Planner (`server/autopost/queue.ts`, `server/api.ts`)**:
+  - Endpoint `POST /api/autopost/trigger` menerima parameter `scheduledAt`. Saat penjadwalan selesai (atau dikonfirmasi dari mode tinjau), status platform di `planner.json` otomatis diperbarui menjadi **`scheduled`** beserta jam `scheduledTime` yang tampil di tooltip badge `Jadwal`.
+
+---
+
 ## [v2.3.1] - 2026-11-25 (1-Click Direct Publish per Platform & Synced Publish/Review Mode)
 
 ### Peningkatan (Improved)

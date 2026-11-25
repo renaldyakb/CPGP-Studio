@@ -1,4 +1,11 @@
-import { ExternalLink, Eye, Monitor, Send, Zap } from 'lucide-react';
+import {
+  CalendarClock,
+  ExternalLink,
+  Eye,
+  Monitor,
+  Send,
+  Zap,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -31,6 +38,30 @@ export interface PlatformStatusListProps {
   item: ContentPlannerItem | null;
   data: UseAutoPostDataResult;
   mode: AutoPostMode;
+  scheduledAt?: string | null;
+}
+
+function formatShortSchedulePill(scheduledAt?: string | null): string | null {
+  if (!scheduledAt) return null;
+  const match = scheduledAt.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+  if (!match) return scheduledAt;
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'Mei',
+    'Jun',
+    'Jul',
+    'Agu',
+    'Sep',
+    'Okt',
+    'Nov',
+    'Des',
+  ];
+  const monthIdx = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  return `${day} ${months[monthIdx] ?? match[2]} · ${match[4]}`;
 }
 
 type PlatformStatusVariant =
@@ -69,16 +100,26 @@ export function PlatformStatusList({
   item,
   data,
   mode,
+  scheduledAt = null,
 }: PlatformStatusListProps) {
   const publishedCount = countPublishedPlatforms(item);
+  const schedulePill = formatShortSchedulePill(scheduledAt);
+  const isScheduling = Boolean(scheduledAt);
 
   return (
     <Card className="flex h-full flex-col">
-      <CardHeader className="pb-2">
-        <CardTitle>Status Platform</CardTitle>
-        <p className="font-mono text-[11px] font-light text-muted-foreground/75">
-          {item ? item.folderCode : 'Belum ada konten'}
-        </p>
+      <CardHeader className="flex-row items-start justify-between gap-2 pb-2">
+        <div className="space-y-0.5">
+          <CardTitle>Status Platform</CardTitle>
+          <p className="font-mono text-[11px] font-light text-muted-foreground/75">
+            {item ? item.folderCode : 'Belum ada konten'}
+          </p>
+        </div>
+        {schedulePill ? (
+          <Badge variant="info" size="xs" className="font-mono">
+            {schedulePill}
+          </Badge>
+        ) : null}
       </CardHeader>
 
       <CardContent className="flex-1 space-y-1 p-2 pt-0">
@@ -145,9 +186,30 @@ export function PlatformStatusList({
                 </div>
 
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <Badge variant={status.variant} size="xs">
-                    {status.label}
-                  </Badge>
+                  {platformState.status === 'scheduled' &&
+                  platformState.scheduledTime ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            tabIndex={0}
+                            className="inline-flex cursor-default rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                          />
+                        }
+                      >
+                        <Badge variant={status.variant} size="xs">
+                          {status.label}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        Terjadwal: {platformState.scheduledTime}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <Badge variant={status.variant} size="xs">
+                      {status.label}
+                    </Badge>
+                  )}
                   {platformState.status === 'published' && publishedUrl ? (
                     <IconActionButton
                       icon={ExternalLink}
@@ -164,19 +226,37 @@ export function PlatformStatusList({
                     <div className="flex items-center gap-1">
                       <IconActionButton
                         icon={Eye}
-                        label={`Tinjau ${platformName}`}
+                        label={
+                          isScheduling
+                            ? `Tinjau jadwal ${platformName}`
+                            : `Tinjau ${platformName}`
+                        }
                         disabled={!hasWmFinal || isBusy}
                         onClick={() =>
-                          void data.triggerPost(item.id, [key], 'review')
+                          void data.triggerPost(
+                            item.id,
+                            [key],
+                            'review',
+                            scheduledAt
+                          )
                         }
                       />
                       <IconActionButton
-                        icon={Send}
-                        label={`Langsung publish ${platformName}`}
+                        icon={isScheduling ? CalendarClock : Send}
+                        label={
+                          isScheduling
+                            ? `Langsung jadwalkan ${platformName} (${schedulePill})`
+                            : `Langsung publish ${platformName}`
+                        }
                         variant="outline"
                         disabled={!hasWmFinal || isBusy}
                         onClick={() =>
-                          void data.triggerPost(item.id, [key], 'publish')
+                          void data.triggerPost(
+                            item.id,
+                            [key],
+                            'publish',
+                            scheduledAt
+                          )
                         }
                       />
                     </div>
@@ -209,7 +289,8 @@ export function PlatformStatusList({
                       void data.triggerPost(
                         item.id,
                         ['fb_reels', 'ig_reels'],
-                        mode
+                        mode,
+                        scheduledAt
                       )
                     }
                   />
@@ -219,14 +300,24 @@ export function PlatformStatusList({
                   <PlatformIcon platform="fb_reels" size={12} />
                   <PlatformIcon platform="ig_reels" size={12} />
                   <span>
-                    {mode === 'publish' ? 'Publish FB + IG' : 'Tinjau FB + IG'}
+                    {isScheduling
+                      ? mode === 'publish'
+                        ? 'Jadwalkan FB + IG'
+                        : 'Tinjau Jadwal FB + IG'
+                      : mode === 'publish'
+                        ? 'Publish FB + IG'
+                        : 'Tinjau FB + IG'}
                   </span>
                 </span>
               </TooltipTrigger>
               <TooltipContent side="top">
-                {mode === 'publish'
-                  ? 'Langsung publish Facebook & Instagram sekaligus via Meta Business Suite'
-                  : 'Tinjau Facebook & Instagram sekaligus via Meta Business Suite'}
+                {isScheduling
+                  ? mode === 'publish'
+                    ? `Langsung jadwalkan Facebook & Instagram (${schedulePill}) via Meta Business Suite`
+                    : `Tinjau jadwal Facebook & Instagram (${schedulePill}) via Meta Business Suite`
+                  : mode === 'publish'
+                    ? 'Langsung publish Facebook & Instagram sekaligus via Meta Business Suite'
+                    : 'Tinjau Facebook & Instagram sekaligus via Meta Business Suite'}
               </TooltipContent>
             </Tooltip>
           </div>

@@ -25,6 +25,7 @@ export interface YouTubeApiPublishParams {
   item: ContentPlannerItem;
   mode: AutoPostMode;
   privacy?: 'public' | 'unlisted' | 'private';
+  scheduledAt?: string | null;
   signal: AbortSignal;
   onProgress: (update: YouTubeApiProgressUpdate) => void;
   workspace?: WorkspaceMetadata;
@@ -128,7 +129,8 @@ function buildYouTubeTags(item: ContentPlannerItem): string[] {
 export async function publishToYouTubeApi(
   params: YouTubeApiPublishParams
 ): Promise<YouTubeApiPublishResult> {
-  const { item, mode, privacy, signal, onProgress, workspace } = params;
+  const { item, mode, privacy, scheduledAt, signal, onProgress, workspace } =
+    params;
 
   if (signal.aborted) {
     const err = new Error('Upload YouTube API dibatalkan.');
@@ -182,13 +184,25 @@ export async function publishToYouTubeApi(
   const title = buildYouTubeTitle(item);
   const description = item.autoMetadata.captionParsed.rawText || title;
   const tags = buildYouTubeTags(item);
-  const privacyStatus: 'public' | 'unlisted' | 'private' =
-    privacy ?? (mode === 'publish' ? 'public' : 'unlisted');
+  const parsedScheduleDate =
+    scheduledAt && scheduledAt.trim() ? new Date(scheduledAt.trim()) : null;
+  const validPublishAtIso =
+    parsedScheduleDate && !Number.isNaN(parsedScheduleDate.getTime())
+      ? parsedScheduleDate.toISOString()
+      : null;
+
+  const privacyStatus: 'public' | 'unlisted' | 'private' = validPublishAtIso
+    ? 'private'
+    : (privacy ?? (mode === 'publish' ? 'public' : 'unlisted'));
 
   onProgress({
-    step: 'Menyiapkan upload YouTube Data API v3',
+    step: validPublishAtIso
+      ? 'Menyiapkan jadwal YouTube Data API v3'
+      : 'Menyiapkan upload YouTube Data API v3',
     progressPercent: 10,
-    log: `Mengunggah ${fileName} (${sizeFormatted}) dengan privasi ${privacyStatus}.`,
+    log: validPublishAtIso
+      ? `Mengunggah ${fileName} (${sizeFormatted}) untuk dijadwalkan pada ${scheduledAt}.`
+      : `Mengunggah ${fileName} (${sizeFormatted}) dengan privasi ${privacyStatus}.`,
     level: 'info',
   });
 
@@ -214,6 +228,7 @@ export async function publishToYouTubeApi(
           status: {
             privacyStatus,
             selfDeclaredMadeForKids: false,
+            ...(validPublishAtIso ? { publishAt: validPublishAtIso } : {}),
           },
         },
         media: {

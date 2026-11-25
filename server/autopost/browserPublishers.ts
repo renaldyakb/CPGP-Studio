@@ -29,6 +29,253 @@ export interface BrowserPublishParams {
   onProgress: (update: BrowserPublishProgressUpdate) => void;
   workspace?: WorkspaceMetadata;
   metaTargets?: MetaBusinessTargets;
+  scheduledAt?: string | null;
+}
+
+interface ParsedScheduleParts {
+  year: number;
+  month: number; // 1..12
+  day: number; // 1..31
+  hour: number; // 0..23
+  minute: number; // 0..59
+  dateObj: Date;
+  displayLabel: string;
+}
+
+const EN_MONTHS_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+const EN_MONTHS_FULL = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+] as const;
+
+const ID_MONTHS_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'Mei',
+  'Jun',
+  'Jul',
+  'Agu',
+  'Sep',
+  'Okt',
+  'Nov',
+  'Des',
+] as const;
+
+const ID_MONTHS_FULL = [
+  'Januari',
+  'Februari',
+  'Maret',
+  'April',
+  'Mei',
+  'Juni',
+  'Juli',
+  'Agustus',
+  'September',
+  'Oktober',
+  'November',
+  'Desember',
+] as const;
+
+function parseMonthWordToNumber(raw: string): number | null {
+  const token = raw.trim().toLowerCase().replace(/\.$/, '');
+  if (!token) return null;
+  const lookup: Record<string, number> = {
+    jan: 1,
+    january: 1,
+    januari: 1,
+    feb: 2,
+    february: 2,
+    februari: 2,
+    mar: 3,
+    march: 3,
+    maret: 3,
+    apr: 4,
+    april: 4,
+    may: 5,
+    mei: 5,
+    jun: 6,
+    june: 6,
+    juni: 6,
+    jul: 7,
+    july: 7,
+    juli: 7,
+    aug: 8,
+    august: 8,
+    agu: 8,
+    ags: 8,
+    agustus: 8,
+    sep: 9,
+    sept: 9,
+    september: 9,
+    oct: 10,
+    october: 10,
+    okt: 10,
+    oktober: 10,
+    nov: 11,
+    november: 11,
+    dec: 12,
+    december: 12,
+    des: 12,
+    desember: 12,
+  };
+  return lookup[token] ?? null;
+}
+
+function buildScheduleParts(dateObj: Date): ParsedScheduleParts {
+  const year = dateObj.getFullYear();
+  const month = dateObj.getMonth() + 1;
+  const day = dateObj.getDate();
+  const hour = dateObj.getHours();
+  const minute = dateObj.getMinutes();
+  const hh = String(hour).padStart(2, '0');
+  const mm = String(minute).padStart(2, '0');
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    dateObj,
+    displayLabel: `${day} ${EN_MONTHS_SHORT[month - 1]} ${year}, ${hh}:${mm}`,
+  };
+}
+
+function parseScheduledAt(raw?: string | null): ParsedScheduleParts | null {
+  if (!raw || !raw.trim()) return null;
+  const cleaned = raw.trim();
+
+  // Prefer wall-clock YYYY-MM-DDTHH:mm (no UTC timezone shift)
+  const localMatch = cleaned.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?$/
+  );
+  if (localMatch) {
+    const year = Number(localMatch[1]);
+    const month = Number(localMatch[2]);
+    const day = Number(localMatch[3]);
+    const hour = Number(localMatch[4]);
+    const minute = Number(localMatch[5]);
+    const dateObj = new Date(year, month - 1, day, hour, minute, 0, 0);
+    if (!Number.isNaN(dateObj.getTime())) {
+      return buildScheduleParts(dateObj);
+    }
+  }
+
+  const parsed = new Date(cleaned);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return buildScheduleParts(parsed);
+}
+
+function snapScheduleMinutes(
+  parts: ParsedScheduleParts,
+  stepMinutes: number
+): ParsedScheduleParts {
+  if (stepMinutes <= 1) return parts;
+  const totalMinutes = parts.hour * 60 + parts.minute;
+  const snappedTotal = Math.round(totalMinutes / stepMinutes) * stepMinutes;
+  const baseMidnight = new Date(parts.year, parts.month - 1, parts.day, 0, 0, 0, 0);
+  const adjusted = new Date(baseMidnight.getTime() + snappedTotal * 60_000);
+  return buildScheduleParts(adjusted);
+}
+
+function formatDateMatchingSample(
+  sample: string,
+  parts: ParsedScheduleParts
+): string {
+  const s = sample.trim();
+  const dd = String(parts.day).padStart(2, '0');
+  const mm = String(parts.month).padStart(2, '0');
+  const isIndonesian =
+    /\b(januari|februari|maret|mei|juni|juli|agustus|agu|ags|oktober|okt|desember|des)\b/i.test(
+      s
+    );
+  const fullMonth = isIndonesian
+    ? ID_MONTHS_FULL[parts.month - 1]
+    : EN_MONTHS_FULL[parts.month - 1];
+  const shortMonth = isIndonesian
+    ? ID_MONTHS_SHORT[parts.month - 1]
+    : EN_MONTHS_SHORT[parts.month - 1];
+
+  // ISO YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return `${parts.year}-${mm}-${dd}`;
+  }
+
+  // "Nov 26, 2026" or "November 26, 2026"
+  const monthFirstMatch = s.match(/^([A-Za-z]+)\.?\s+\d{1,2},?\s+\d{4}$/);
+  if (monthFirstMatch) {
+    const useFull = monthFirstMatch[1].length > 3;
+    const hasComma = s.includes(',');
+    const monthLabel = useFull ? fullMonth : shortMonth;
+    return hasComma
+      ? `${monthLabel} ${parts.day}, ${parts.year}`
+      : `${monthLabel} ${parts.day} ${parts.year}`;
+  }
+
+  // "25 November 2026" or "25 Nov 2026"
+  const dayFirstMatch = s.match(/^\d{1,2}\s+([A-Za-z]+)\.?\s+\d{4}$/);
+  if (dayFirstMatch) {
+    const useFull = dayFirstMatch[1].length > 3;
+    const monthLabel = useFull ? fullMonth : shortMonth;
+    return `${parts.day} ${monthLabel} ${parts.year}`;
+  }
+
+  // Numeric "DD/MM/YYYY" or "MM/DD/YYYY"
+  const numericMatch = s.match(/^(\d{1,2})([/.-])(\d{1,2})\2(\d{4})$/);
+  if (numericMatch) {
+    const first = Number(numericMatch[1]);
+    const sep = numericMatch[2];
+    const second = Number(numericMatch[3]);
+    // If first > 12 it is definitely day-first; if second > 12 it is month-first
+    const dayFirst = first > 12 ? true : second > 12 ? false : true;
+    return dayFirst
+      ? `${dd}${sep}${mm}${sep}${parts.year}`
+      : `${mm}${sep}${dd}${sep}${parts.year}`;
+  }
+
+  // Default: "26 November 2026"
+  return `${parts.day} ${EN_MONTHS_FULL[parts.month - 1]} ${parts.year}`;
+}
+
+function formatTimeMatchingSample(
+  sample: string,
+  hour: number,
+  minute: number
+): string {
+  const s = sample.trim();
+  const mm = String(minute).padStart(2, '0');
+  if (/am|pm/i.test(s)) {
+    const suffix = hour >= 12 ? 'PM' : 'AM';
+    const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+    return `${hour12}:${mm} ${suffix}`;
+  }
+  const sep = s.includes('.') && !s.includes(':') ? '.' : ':';
+  return `${String(hour).padStart(2, '0')}${sep}${mm}`;
 }
 
 export interface BrowserPublishResult {
@@ -856,7 +1103,8 @@ export async function publishInstagramViaBrowser(
   videoFileName: string,
   mode: AutoPostMode,
   signal: AbortSignal,
-  onProgress: (update: BrowserPublishProgressUpdate) => void
+  onProgress: (update: BrowserPublishProgressUpdate) => void,
+  scheduledAt?: string | null
 ): Promise<BrowserPublishResult> {
   return publishMetaBusinessSuiteViaBrowser(
     page,
@@ -866,7 +1114,8 @@ export async function publishInstagramViaBrowser(
     mode,
     signal,
     onProgress,
-    { facebook: false, instagram: true }
+    { facebook: false, instagram: true },
+    scheduledAt
   );
 }
 
@@ -1057,6 +1306,336 @@ async function uploadFacebookReelCover(
   }
 }
 
+async function configureMetaBusinessSchedule(
+  page: Page,
+  reelSurface: Locator,
+  schedule: ParsedScheduleParts,
+  targetLabel: string,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  const cleanupTags = async () => {
+    await page
+      .evaluate(() => {
+        document
+          .querySelectorAll(
+            '[data-cpgp-sched-date], [data-cpgp-sched-hour], [data-cpgp-sched-min], [data-cpgp-sched-ampm], [data-cpgp-sched-time]'
+          )
+          .forEach((el) => {
+            el.removeAttribute('data-cpgp-sched-date');
+            el.removeAttribute('data-cpgp-sched-hour');
+            el.removeAttribute('data-cpgp-sched-min');
+            el.removeAttribute('data-cpgp-sched-ampm');
+            el.removeAttribute('data-cpgp-sched-time');
+          });
+      })
+      .catch(() => {});
+  };
+
+  try {
+    onProgress({
+      step: `Mengatur jadwal ${targetLabel} (${schedule.displayLabel})`,
+      progressPercent: 83,
+      log: `Memilih opsi Schedule di Meta Business Suite untuk ${schedule.displayLabel}.`,
+      level: 'info',
+    });
+
+    const SCHEDULE_LABEL = /^(?:Schedule|Jadwalkan)$/i;
+
+    // Click the "Schedule" segmented button under "Scheduling options" (exclude footer CTA!)
+    const scheduleTabCandidates: Locator[] = [
+      reelSurface
+        .locator(
+          ':not([data-surface$="bizweb_create_reel:footer"]) [role="button"], :not([data-surface$="bizweb_create_reel:footer"]) [role="radio"], :not([data-surface$="bizweb_create_reel:footer"]) [role="tab"], :not([data-surface$="bizweb_create_reel:footer"]) button'
+        )
+        .filter({ hasText: SCHEDULE_LABEL })
+        .first(),
+      reelSurface
+        .locator('[role="button"], [role="radio"], [role="tab"], button')
+        .filter({ hasText: SCHEDULE_LABEL })
+        .first(),
+      page
+        .locator('[role="button"], [role="radio"], [role="tab"], button')
+        .filter({ hasText: SCHEDULE_LABEL })
+        .first(),
+    ];
+
+    let scheduleTab: Locator | null = null;
+    for (const candidate of scheduleTabCandidates) {
+      if (await candidate.isVisible({ timeout: 1500 }).catch(() => false)) {
+        scheduleTab = candidate;
+        break;
+      }
+    }
+
+    if (!scheduleTab) {
+      onProgress({
+        step: 'Tombol Schedule Meta tidak ditemukan',
+        progressPercent: 84,
+        log: 'Opsi Schedule pada bagian Scheduling options Meta Business Suite tidak terlihat.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    await scheduleTab.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await scheduleTab.click({ timeout: 8000 });
+    await humanDelay(650, 950, signal);
+
+    // Inspect and tag all visible date, hour, minute, meridiem, or combined time inputs
+    // inside the Scheduling options card (1 row for single-channel, 2 rows for FB + IG!)
+    const tagged = await page.evaluate(() => {
+      document
+        .querySelectorAll(
+          '[data-cpgp-sched-date], [data-cpgp-sched-hour], [data-cpgp-sched-min], [data-cpgp-sched-ampm], [data-cpgp-sched-time]'
+        )
+        .forEach((el) => {
+          el.removeAttribute('data-cpgp-sched-date');
+          el.removeAttribute('data-cpgp-sched-hour');
+          el.removeAttribute('data-cpgp-sched-min');
+          el.removeAttribute('data-cpgp-sched-ampm');
+          el.removeAttribute('data-cpgp-sched-time');
+        });
+
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        const st = window.getComputedStyle(el);
+        return st.visibility !== 'hidden' && st.display !== 'none';
+      };
+
+      const footer = document.querySelector(
+        '[data-surface$="bizweb_create_reel:footer"]'
+      );
+      const root =
+        document.querySelector('[data-surface$="lib:bizweb_create_reel"]') ??
+        document.body;
+
+      const allInputs = Array.from(
+        root.querySelectorAll<HTMLInputElement>(
+          'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])'
+        )
+      ).filter((el) => isVisible(el) && !(footer && footer.contains(el)));
+
+      const dateRegex =
+        /^\d{1,2}\s+[A-Za-z]+\.?\s+\d{4}$|^[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}$|^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}$|^\d{4}-\d{2}-\d{2}$/;
+
+      const dateSamples: string[] = [];
+      const hourSamples: string[] = [];
+      const minSamples: string[] = [];
+      const ampmSamples: string[] = [];
+      const timeSamples: string[] = [];
+
+      const spinInputs: HTMLInputElement[] = [];
+
+      for (const input of allInputs) {
+        const val = (input.value ?? '').trim();
+        const aria = (input.getAttribute('aria-label') ?? '').toLowerCase();
+        const placeholder = (input.placeholder ?? '').toLowerCase();
+        const role = (input.getAttribute('role') ?? '').toLowerCase();
+
+        // Date input
+        if (
+          dateRegex.test(val) ||
+          aria.includes('date') ||
+          aria.includes('tanggal') ||
+          placeholder.includes('dd') ||
+          placeholder.includes('yyyy')
+        ) {
+          input.setAttribute('data-cpgp-sched-date', String(dateSamples.length));
+          dateSamples.push(val);
+          continue;
+        }
+
+        // Explicit hour / minute / meridiem spinbuttons
+        if (
+          aria.includes('hour') ||
+          aria.includes('jam')
+        ) {
+          input.setAttribute('data-cpgp-sched-hour', String(hourSamples.length));
+          hourSamples.push(val);
+          continue;
+        }
+        if (
+          aria.includes('minute') ||
+          aria.includes('menit')
+        ) {
+          input.setAttribute('data-cpgp-sched-min', String(minSamples.length));
+          minSamples.push(val);
+          continue;
+        }
+        if (
+          aria.includes('meridiem') ||
+          aria.includes('am/pm') ||
+          /^(am|pm)$/i.test(val)
+        ) {
+          input.setAttribute('data-cpgp-sched-ampm', String(ampmSamples.length));
+          ampmSamples.push(val);
+          continue;
+        }
+
+        // Combined time input (e.g. "19:12" or "7:12 PM")
+        if (/^\d{1,2}[:.]\d{2}(\s*[ap]m)?$/i.test(val)) {
+          input.setAttribute('data-cpgp-sched-time', String(timeSamples.length));
+          timeSamples.push(val);
+          continue;
+        }
+
+        if (role === 'spinbutton' || /^\d{1,2}$/.test(val)) {
+          spinInputs.push(input);
+        }
+      }
+
+      // Positional pairing for unlabeled spinbutton pairs (hour, minute) per row
+      if (hourSamples.length === 0 && minSamples.length === 0 && spinInputs.length >= 2) {
+        for (let i = 0; i + 1 < spinInputs.length; i += 2) {
+          spinInputs[i].setAttribute(
+            'data-cpgp-sched-hour',
+            String(hourSamples.length)
+          );
+          hourSamples.push((spinInputs[i].value ?? '').trim());
+          spinInputs[i + 1].setAttribute(
+            'data-cpgp-sched-min',
+            String(minSamples.length)
+          );
+          minSamples.push((spinInputs[i + 1].value ?? '').trim());
+        }
+      }
+
+      return {
+        dateSamples,
+        hourSamples,
+        minSamples,
+        ampmSamples,
+        timeSamples,
+      };
+    });
+
+    if (
+      tagged.dateSamples.length === 0 &&
+      tagged.hourSamples.length === 0 &&
+      tagged.timeSamples.length === 0
+    ) {
+      await cleanupTags();
+      onProgress({
+        step: 'Input tanggal/jam Schedule Meta tidak terdeteksi',
+        progressPercent: 84,
+        log: 'Opsi Schedule sudah diklik, tetapi kolom tanggal/jam Meta tidak ditemukan otomatis.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    // Fill every date input (1 for single platform, 2 for Facebook + Instagram)
+    for (let i = 0; i < tagged.dateSamples.length; i += 1) {
+      throwIfAborted(signal);
+      const formattedDate = formatDateMatchingSample(
+        tagged.dateSamples[i],
+        schedule
+      );
+      const dateInput = page
+        .locator(`[data-cpgp-sched-date="${i}"]`)
+        .first();
+      await dateInput.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+      await dateInput.click({ timeout: 5000 });
+      await abortableWait(150, signal);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(formattedDate, { delay: 25 });
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('Tab');
+      await abortableWait(300, signal);
+    }
+
+    const use12Hour = tagged.ampmSamples.length > 0;
+    const hourValue = use12Hour
+      ? String(schedule.hour % 12 === 0 ? 12 : schedule.hour % 12).padStart(2, '0')
+      : String(schedule.hour).padStart(2, '0');
+    const minValue = String(schedule.minute).padStart(2, '0');
+    const meridiemValue = schedule.hour >= 12 ? 'PM' : 'AM';
+
+    for (let i = 0; i < tagged.hourSamples.length; i += 1) {
+      throwIfAborted(signal);
+      const hourInput = page
+        .locator(`[data-cpgp-sched-hour="${i}"]`)
+        .first();
+      await hourInput.click({ timeout: 5000 });
+      await abortableWait(120, signal);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(hourValue, { delay: 25 });
+      await abortableWait(180, signal);
+    }
+
+    for (let i = 0; i < tagged.minSamples.length; i += 1) {
+      throwIfAborted(signal);
+      const minInput = page
+        .locator(`[data-cpgp-sched-min="${i}"]`)
+        .first();
+      await minInput.click({ timeout: 5000 });
+      await abortableWait(120, signal);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(minValue, { delay: 25 });
+      await abortableWait(180, signal);
+    }
+
+    for (let i = 0; i < tagged.ampmSamples.length; i += 1) {
+      throwIfAborted(signal);
+      const ampmInput = page
+        .locator(`[data-cpgp-sched-ampm="${i}"]`)
+        .first();
+      await ampmInput.click({ timeout: 5000 });
+      await abortableWait(120, signal);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(meridiemValue, { delay: 25 });
+      await abortableWait(180, signal);
+    }
+
+    for (let i = 0; i < tagged.timeSamples.length; i += 1) {
+      throwIfAborted(signal);
+      const formattedTime = formatTimeMatchingSample(
+        tagged.timeSamples[i],
+        schedule.hour,
+        schedule.minute
+      );
+      const timeInput = page
+        .locator(`[data-cpgp-sched-time="${i}"]`)
+        .first();
+      await timeInput.click({ timeout: 5000 });
+      await abortableWait(120, signal);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(formattedTime, { delay: 25 });
+      await page.keyboard.press('Enter');
+      await abortableWait(250, signal);
+    }
+
+    await page.keyboard.press('Tab').catch(() => {});
+    await cleanupTags();
+    await humanDelay(450, 750, signal);
+
+    onProgress({
+      step: `Jadwal ${targetLabel} disetel ke ${schedule.displayLabel}`,
+      progressPercent: 85,
+      log: `Tanggal & jam jadwal (${schedule.displayLabel}) berhasil diisi di ${Math.max(tagged.dateSamples.length, 1)} baris Meta Business Suite.`,
+      level: 'success',
+    });
+    return true;
+  } catch (err) {
+    await cleanupTags();
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Gagal mengatur jadwal Meta Business Suite',
+      progressPercent: 84,
+      log: `Pengaturan jadwal Meta Business Suite terkendala: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
+}
+
 export async function publishFacebookViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -1064,7 +1643,8 @@ export async function publishFacebookViaBrowser(
   videoFileName: string,
   mode: AutoPostMode,
   signal: AbortSignal,
-  onProgress: (update: BrowserPublishProgressUpdate) => void
+  onProgress: (update: BrowserPublishProgressUpdate) => void,
+  scheduledAt?: string | null
 ): Promise<BrowserPublishResult> {
   return publishMetaBusinessSuiteViaBrowser(
     page,
@@ -1074,7 +1654,8 @@ export async function publishFacebookViaBrowser(
     mode,
     signal,
     onProgress,
-    { facebook: true, instagram: false }
+    { facebook: true, instagram: false },
+    scheduledAt
   );
 }
 
@@ -1086,9 +1667,11 @@ export async function publishMetaBusinessSuiteViaBrowser(
   mode: AutoPostMode,
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void,
-  targets: MetaBusinessTargets = { facebook: true, instagram: false }
+  targets: MetaBusinessTargets = { facebook: true, instagram: false },
+  scheduledAt?: string | null
 ): Promise<BrowserPublishResult> {
   const targetLabel = formatMetaTargetLabel(targets);
+  const parsedSchedule = parseScheduledAt(scheduledAt);
 
   onProgress({
     step: `Membuka Meta Business Suite (${targetLabel})`,
@@ -1405,18 +1988,46 @@ export async function publishMetaBusinessSuiteViaBrowser(
     await humanDelay(400, 750, signal);
   }
 
+  // If native scheduling was requested, select "Schedule" on Step 3 and fill all date/time rows
+  if (parsedSchedule) {
+    const scheduleOk = await configureMetaBusinessSchedule(
+      page,
+      reelSurface,
+      parsedSchedule,
+      targetLabel,
+      signal,
+      onProgress
+    );
+    if (!scheduleOk && mode === 'publish') {
+      await safeBringToFront(page);
+      return {
+        status: 'awaiting_review',
+        publishedUrl: null,
+        summary: `Jadwal ${targetLabel} (${parsedSchedule.displayLabel}) belum dapat diisi otomatis. Tab dibiarkan terbuka agar Anda dapat melanjutkannya manual.`,
+      };
+    }
+  }
+
+  const actionVerb = parsedSchedule ? 'Schedule' : 'Share';
+
   if (mode === 'review') {
     await safeBringToFront(page);
     onProgress({
-      step: `Siap direview di tahap Share ${targetLabel}`,
+      step: parsedSchedule
+        ? `Siap direview jadwal ${targetLabel} (${parsedSchedule.displayLabel})`
+        : `Siap direview di tahap Share ${targetLabel}`,
       progressPercent: 85,
-      log: `${targetLabel} sudah sampai di tahap Share (Langkah 3). Silakan review lalu klik Share / Bagikan.`,
+      log: parsedSchedule
+        ? `${targetLabel} sudah disetel jadwalnya (${parsedSchedule.displayLabel}). Silakan review lalu klik Schedule.`
+        : `${targetLabel} sudah sampai di tahap Share (Langkah 3). Silakan review lalu klik Share / Bagikan.`,
       level: 'success',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary: `Video, cover, dan deskripsi ${targetLabel} sudah siap di langkah Share Meta Business Suite. Cek tab browser untuk konfirmasi akhir.`,
+      summary: parsedSchedule
+        ? `Jadwal ${targetLabel} (${parsedSchedule.displayLabel}) sudah disiapkan di Meta Business Suite. Cek tab browser untuk konfirmasi akhir.`
+        : `Video, cover, dan deskripsi ${targetLabel} sudah siap di langkah Share Meta Business Suite. Cek tab browser untuk konfirmasi akhir.`,
     };
   }
 
@@ -1425,22 +2036,24 @@ export async function publishMetaBusinessSuiteViaBrowser(
   if (!shareReady) {
     await safeBringToFront(page);
     onProgress({
-      step: `Tombol Share ${targetLabel} belum siap`,
+      step: `Tombol ${actionVerb} ${targetLabel} belum siap`,
       progressPercent: 85,
-      log: `Tombol Share / Bagikan ${targetLabel} belum aktif. Tab dibiarkan terbuka untuk review manual.`,
+      log: `Tombol ${actionVerb} ${targetLabel} belum aktif. Tab dibiarkan terbuka untuk review manual.`,
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary: `Tombol Share ${targetLabel} belum siap diklik otomatis. Video dan deskripsi tetap terbuka di tab browser.`,
+      summary: `Tombol ${actionVerb} ${targetLabel} belum siap diklik otomatis. Video dan deskripsi tetap terbuka di tab browser.`,
     };
   }
 
   onProgress({
-    step: `Mempublikasikan ${targetLabel}`,
+    step: parsedSchedule
+      ? `Menjadwalkan ${targetLabel} (${parsedSchedule.displayLabel})`
+      : `Mempublikasikan ${targetLabel}`,
     progressPercent: 92,
-    log: `Menekan tombol Share untuk ${targetLabel} dan menunggu konfirmasi GraphQL Meta Business Suite.`,
+    log: `Menekan tombol ${actionVerb} untuk ${targetLabel} dan menunggu konfirmasi GraphQL Meta Business Suite.`,
     level: 'info',
   });
 
@@ -1451,7 +2064,8 @@ export async function publishMetaBusinessSuiteViaBrowser(
       return (
         postData.includes('BusinessComposerStoryCreationMutation') ||
         postData.includes('ComposerStoryCreation') ||
-        postData.includes('CreateReel')
+        postData.includes('CreateReel') ||
+        postData.includes('Schedule')
       );
     },
     { timeout: 90_000 }
@@ -1484,17 +2098,180 @@ export async function publishMetaBusinessSuiteViaBrowser(
   }
 
   onProgress({
-    step: `Terpublikasi di ${targetLabel}`,
+    step: parsedSchedule
+      ? `Terjadwal di ${targetLabel} (${parsedSchedule.displayLabel})`
+      : `Terpublikasi di ${targetLabel}`,
     progressPercent: 100,
-    log: `${targetLabel} berhasil dipublikasikan via Meta Business Suite.`,
+    log: parsedSchedule
+      ? `${targetLabel} berhasil dijadwalkan untuk ${parsedSchedule.displayLabel} via Meta Business Suite.`
+      : `${targetLabel} berhasil dipublikasikan via Meta Business Suite.`,
     level: 'success',
   });
 
   return {
     status: 'completed',
     publishedUrl: null,
-    summary: `Berhasil publish ${targetLabel} via Meta Business Suite.`,
+    summary: parsedSchedule
+      ? `Berhasil menjadwalkan ${targetLabel} (${parsedSchedule.displayLabel}) via Meta Business Suite.`
+      : `Berhasil publish ${targetLabel} via Meta Business Suite.`,
   };
+}
+
+async function configureYouTubeSchedule(
+  page: Page,
+  schedule: ParsedScheduleParts,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  // YouTube Studio uses 15-minute dropdown intervals (12:00 AM, 12:15 AM, 12:30 AM, 12:45 AM...)
+  const snapped = snapScheduleMinutes(schedule, 15);
+
+  try {
+    onProgress({
+      step: `Mengatur jadwal YouTube (${snapped.displayLabel})`,
+      progressPercent: 72,
+      log: `Membuka panel Schedule di YouTube Studio untuk ${snapped.displayLabel}.`,
+      level: 'info',
+    });
+
+    // Expand the "Schedule" box on Visibility step if #datepicker-trigger is not yet visible
+    const dateTrigger = page.locator('#datepicker-trigger').first();
+    const alreadyExpanded = await dateTrigger
+      .isVisible({ timeout: 800 })
+      .catch(() => false);
+
+    if (!alreadyExpanded) {
+      const expandClicked = await tryClickAny(
+        page,
+        [
+          '#second-container-expand-button',
+          'ytcp-button#second-container-expand-button',
+          '#schedule-radio-button',
+          'tp-yt-paper-radio-button[name="SCHEDULE"]',
+          '#second-container',
+        ],
+        6000,
+        signal
+      );
+
+      if (!expandClicked) {
+        const scheduleHeading = page
+          .locator('div, span, h3')
+          .filter({ hasText: /^(?:Schedule|Jadwalkan)$/i })
+          .first();
+        if (await scheduleHeading.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await scheduleHeading.click({ timeout: 5000 }).catch(() => {});
+        }
+      }
+      await humanDelay(450, 750, signal);
+    }
+
+    const triggerVisible = await dateTrigger
+      .isVisible({ timeout: 6000 })
+      .catch(() => false);
+    if (!triggerVisible) {
+      onProgress({
+        step: 'Pemilih tanggal YouTube Schedule tidak muncul',
+        progressPercent: 74,
+        log: 'Kolom tanggal #datepicker-trigger di YouTube Studio tidak terlihat.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    // 1. Set Date via #datepicker-trigger -> opened ytcp-date-picker input
+    const currentDateSample = (
+      await dateTrigger.innerText().catch(() => 'Nov 26, 2026')
+    ).trim();
+    const formattedDate = formatDateMatchingSample(currentDateSample, snapped);
+
+    await dateTrigger.click({ timeout: 6000 });
+    await abortableWait(400, signal);
+
+    const dateInput = page
+      .locator(
+        'ytcp-date-picker input, tp-yt-paper-dialog input[type="text"], ytcp-date-picker #textbox input'
+      )
+      .first();
+    if (await dateInput.isVisible({ timeout: 4000 }).catch(() => false)) {
+      await dateInput.click({ timeout: 4000 });
+      await abortableWait(120, signal);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(formattedDate, { delay: 25 });
+      await page.keyboard.press('Enter');
+      await humanDelay(350, 600, signal);
+    } else {
+      onProgress({
+        step: 'Input tanggal YouTube datepicker tidak ditemukan',
+        progressPercent: 74,
+        log: 'Input teks di dalam ytcp-date-picker tidak terdeteksi.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    // 2. Set Time via #time-of-day-container input (matches 12h AM/PM or 24h locale automatically)
+    const timeInput = page
+      .locator(
+        '#time-of-day-container input, ytcp-form-input-container#time-of-day-container input, #time-of-day-trigger input'
+      )
+      .first();
+    if (await timeInput.isVisible({ timeout: 5000 }).catch(() => false)) {
+      const currentTimeSample = (
+        await timeInput.inputValue().catch(() => '12:00 AM')
+      ).trim();
+      const formattedTime = formatTimeMatchingSample(
+        currentTimeSample || '12:00 AM',
+        snapped.hour,
+        snapped.minute
+      );
+
+      await timeInput.click({ timeout: 5000 });
+      await abortableWait(200, signal);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(formattedTime, { delay: 25 });
+      await abortableWait(300, signal);
+
+      // Click exact matching option in YouTube's 15-min dropdown if rendered
+      const matchingOption = page
+        .locator('tp-yt-paper-item:visible, tp-yt-paper-listbox [role="option"]:visible')
+        .filter({
+          hasText: new RegExp(
+            `^${formattedTime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`,
+            'i'
+          ),
+        })
+        .first();
+      if (await matchingOption.isVisible({ timeout: 800 }).catch(() => false)) {
+        await matchingOption.click({ timeout: 4000 }).catch(() => {});
+      } else {
+        await page.keyboard.press('Enter');
+      }
+      await humanDelay(300, 550, signal);
+    }
+
+    onProgress({
+      step: `Jadwal YouTube disetel ke ${snapped.displayLabel}`,
+      progressPercent: 76,
+      log: `Tanggal (${formattedDate}) dan jam jadwal (${snapped.displayLabel}) berhasil disetel di YouTube Studio.`,
+      level: 'success',
+    });
+    return true;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Gagal mengatur jadwal YouTube Studio',
+      progressPercent: 74,
+      log: `Pengaturan jadwal YouTube terkendala: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
 }
 
 export async function publishYouTubeViaBrowser(
@@ -1504,8 +2281,10 @@ export async function publishYouTubeViaBrowser(
   videoFileName: string,
   mode: AutoPostMode,
   signal: AbortSignal,
-  onProgress: (update: BrowserPublishProgressUpdate) => void
+  onProgress: (update: BrowserPublishProgressUpdate) => void,
+  scheduledAt?: string | null
 ): Promise<BrowserPublishResult> {
+  const parsedSchedule = parseScheduledAt(scheduledAt);
   onProgress({
     step: 'Membuka YouTube Upload',
     progressPercent: 12,
@@ -1674,28 +2453,46 @@ export async function publishYouTubeViaBrowser(
     await humanDelay(700, 1200, signal);
   }
 
-  const targetVisibility = mode === 'review' ? 'UNLISTED' : 'PUBLIC';
-  const visibilitySelected = await tryClickAny(
-    page,
-    [`tp-yt-paper-radio-button[name="${targetVisibility}"]`],
-    6000,
-    signal
-  );
+  let scheduleConfigured = false;
+  if (parsedSchedule) {
+    scheduleConfigured = await configureYouTubeSchedule(
+      page,
+      parsedSchedule,
+      signal,
+      onProgress
+    );
+    if (!scheduleConfigured && mode === 'publish') {
+      await safeBringToFront(page);
+      return {
+        status: 'awaiting_review',
+        publishedUrl: await extractYouTubeVideoUrl(page),
+        summary: `Jadwal YouTube (${parsedSchedule.displayLabel}) belum dapat diisi otomatis. Tab tetap dibuka agar Anda bisa menyelesaikannya.`,
+      };
+    }
+  } else {
+    const targetVisibility = mode === 'review' ? 'UNLISTED' : 'PUBLIC';
+    const visibilitySelected = await tryClickAny(
+      page,
+      [`tp-yt-paper-radio-button[name="${targetVisibility}"]`],
+      6000,
+      signal
+    );
 
-  if (!visibilitySelected && mode === 'publish') {
-    await safeBringToFront(page);
-    onProgress({
-      step: 'Opsi Visibilitas Public tidak ditemukan',
-      progressPercent: 85,
-      log: 'Opsi Visibilitas Public tidak terdeteksi otomatis. Tab dibiarkan terbuka untuk review manual.',
-      level: 'warning',
-    });
-    return {
-      status: 'awaiting_review',
-      publishedUrl: await extractYouTubeVideoUrl(page),
-      summary:
-        'Tidak bisa memilih opsi Public secara otomatis di YouTube Studio. Tab tetap dibuka agar Anda bisa menyelesaikannya.',
-    };
+    if (!visibilitySelected && mode === 'publish') {
+      await safeBringToFront(page);
+      onProgress({
+        step: 'Opsi Visibilitas Public tidak ditemukan',
+        progressPercent: 85,
+        log: 'Opsi Visibilitas Public tidak terdeteksi otomatis. Tab dibiarkan terbuka untuk review manual.',
+        level: 'warning',
+      });
+      return {
+        status: 'awaiting_review',
+        publishedUrl: await extractYouTubeVideoUrl(page),
+        summary:
+          'Tidak bisa memilih opsi Public secara otomatis di YouTube Studio. Tab tetap dibuka agar Anda bisa menyelesaikannya.',
+      };
+    }
   }
 
   onProgress({
@@ -1747,23 +2544,32 @@ export async function publishYouTubeViaBrowser(
   if (mode === 'review') {
     await safeBringToFront(page);
     onProgress({
-      step: 'Siap direview di YouTube Studio',
+      step: parsedSchedule
+        ? `Siap direview jadwal YouTube (${parsedSchedule.displayLabel})`
+        : 'Siap direview di YouTube Studio',
       progressPercent: 85,
-      log: 'Video, judul, deskripsi, dan visibilitas (Unlisted) sudah siap di tab YouTube Studio. Silakan review lalu klik Save / Publish.',
+      log: parsedSchedule
+        ? `Video, judul, deskripsi, dan jadwal (${parsedSchedule.displayLabel}) sudah siap di YouTube Studio. Silakan review lalu klik Schedule.`
+        : 'Video, judul, deskripsi, dan visibilitas (Unlisted) sudah siap di tab YouTube Studio. Silakan review lalu klik Save / Publish.',
       level: 'success',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: detectedUrl,
-      summary:
-        'Video dan caption sudah disiapkan di YouTube Studio. Cek tab browser untuk konfirmasi akhir.',
+      summary: parsedSchedule
+        ? `Jadwal YouTube (${parsedSchedule.displayLabel}) sudah disiapkan di YouTube Studio. Cek tab browser untuk konfirmasi akhir.`
+        : 'Video dan caption sudah disiapkan di YouTube Studio. Cek tab browser untuk konfirmasi akhir.',
     };
   }
 
   onProgress({
-    step: 'Menyelesaikan publikasi YouTube Shorts',
+    step: parsedSchedule
+      ? `Menjadwalkan YouTube Shorts (${parsedSchedule.displayLabel})`
+      : 'Menyelesaikan publikasi YouTube Shorts',
     progressPercent: 92,
-    log: 'Menekan tombol Publish (#done-button) di YouTube Studio.',
+    log: parsedSchedule
+      ? 'Menekan tombol Schedule (#done-button) di YouTube Studio.'
+      : 'Menekan tombol Publish (#done-button) di YouTube Studio.',
     level: 'info',
   });
 
@@ -1777,16 +2583,21 @@ export async function publishYouTubeViaBrowser(
   if (!doneClicked) {
     await safeBringToFront(page);
     onProgress({
-      step: 'Tombol Publish YouTube belum siap',
+      step: parsedSchedule
+        ? 'Tombol Schedule YouTube belum siap'
+        : 'Tombol Publish YouTube belum siap',
       progressPercent: 85,
-      log: 'Tombol Publish YouTube belum dapat diklik otomatis. Tab dibiarkan terbuka untuk review manual.',
+      log: parsedSchedule
+        ? 'Tombol Schedule YouTube belum dapat diklik otomatis. Tab dibiarkan terbuka untuk review manual.'
+        : 'Tombol Publish YouTube belum dapat diklik otomatis. Tab dibiarkan terbuka untuk review manual.',
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: detectedUrl,
-      summary:
-        'Tombol Publish YouTube Studio belum siap diklik. Silakan klik Publish secara manual di tab browser.',
+      summary: parsedSchedule
+        ? 'Tombol Schedule YouTube Studio belum siap diklik. Silakan klik Schedule secara manual di tab browser.'
+        : 'Tombol Publish YouTube Studio belum siap diklik. Silakan klik Publish secara manual di tab browser.',
     };
   }
 
@@ -1794,21 +2605,270 @@ export async function publishYouTubeViaBrowser(
   const finalUrl = (await extractYouTubeVideoUrl(page)) ?? detectedUrl;
 
   onProgress({
-    step: 'Terpublikasi di YouTube Studio',
+    step: parsedSchedule
+      ? `Terjadwal di YouTube Studio (${parsedSchedule.displayLabel})`
+      : 'Terpublikasi di YouTube Studio',
     progressPercent: 100,
-    log: finalUrl
-      ? `Video berhasil dipublikasikan di YouTube Studio: ${finalUrl}`
-      : 'Video berhasil dipublikasikan melalui YouTube Studio.',
+    log: parsedSchedule
+      ? finalUrl
+        ? `Video berhasil dijadwalkan di YouTube Studio (${parsedSchedule.displayLabel}): ${finalUrl}`
+        : `Video berhasil dijadwalkan di YouTube Studio (${parsedSchedule.displayLabel}).`
+      : finalUrl
+        ? `Video berhasil dipublikasikan di YouTube Studio: ${finalUrl}`
+        : 'Video berhasil dipublikasikan melalui YouTube Studio.',
     level: 'success',
   });
 
   return {
     status: 'completed',
     publishedUrl: finalUrl,
-    summary: finalUrl
-      ? `Berhasil publish via YouTube Studio: ${finalUrl}`
-      : 'Berhasil publish via YouTube Studio.',
+    summary: parsedSchedule
+      ? finalUrl
+        ? `Berhasil menjadwalkan via YouTube Studio (${parsedSchedule.displayLabel}): ${finalUrl}`
+        : `Berhasil menjadwalkan via YouTube Studio (${parsedSchedule.displayLabel}).`
+      : finalUrl
+        ? `Berhasil publish via YouTube Studio: ${finalUrl}`
+        : 'Berhasil publish via YouTube Studio.',
   };
+}
+
+async function configureTikTokSchedule(
+  page: Page,
+  root: Page | FrameLocator,
+  schedule: ParsedScheduleParts,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  // TikTok Studio uses 5-minute increments (00, 05, 10, ..., 55)
+  const snapped = snapScheduleMinutes(schedule, 5);
+
+  try {
+    onProgress({
+      step: `Mengatur jadwal TikTok (${snapped.displayLabel})`,
+      progressPercent: 72,
+      log: `Memilih opsi Schedule di TikTok Studio untuk ${snapped.displayLabel}.`,
+      level: 'info',
+    });
+
+    // 1. Click "Schedule" radio under "When to post"
+    const scheduleCandidates: Locator[] = [
+      root.getByLabel(/^(?:Schedule|Jadwalkan)$/i).first(),
+      root
+        .locator('label, [role="radio"]')
+        .filter({ hasText: /^(?:Schedule|Jadwalkan)$/i })
+        .first(),
+      page.getByLabel(/^(?:Schedule|Jadwalkan)$/i).first(),
+    ];
+
+    let scheduleRadio: Locator | null = null;
+    for (const candidate of scheduleCandidates) {
+      if (await candidate.isVisible({ timeout: 2000 }).catch(() => false)) {
+        scheduleRadio = candidate;
+        break;
+      }
+    }
+
+    if (!scheduleRadio) {
+      onProgress({
+        step: 'Radio Schedule TikTok tidak ditemukan',
+        progressPercent: 74,
+        log: 'Opsi Schedule di bawah "When to post" TikTok Studio tidak terlihat.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    await scheduleRadio.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
+    await scheduleRadio.click({ force: true, timeout: 6000 });
+    await humanDelay(600, 950, signal);
+
+    // 2. Handle first-time confirmation modal: "Allow your video to be saved for scheduled posting?" -> [Allow]
+    const allowClickedInRoot = await tryClickAny(
+      root,
+      [
+        'div.TUXButton-content:has-text("Allow")',
+        'button:has-text("Allow")',
+        'div.TUXButton-content:has-text("Izinkan")',
+        'button:has-text("Izinkan")',
+      ],
+      2500,
+      signal
+    );
+    if (!allowClickedInRoot) {
+      await tryClickAny(
+        page,
+        [
+          'div.TUXButton-content:has-text("Allow")',
+          'button:has-text("Allow")',
+          'div.TUXButton-content:has-text("Izinkan")',
+          'button:has-text("Izinkan")',
+        ],
+        1500,
+        signal
+      );
+    }
+    await humanDelay(450, 750, signal);
+
+    // 3. Locate date & time picker boxes (div.scheduled-picker -> nth(0) Time, nth(1) Date)
+    const scheduledPicker = root.locator('div.scheduled-picker').first();
+    const pickerVisible = await scheduledPicker
+      .isVisible({ timeout: 6000 })
+      .catch(() => false);
+    if (!pickerVisible) {
+      onProgress({
+        step: 'Picker tanggal/jam TikTok tidak muncul',
+        progressPercent: 74,
+        log: 'Elemen div.scheduled-picker TikTok Studio tidak muncul setelah memilih Schedule.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    const inputBoxes = scheduledPicker.locator('div.TUXInputBox');
+    if ((await inputBoxes.count().catch(() => 0)) < 2) {
+      onProgress({
+        step: 'Box tanggal & jam TikTok tidak lengkap',
+        progressPercent: 74,
+        log: 'Box pilihan waktu & tanggal di TikTok Studio tidak lengkap.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    // 4. Set Date (right box: nth(1), e.g., "2026-11-25")
+    await inputBoxes.nth(1).click({ timeout: 6000 });
+    await abortableWait(450, signal);
+
+    const calendarWrapper = root.locator('div.calendar-wrapper').first();
+    if (await calendarWrapper.isVisible({ timeout: 5000 }).catch(() => false)) {
+      for (let nav = 0; nav < 14; nav += 1) {
+        throwIfAborted(signal);
+        const monthText = (
+          await calendarWrapper
+            .locator('span.month-title')
+            .first()
+            .innerText()
+            .catch(() => '')
+        ).trim();
+        const yearText = (
+          await calendarWrapper
+            .locator('span.year-title')
+            .first()
+            .innerText()
+            .catch(() => '')
+        ).trim();
+
+        const calMonth = parseMonthWordToNumber(monthText);
+        const yearMatch = `${yearText} ${monthText}`.match(/\b(20\d{2})\b/);
+        const calYear = yearMatch ? Number(yearMatch[1]) : snapped.year;
+
+        if (!calMonth) break;
+        const currentAbs = calYear * 12 + calMonth;
+        const targetAbs = snapped.year * 12 + snapped.month;
+
+        if (currentAbs === targetAbs) {
+          break;
+        }
+        const arrows = calendarWrapper.locator('span.arrow');
+        if (currentAbs < targetAbs) {
+          await arrows.last().click({ timeout: 4000 }).catch(() => {});
+        } else {
+          await arrows.first().click({ timeout: 4000 }).catch(() => {});
+        }
+        await abortableWait(300, signal);
+      }
+
+      const validDays = calendarWrapper.locator('span.day.valid');
+      const dayCount = await validDays.count().catch(() => 0);
+      let dayClicked = false;
+      for (let i = 0; i < dayCount; i += 1) {
+        const dayEl = validDays.nth(i);
+        const text = (await dayEl.innerText().catch(() => '')).trim();
+        if (text === String(snapped.day)) {
+          await dayEl.click({ timeout: 4000 });
+          dayClicked = true;
+          break;
+        }
+      }
+      if (!dayClicked) {
+        onProgress({
+          step: `Tanggal ${snapped.day} tidak aktif di kalender TikTok`,
+          progressPercent: 75,
+          log: `Tanggal ${snapped.day} tidak dapat dipilih (pastikan jadwal antara 20 menit hingga 10 hari ke depan).`,
+          level: 'warning',
+        });
+        return false;
+      }
+      await humanDelay(350, 550, signal);
+    }
+
+    // 5. Set Time (left box: nth(0), e.g., "18:25")
+    await inputBoxes.nth(0).click({ timeout: 6000 });
+    await abortableWait(500, signal);
+
+    const hourStr = String(snapped.hour).padStart(2, '0');
+    const minStr = String(snapped.minute).padStart(2, '0');
+
+    const hourOption = root
+      .locator('span.tiktok-timepicker-left')
+      .filter({ hasText: new RegExp(`^${hourStr}$`) })
+      .first();
+    if (await hourOption.isVisible({ timeout: 4000 }).catch(() => false)) {
+      await hourOption.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+      await hourOption.click({ timeout: 5000 });
+      await abortableWait(450, signal);
+    } else {
+      onProgress({
+        step: `Jam ${hourStr} tidak ditemukan di timepicker TikTok`,
+        progressPercent: 75,
+        log: `Opsi jam ${hourStr} tidak ditemukan di timepicker TikTok Studio.`,
+        level: 'warning',
+      });
+      return false;
+    }
+
+    const minOption = root
+      .locator('span.tiktok-timepicker-right')
+      .filter({ hasText: new RegExp(`^${minStr}$`) })
+      .first();
+    if (await minOption.isVisible({ timeout: 4000 }).catch(() => false)) {
+      await minOption.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+      await minOption.click({ timeout: 5000 });
+      await abortableWait(400, signal);
+    } else {
+      onProgress({
+        step: `Menit ${minStr} tidak ditemukan di timepicker TikTok`,
+        progressPercent: 75,
+        log: `Opsi menit ${minStr} tidak ditemukan di timepicker TikTok Studio.`,
+        level: 'warning',
+      });
+      return false;
+    }
+
+    // Close timepicker popup cleanly
+    await page.keyboard.press('Escape').catch(() => {});
+    await humanDelay(350, 550, signal);
+
+    onProgress({
+      step: `Jadwal TikTok disetel ke ${snapped.displayLabel}`,
+      progressPercent: 77,
+      log: `Jadwal TikTok Studio berhasil disetel ke ${snapped.displayLabel}.`,
+      level: 'success',
+    });
+    return true;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Gagal mengatur jadwal TikTok Studio',
+      progressPercent: 75,
+      log: `Pengaturan jadwal TikTok terkendala: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
 }
 
 export async function publishTikTokViaBrowser(
@@ -1818,8 +2878,10 @@ export async function publishTikTokViaBrowser(
   videoFileName: string,
   mode: AutoPostMode,
   signal: AbortSignal,
-  onProgress: (update: BrowserPublishProgressUpdate) => void
+  onProgress: (update: BrowserPublishProgressUpdate) => void,
+  scheduledAt?: string | null
 ): Promise<BrowserPublishResult> {
+  const parsedSchedule = parseScheduledAt(scheduledAt);
   onProgress({
     step: 'Membuka TikTok Studio',
     progressPercent: 12,
@@ -1958,16 +3020,36 @@ export async function publishTikTokViaBrowser(
   await humanDelay(150, 300, signal);
   await page.keyboard.insertText(caption);
 
+  if (parsedSchedule) {
+    const scheduleOk = await configureTikTokSchedule(
+      page,
+      root,
+      parsedSchedule,
+      signal,
+      onProgress
+    );
+    if (!scheduleOk && mode === 'publish') {
+      await safeBringToFront(page);
+      return {
+        status: 'awaiting_review',
+        publishedUrl: null,
+        summary: `Jadwal TikTok (${parsedSchedule.displayLabel}) belum dapat diisi otomatis. Tab dibiarkan terbuka untuk penyesuaian manual.`,
+      };
+    }
+  }
+
+  const tiktokActionLabel = parsedSchedule ? 'Schedule' : 'Post';
+
   onProgress({
-    step: 'Menunggu tombol Post TikTok siap',
+    step: `Menunggu tombol ${tiktokActionLabel} TikTok siap`,
     progressPercent: 78,
-    log: 'Menunggu pemrosesan video TikTok selesai hingga tombol Post aktif.',
+    log: `Menunggu pemrosesan video TikTok selesai hingga tombol ${tiktokActionLabel} aktif.`,
     level: 'info',
   });
 
   const postButton = root
     .locator(
-      'button[data-e2e="post_video_button"], div.button-group > button:has-text("Post"), div.button-group > button:has-text("Posting")'
+      'button[data-e2e="post_video_button"], div.button-group > button:has-text("Schedule"), div.button-group > button:has-text("Jadwalkan"), div.button-group > button:has-text("Post"), div.button-group > button:has-text("Posting")'
     )
     .first();
 
@@ -1976,59 +3058,68 @@ export async function publishTikTokViaBrowser(
   if (mode === 'review') {
     await safeBringToFront(page);
     onProgress({
-      step: 'Siap direview di TikTok Studio',
+      step: parsedSchedule
+        ? `Siap direview jadwal TikTok (${parsedSchedule.displayLabel})`
+        : 'Siap direview di TikTok Studio',
       progressPercent: 85,
-      log: 'Video dan caption TikTok sudah siap di tab browser. Silakan cek preview lalu klik Post.',
+      log: parsedSchedule
+        ? `Video, caption, dan jadwal TikTok (${parsedSchedule.displayLabel}) sudah siap di tab browser. Silakan review lalu klik Schedule.`
+        : 'Video dan caption TikTok sudah siap di tab browser. Silakan cek preview lalu klik Post.',
       level: 'success',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary:
-        'Video dan caption sudah dimasukkan di TikTok Studio. Cek tab browser untuk konfirmasi akhir.',
+      summary: parsedSchedule
+        ? `Jadwal TikTok (${parsedSchedule.displayLabel}) sudah dimasukkan di TikTok Studio. Cek tab browser untuk konfirmasi akhir.`
+        : 'Video dan caption sudah dimasukkan di TikTok Studio. Cek tab browser untuk konfirmasi akhir.',
     };
   }
 
   if (!postReady) {
     await safeBringToFront(page);
     onProgress({
-      step: 'Tombol Post TikTok belum siap',
+      step: `Tombol ${tiktokActionLabel} TikTok belum siap`,
       progressPercent: 85,
-      log: 'Tombol Post TikTok belum aktif dalam 120 detik. Tab dibiarkan terbuka untuk review manual.',
+      log: `Tombol ${tiktokActionLabel} TikTok belum aktif dalam 120 detik. Tab dibiarkan terbuka untuk review manual.`,
       level: 'warning',
     });
     return {
       status: 'awaiting_review',
       publishedUrl: null,
-      summary:
-        'Tombol Post TikTok belum siap diklik otomatis. Video dan caption tetap aman di tab browser.',
+      summary: `Tombol ${tiktokActionLabel} TikTok belum siap diklik otomatis. Video dan caption tetap aman di tab browser.`,
     };
   }
 
   onProgress({
-    step: 'Menekan tombol Post di TikTok Studio',
+    step: parsedSchedule
+      ? `Menjadwalkan video di TikTok Studio (${parsedSchedule.displayLabel})`
+      : 'Menekan tombol Post di TikTok Studio',
     progressPercent: 90,
-    log: 'Mengirim postingan di TikTok Studio.',
+    log: parsedSchedule
+      ? `Menekan tombol Schedule di TikTok Studio (${parsedSchedule.displayLabel}).`
+      : 'Mengirim postingan di TikTok Studio.',
     level: 'info',
   });
 
   await postButton.click({ timeout: 10_000 });
   await humanDelay(1200, 2000, signal);
 
-  // Handle optional confirmation dialog ("Post now" / "Posting sekarang")
+  // Handle optional confirmation dialog ("Post now" / "Schedule" / "Posting sekarang")
+  const confirmSelectors = [
+    'button:has-text("Post now")',
+    'button:has-text("Posting sekarang")',
+    'button:has-text("Schedule now")',
+    'button:has-text("Jadwalkan sekarang")',
+  ];
   const confirmedInRoot = await tryClickAny(
     root,
-    ['button:has-text("Post now")', 'button:has-text("Posting sekarang")'],
+    confirmSelectors,
     2500,
     signal
   );
   if (!confirmedInRoot) {
-    await tryClickAny(
-      page,
-      ['button:has-text("Post now")', 'button:has-text("Posting sekarang")'],
-      2000,
-      signal
-    );
+    await tryClickAny(page, confirmSelectors, 2000, signal);
   }
 
   await raceWithAbort(
@@ -2058,28 +3149,42 @@ export async function publishTikTokViaBrowser(
   }
 
   onProgress({
-    step: 'Terpublikasi di TikTok Studio',
+    step: parsedSchedule
+      ? `Terjadwal di TikTok Studio (${parsedSchedule.displayLabel})`
+      : 'Terpublikasi di TikTok Studio',
     progressPercent: 100,
-    log: publishedUrl
-      ? `Video berhasil dipublikasikan di TikTok Studio: ${publishedUrl}`
-      : 'Video telah dikirim ke TikTok Studio.',
+    log: parsedSchedule
+      ? `Video berhasil dijadwalkan di TikTok Studio (${parsedSchedule.displayLabel}).`
+      : publishedUrl
+        ? `Video berhasil dipublikasikan di TikTok Studio: ${publishedUrl}`
+        : 'Video telah dikirim ke TikTok Studio.',
     level: 'success',
   });
 
   return {
     status: 'completed',
     publishedUrl,
-    summary: publishedUrl
-      ? `Berhasil publish di TikTok Studio: ${publishedUrl}`
-      : 'Berhasil publish di TikTok Studio.',
+    summary: parsedSchedule
+      ? `Berhasil menjadwalkan di TikTok Studio (${parsedSchedule.displayLabel}).`
+      : publishedUrl
+        ? `Berhasil publish di TikTok Studio: ${publishedUrl}`
+        : 'Berhasil publish di TikTok Studio.',
   };
 }
 
 export async function publishViaBrowser(
   params: BrowserPublishParams
 ): Promise<BrowserPublishResult> {
-  const { platform, item, mode, signal, onProgress, workspace, metaTargets } =
-    params;
+  const {
+    platform,
+    item,
+    mode,
+    signal,
+    onProgress,
+    workspace,
+    metaTargets,
+    scheduledAt,
+  } = params;
   throwIfAborted(signal);
 
   const resolvedVideo = resolveUploadVideoForItem(item, workspace);
@@ -2112,7 +3217,8 @@ export async function publishViaBrowser(
         videoFileName,
         mode,
         signal,
-        onProgress
+        onProgress,
+        scheduledAt
       );
     }
     if (platform === 'tiktok') {
@@ -2123,7 +3229,8 @@ export async function publishViaBrowser(
         videoFileName,
         mode,
         signal,
-        onProgress
+        onProgress,
+        scheduledAt
       );
     }
     if (platform === 'ig_reels' || platform === 'fb_reels') {
@@ -2139,7 +3246,8 @@ export async function publishViaBrowser(
         mode,
         signal,
         onProgress,
-        resolvedMetaTargets
+        resolvedMetaTargets,
+        scheduledAt
       );
     }
     return await publishMetaBusinessSuiteViaBrowser(
@@ -2150,7 +3258,8 @@ export async function publishViaBrowser(
       mode,
       signal,
       onProgress,
-      { facebook: true, instagram: false }
+      { facebook: true, instagram: false },
+      scheduledAt
     );
   } catch (error) {
     if (
