@@ -38,21 +38,21 @@ export const WORKSPACE_RULE_PRESETS: Record<
 > = {
   jurnal_dunia: {
     id: 'jurnal_dunia',
-    title: 'Wajib wm_final.mp4 Terpisah (Standar Jurnal Dunia)',
+    title: 'Wajib wm_final.mp4 Terpisah (Standar Studio)',
     badge: 'Ketat · 4 Berkas',
     summary:
-      'Video mentah (motionprovit-*) harus melewati tahap render watermark menjadi wm_final.mp4. Konten baru berstatus Siap Upload jika wm_final.mp4, cover, dan caption.txt sudah lengkap.',
+      'Video mentah harus melewati tahap render watermark menjadi wm_final.mp4. Konten baru berstatus Siap Upload jika wm_final.mp4, cover, dan caption.txt sudah lengkap.',
     exampleTree: [
-      'November/',
+      '2026-November/',
       '  24.01/',
-      '    motionprovit-1a2b.mp4   (Video mentah)',
+      '    video-mentah.mp4        (Video mentah)',
       '    wm_final.mp4            (Video siap upload - Wajib)',
-      '    cover-1a2b-9x16.jpg     (Thumbnail 9:16 - Wajib)',
+      '    cover-9x16.jpg          (Thumbnail 9:16 - Wajib)',
       '    caption.txt             (Caption & hashtag - Wajib)',
     ],
-    buildRules: (handle = '@jurnaldunia_') => {
+    buildRules: (handle = '@channel_anda') => {
       const cleanTag = handle.replace(/^@/, '#').replace(/[^a-zA-Z0-9_#]/g, '').toLowerCase();
-      const defaultHashtags = ['#edukasi', cleanTag && cleanTag !== '#' ? cleanTag : '#jurnaldunia'];
+      const defaultHashtags = ['#edukasi', cleanTag && cleanTag !== '#' ? cleanTag : '#konten'];
       return {
         presetId: 'jurnal_dunia',
         folderStructure: 'auto_both',

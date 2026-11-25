@@ -79,8 +79,8 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
   const [stepTab, setStepTab] = useState<ModalStepTab>('identity');
 
   // Step 1: Identity & Root Folder
-  const [name, setName] = useState<string>('Jurnal Dunia');
-  const [handle, setHandle] = useState<string>('@jurnaldunia_');
+  const [name, setName] = useState<string>('');
+  const [handle, setHandle] = useState<string>('');
   const [description, setDescription] = useState<string>(
     'Channel cerita sejarah dan edukasi fakta dunia'
   );
@@ -109,7 +109,7 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
     Object.values(DEFAULT_TIME_SLOTS)
   );
   const [defaultHashtagsInput, setDefaultHashtagsInput] = useState<string>(
-    '#edukasi #jurnaldunia'
+    '#edukasi #konten'
   );
 
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -195,8 +195,8 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
     } else {
       // onboarding
       const target = activeWorkspace ?? existingWorkspaces[0] ?? null;
-      const initialName = target?.name ?? 'Jurnal Dunia';
-      const initialHandle = target?.handle ?? '@jurnaldunia_';
+      const initialName = target?.name ?? '';
+      const initialHandle = target?.handle ?? '';
       const initialPath =
         target?.contentRootPath ?? 'D:\\RENAL\\JURNAL DUNIA\\KONTEN';
       const initialPreset = target?.rules.presetId ?? 'jurnal_dunia';
@@ -617,7 +617,7 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
                         id="ws-name-input"
                         value={name}
                         onChange={(e) => setName(e.target.value)}
-                        placeholder="Contoh: Jurnal Dunia, Channel Sains"
+                        placeholder="Contoh: Studio Sejarah, Kanal Sains"
                         required
                       />
                     </div>
@@ -633,7 +633,7 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
                         id="ws-handle-input"
                         value={handle}
                         onChange={(e) => setHandle(e.target.value)}
-                        placeholder="Contoh: @jurnaldunia_"
+                        placeholder="Contoh: @channel_anda"
                         className="font-mono"
                       />
                     </div>
@@ -1117,7 +1117,7 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
                     id="ws-default-hashtags"
                     value={defaultHashtagsInput}
                     onChange={(e) => setDefaultHashtagsInput(e.target.value)}
-                    placeholder="#edukasi #jurnaldunia #sejarah"
+                    placeholder="#edukasi #konten #sejarah"
                     className="font-mono"
                   />
                   <p className="text-[11px] text-muted-foreground">

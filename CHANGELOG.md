@@ -4,6 +4,22 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.10.0] - 2026-11-26 (First-Run Luxury Burgundy 4-Step Onboarding Stepper & Dynamic Workspace Folder Naming)
+
+### Fitur Baru & Peningkatan (Added / Improved)
+- **Halaman Onboarding 4 Langkah Interaktif (`src/components/workspace/OnboardingWizard.tsx`, `src/App.tsx`)**:
+  - Pada instalasi baru (build rilis tanpa `data/workspaces.json` atau data lama), CPGP tidak lagi membuat workspace bawaan secara diam-diam. Pengguna langsung disambut halaman penuh **Onboarding 4 Langkah** bertema **Luxury Burgundy** (lengkap dengan toggle Light/Dark mode dan panel **Pratinjau Studio Live**):
+    1. **`01 Identitas`**: Isi Nama Workspace / Channel, Handle Watermark (otomatis diturunkan dari nama workspace), dan Deskripsi singkat opsional.
+    2. **`02 Folder`**: Lokasi Folder Induk (`Pilih Folder` via Explorer + default `<AppRoot>\KONTEN`), **nama folder otomatis mengikuti Nama Workspace yang diisi** (`<Folder Induk>\<Nama Workspace>`), validasi path real-time, serta pratinjau pohon folder termasuk folder tahun-bulan inisialisasi (`2026-November`).
+    3. **`03 Alur Kerja`**: Pilih kebijakan watermark (`File wm_final.mp4 terpisah`, `Video langsung siap upload`, atau `Timpa video asli`), aktifkan platform target (`YouTube Shorts`, `TikTok`, `Instagram Reels`, `Facebook Reels`), dan hashtag bawaan.
+    4. **`04 Siap Mulai`**: Ringkasan konfigurasi lengkap sebelum tombol **`Buat Workspace & Masuk Studio`** membuat folder dan langsung masuk ke dashboard tanpa reload halaman.
+- **Registry Bersih untuk Instalasi Baru (`server/workspaces/registry.ts`, `server/api.ts`)**:
+  - Instalasi baru kini memulai dengan `onboardingCompleted: false` dan daftar workspace kosong tanpa memicu error di endpoint `/api/planner` maupun chokidar watcher (sementara pengguna lama yang sudah memiliki `data/workspaces.json` atau folder `KONTEN` lama tetap termigrasi utuh 100%).
+- **Pembersihan Placeholder Netral di Seluruh Aplikasi (`WorkspaceModal.tsx`, `CreateContentModal.tsx`, `WatermarkPage.tsx`, `MetaApiPage.tsx`, `shared/rulePresets.ts`, `src/types/watermark.ts`)**:
+  - Menghapus seluruh placeholder & nilai bawaan `Jurnal Dunia` / `@jurnaldunia_` di UI dan menggantinya dengan placeholder netral (`Kanal Sains`, `@channel_anda`, `#edukasi #konten`).
+
+---
+
 ## [v2.9.0] - 2026-11-26 (Fast Zero-Quality-Loss Watermark Render, Multi-GPU NVENC/QSV/AMF Support & Launcher 3rd-Party Checks)
 
 ### Fitur Baru & Peningkatan (Added / Improved)

@@ -25,6 +25,7 @@ import {
   WorkspaceModal,
   type WorkspaceModalMode,
 } from '@/components/workspace/WorkspaceModal';
+import { OnboardingWizard } from '@/components/workspace/OnboardingWizard';
 import { QuickGuideModal } from '@/components/workspace/QuickGuideModal';
 import {
   CreateContentModal,
@@ -101,6 +102,9 @@ export function App() {
   const [database, setDatabase] = useState<PlannerDatabase | null>(null);
   const [workspacesRegistry, setWorkspacesRegistry] =
     useState<WorkspacesRegistry | null>(null);
+  const [defaultContentBaseDir, setDefaultContentBaseDir] =
+    useState<string>('');
+  const [workspacesLoaded, setWorkspacesLoaded] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -176,20 +180,25 @@ export function App() {
       const res = await fetch('/api/workspaces');
       if (!res.ok) return;
       const raw = (await res.json()) as
-        | WorkspacesRegistry
-        | { registry?: WorkspacesRegistry };
+        | (WorkspacesRegistry & { defaultContentBaseDir?: string })
+        | {
+            registry?: WorkspacesRegistry;
+            defaultContentBaseDir?: string;
+          };
+      if (typeof raw?.defaultContentBaseDir === 'string') {
+        setDefaultContentBaseDir(raw.defaultContentBaseDir);
+      }
       const reg =
         raw && 'registry' in raw && raw.registry
           ? raw.registry
           : (raw as WorkspacesRegistry);
       if (reg && reg.workspaces && typeof reg.workspaces === 'object') {
         setWorkspacesRegistry(reg);
-        if (!reg.onboardingCompleted) {
-          setWorkspaceModalState({ open: true, mode: 'onboarding' });
-        }
       }
     } catch {
       // ignore if workspace endpoint is not yet ready
+    } finally {
+      setWorkspacesLoaded(true);
     }
   }, []);
 
@@ -872,6 +881,35 @@ export function App() {
       database?.stats.needsWatermarkCount,
     ]
   );
+
+  const needsFirstRunOnboarding =
+    workspacesLoaded &&
+    workspacesRegistry !== null &&
+    (!workspacesRegistry.onboardingCompleted ||
+      Object.keys(workspacesRegistry.workspaces).length === 0);
+
+  if (needsFirstRunOnboarding) {
+    return (
+      <OnboardingWizard
+        defaultBaseDir={defaultContentBaseDir}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        onCompleted={({ workspace: createdWs, registry, database: nextDb }) => {
+          setWorkspacesRegistry(registry);
+          if (nextDb) {
+            setDatabase(nextDb);
+            setIsLoading(false);
+          } else {
+            void fetchPlanner();
+          }
+          showToast(
+            `Workspace "${createdWs.name}" siap digunakan!`,
+            'success'
+          );
+        }}
+      />
+    );
+  }
 
   return (
     <PlannerProvider value={workspace}>

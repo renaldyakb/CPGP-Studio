@@ -114,7 +114,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     'Menurut kamu bagaimana? Tulis di komentar.'
   );
   const [hashtagsInput, setHashtagsInput] = useState<string>(
-    '#edukasi #jurnaldunia'
+    '#edukasi #konten'
   );
   const [openInExplorer, setOpenInExplorer] = useState<boolean>(true);
 
@@ -130,7 +130,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     'Menurut kamu bagaimana? Tulis di komentar.'
   );
   const [batchHashtagsInput, setBatchHashtagsInput] = useState<string>(
-    '#edukasi #jurnaldunia'
+    '#edukasi #konten'
   );
 
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -195,7 +195,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
 
     const defaultTags =
       activeWorkspace?.rules.defaultHashtags?.join(' ') ||
-      '#edukasi #jurnaldunia';
+      '#edukasi #konten';
     setHashtagsInput(defaultTags);
     setBatchHashtagsInput(defaultTags);
 
@@ -689,7 +689,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         id="single-hashtags-input"
                         value={hashtagsInput}
                         onChange={(e) => setHashtagsInput(e.target.value)}
-                        placeholder="#edukasi #jurnaldunia #sejarah"
+                        placeholder="#edukasi #konten #sejarah"
                         className="font-mono"
                       />
                     </div>
@@ -862,7 +862,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
                         value={batchHashtagsInput}
                         onChange={(e) => setBatchHashtagsInput(e.target.value)}
                         className="font-mono"
-                        placeholder="#edukasi #jurnaldunia"
+                        placeholder="#edukasi #konten"
                       />
                     </div>
 

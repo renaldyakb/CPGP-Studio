@@ -157,7 +157,47 @@ function saveRegistryToDisk(registry: WorkspacesRegistry): WorkspacesRegistry {
   return registry;
 }
 
+function createFreshEmptyRegistry(): WorkspacesRegistry {
+  return saveRegistryToDisk({
+    schemaVersion: REGISTRY_SCHEMA_VERSION,
+    brandCode: 'CPGP',
+    brandFullName: 'Content Planer Gam Puko',
+    activeWorkspaceId: '',
+    onboardingCompleted: false,
+    workspaces: {},
+  });
+}
+
+function buildPendingOnboardingWorkspace(): WorkspaceMetadata {
+  const nowIso = new Date().toISOString();
+  const initYear = new Date().getFullYear();
+  return {
+    id: '__pending_onboarding__',
+    name: 'Workspace Baru',
+    handle: '@channel',
+    description: '',
+    accentColor: ACCENT_PALETTE[0],
+    contentRootPath: '',
+    defaultYear: initYear,
+    activePlatforms: [...ALL_PLATFORMS],
+    browserProfileMode: 'isolated',
+    rules: WORKSPACE_RULE_PRESETS.standard_creator.buildRules('@channel'),
+    timeSlots: { ...DEFAULT_TIME_SLOTS },
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    lastOpenedAt: nowIso,
+  };
+}
+
 function migrateLegacyFilesToDefaultWorkspace(): WorkspacesRegistry {
+  const hasLegacyData =
+    fs.existsSync(LEGACY_PLANNER_FILE) || fs.existsSync(DEFAULT_CONTENT_ROOT);
+
+  // Fresh production install: NEVER auto-create a hardcoded workspace; trigger Onboarding Wizard!
+  if (!hasLegacyData) {
+    return createFreshEmptyRegistry();
+  }
+
   const defaultWorkspace = buildDefaultJurnalDuniaWorkspace();
   const paths = ensureWorkspaceDataDirectory(DEFAULT_WORKSPACE_ID);
 
@@ -220,18 +260,22 @@ export function getWorkspacesRegistry(): WorkspacesRegistry {
     const raw = fs.readFileSync(WORKSPACES_REGISTRY_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as WorkspacesRegistry;
 
-    if (
-      !parsed ||
-      typeof parsed !== 'object' ||
-      !parsed.workspaces ||
-      Object.keys(parsed.workspaces).length === 0
-    ) {
+    if (!parsed || typeof parsed !== 'object' || !parsed.workspaces) {
+      return migrateLegacyFilesToDefaultWorkspace();
+    }
+
+    const workspaceKeys = Object.keys(parsed.workspaces);
+    if (workspaceKeys.length === 0) {
+      // Keep clean empty state when awaiting first-run onboarding
+      if (parsed.onboardingCompleted === false) {
+        return parsed;
+      }
       return migrateLegacyFilesToDefaultWorkspace();
     }
 
     let dirty = false;
     if (!parsed.workspaces[parsed.activeWorkspaceId]) {
-      const firstId = Object.keys(parsed.workspaces)[0];
+      const firstId = workspaceKeys[0];
       parsed.activeWorkspaceId = firstId;
       dirty = true;
     }
@@ -266,7 +310,12 @@ export function getActiveWorkspace(): WorkspaceMetadata {
   const active =
     registry.workspaces[registry.activeWorkspaceId] ??
     Object.values(registry.workspaces)[0];
-  return active;
+  return active ?? buildPendingOnboardingWorkspace();
+}
+
+export function hasConfiguredWorkspace(): boolean {
+  const registry = getWorkspacesRegistry();
+  return Object.keys(registry.workspaces).length > 0;
 }
 
 export function getWorkspaceById(id: string): WorkspaceMetadata | null {

@@ -1060,7 +1060,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                       <strong className="font-medium text-foreground">
                         Business
                       </strong>
-                      , isi nama app (misal Jurnal Dunia Auto Post) dan email
+                      , isi nama app (misal Studio Konten Auto Post) dan email
                       kontak. Catat{' '}
                       <strong className="font-medium text-foreground">
                         App ID

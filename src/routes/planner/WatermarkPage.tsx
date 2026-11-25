@@ -1162,7 +1162,7 @@ export function WatermarkPage() {
                         id="wm-text-input"
                         value={config.text}
                         onChange={(e) => updateConfig({ text: e.target.value })}
-                        placeholder="@jurnaldunia_"
+                        placeholder="@channel_anda"
                       />
                     </div>
 

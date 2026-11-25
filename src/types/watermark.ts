@@ -120,7 +120,7 @@ export const ANCHOR_COORDINATES: Record<
 };
 
 export const DEFAULT_WATERMARK_CONFIG: WatermarkStyleConfig = {
-  text: '@jurnaldunia_',
+  text: '@channel_anda',
   fontId: 'arial-black',
   fontSizePx: 76,
   letterSpacingPx: 0,

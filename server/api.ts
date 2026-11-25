@@ -90,6 +90,7 @@ import { WORKSPACE_ROOT } from './scanner.ts';
 import {
   ALL_PLATFORM_KEYS,
   batchUpdateItemPlatforms,
+  createEmptyDatabase,
   getOrInitDatabase,
   syncDatabaseWithDisk,
   updateItemCaptionOnDisk,
@@ -113,6 +114,7 @@ import {
 } from './watermark/queue.ts';
 import { detectWatermarkCapabilities } from './watermark/renderer.ts';
 import {
+  APP_ROOT,
   activateWorkspace,
   createWorkspace,
   deleteWorkspace,
@@ -120,6 +122,7 @@ import {
   getWorkspaceById,
   getWorkspacePaths,
   getWorkspacesRegistry,
+  hasConfiguredWorkspace,
   markOnboardingCompleted,
   updateWorkspace,
 } from './workspaces/registry.ts';
@@ -439,8 +442,14 @@ export function createApiRouter(): Express {
   let debounceTimer: NodeJS.Timeout | null = null;
 
   function rebindWatcherToActiveWorkspace() {
+    if (!hasConfiguredWorkspace()) {
+      return;
+    }
     const activeWs = getActiveWorkspace();
     const targetRoot = activeWs.contentRootPath;
+    if (!targetRoot) {
+      return;
+    }
 
     if (watcher && watchedRootPath === targetRoot) {
       return;
@@ -545,6 +554,10 @@ export function createApiRouter(): Express {
   // 2. GET /api/planner - Returns full PlannerDatabase
   app.get('/api/planner', (req: Request, res: Response) => {
     try {
+      if (!hasConfiguredWorkspace()) {
+        res.json(createEmptyDatabase('', new Date().getFullYear()));
+        return;
+      }
       const forceRefresh = req.query.refresh === 'true';
       cachedDb = forceRefresh
         ? syncDatabaseWithDisk()
@@ -577,11 +590,15 @@ export function createApiRouter(): Express {
   app.get('/api/workspaces', (_req: Request, res: Response) => {
     try {
       const registry = getWorkspacesRegistry();
-      const activeWorkspace = getActiveWorkspace();
+      const activeWorkspace = hasConfiguredWorkspace()
+        ? getActiveWorkspace()
+        : null;
+      const defaultContentBaseDir = path.join(APP_ROOT, 'KONTEN');
       res.json({
         ...registry,
         registry,
         activeWorkspace,
+        defaultContentBaseDir,
       });
     } catch (error) {
       res.status(500).json({
