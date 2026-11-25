@@ -4,6 +4,15 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.7.1] - 2026-11-26 (Fix Reactive Style/Search Filter Counts & Scoped Download on MotionProvit Page)
+
+### Perbaikan (Fixed)
+- **Sinkronisasi Counter Filter Gaya & Status Impor (`src/routes/planner/MotionProvitPage.tsx`)**:
+  - Memperbaiki counter **`Baru (N)`** / **`Semua (M)`**, tombol **`Pilih Semua Baru (N)`**, **`Unduh Semua Baru (N)`**, serta angka pada setiap pill gaya (misal **`Koran Lama`**) agar langsung menyesuaikan secara real-time mengikuti filter gaya dan pencarian aktif.
+  - Saat memilih gaya tertentu (contoh **`Koran Lama`**), **`Pilih Semua Baru`** dan **`Unduh Semua Baru`** kini hanya memilih/mengunduh video baru dari gaya tersebut, bukan mencampur semua gaya lain.
+
+---
+
 ## [v2.7.0] - 2026-11-26 (Canonical `YYYY-Bulan` Year-Month Folders, Auto New-Year Rollover, Legacy Migration & Chronological Slot Assignment)
 
 ### Fitur Baru & Peningkatan (Added / Improved)

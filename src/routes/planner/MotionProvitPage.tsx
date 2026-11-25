@@ -350,15 +350,16 @@ export function MotionProvitPage() {
   };
 
   const handleDownloadAllNew = () => {
-    const newIds = jobs
-      .filter(
-        (j) =>
-          !j.alreadyImported &&
-          (j.status === 'completed' || j.status === 'unknown')
-      )
+    const newIds = scopedNewJobs
+      .filter((j) => j.status === 'completed' || j.status === 'unknown')
       .map((j) => j.id);
     if (newIds.length === 0) {
-      showToast('Semua video MotionProvit sudah diunduh di workspace ini.', 'info');
+      showToast(
+        styleFilter !== 'all'
+          ? `Semua video gaya "${styleFilter}" sudah diunduh di workspace ini.`
+          : 'Semua video MotionProvit sudah diunduh di workspace ini.',
+        'info'
+      );
       return;
     }
     setSelectedIds(newIds);
@@ -383,27 +384,48 @@ export function MotionProvitPage() {
     }
   };
 
-  const availableStyles = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const job of jobs) {
-      const s = job.style || 'MotionProvit';
-      counts.set(s, (counts.get(s) ?? 0) + 1);
-    }
-    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
-  }, [jobs]);
-
-  const filteredJobs = useMemo(() => {
+  const searchMatchedJobs = useMemo(() => {
     const q = search.trim().toLowerCase();
+    if (!q) return jobs;
     return jobs.filter((job) => {
-      if (importFilter === 'new' && job.alreadyImported) return false;
-      if (styleFilter !== 'all' && job.style !== styleFilter) return false;
-      if (q) {
-        const hay = `${job.title} ${job.shortId} ${job.style}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
+      const hay = `${job.title} ${job.shortId} ${job.style}`.toLowerCase();
+      return hay.includes(q);
     });
-  }, [jobs, importFilter, styleFilter, search]);
+  }, [jobs, search]);
+
+  const availableStyles = useMemo(() => {
+    const allCounts = new Map<string, number>();
+    const activeCounts = new Map<string, number>();
+    for (const job of searchMatchedJobs) {
+      const s = job.style || 'MotionProvit';
+      allCounts.set(s, (allCounts.get(s) ?? 0) + 1);
+      if (importFilter === 'all' || !job.alreadyImported) {
+        activeCounts.set(s, (activeCounts.get(s) ?? 0) + 1);
+      }
+    }
+    return Array.from(allCounts.entries())
+      .map(([styleName, totalCount]) => ({
+        styleName,
+        count: activeCounts.get(styleName) ?? 0,
+        totalCount,
+      }))
+      .sort((a, b) => b.count - a.count || b.totalCount - a.totalCount);
+  }, [searchMatchedJobs, importFilter]);
+
+  const styleAndSearchJobs = useMemo(() => {
+    if (styleFilter === 'all') return searchMatchedJobs;
+    return searchMatchedJobs.filter((job) => job.style === styleFilter);
+  }, [searchMatchedJobs, styleFilter]);
+
+  const scopedNewJobs = useMemo(
+    () => styleAndSearchJobs.filter((job) => !job.alreadyImported),
+    [styleAndSearchJobs]
+  );
+
+  const filteredJobs = useMemo(
+    () => (importFilter === 'new' ? scopedNewJobs : styleAndSearchJobs),
+    [importFilter, scopedNewJobs, styleAndSearchJobs]
+  );
 
   const totalPages = Math.max(1, Math.ceil(filteredJobs.length / perPage));
   const safePage = Math.min(page, totalPages);
@@ -525,19 +547,16 @@ export function MotionProvitPage() {
   };
 
   const selectOnlyNew = () => {
-    const ids = jobs
-      .filter(
-        (j) =>
-          !j.alreadyImported &&
-          (j.status === 'completed' || j.status === 'unknown')
-      )
+    const ids = scopedNewJobs
+      .filter((j) => j.status === 'completed' || j.status === 'unknown')
       .map((j) => j.id);
     setSelectedIds(ids);
   };
 
   const isImporting = importProgress?.status === 'running';
   const isBusy = busyAction !== null;
-  const newJobsCount = jobs.filter((j) => !j.alreadyImported).length;
+  const scopedNewCount = scopedNewJobs.length;
+  const scopedAllCount = styleAndSearchJobs.length;
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
@@ -917,10 +936,10 @@ export function MotionProvitPage() {
                   type="button"
                   size="xs"
                   variant="outline"
-                  disabled={isImporting || newJobsCount === 0}
+                  disabled={isImporting || scopedNewCount === 0}
                   onClick={selectOnlyNew}
                 >
-                  Pilih Semua Baru ({newJobsCount})
+                  Pilih Semua Baru ({scopedNewCount})
                 </Button>
                 <Button
                   type="button"
@@ -959,12 +978,12 @@ export function MotionProvitPage() {
                   variant="outline"
                   size="sm"
                   disabled={
-                    newJobsCount === 0 || isImporting || busyAction === 'import'
+                    scopedNewCount === 0 || isImporting || busyAction === 'import'
                   }
                   onClick={handleDownloadAllNew}
                 >
                   <CloudDownload className="size-3.5" aria-hidden="true" />
-                  Unduh Semua Baru ({newJobsCount})
+                  Unduh Semua Baru ({scopedNewCount})
                 </Button>
                 <Button
                   type="button"
@@ -1023,7 +1042,7 @@ export function MotionProvitPage() {
                   variant={importFilter === 'new' ? 'default' : 'ghost'}
                   onClick={() => setImportFilter('new')}
                 >
-                  Baru ({newJobsCount})
+                  Baru ({scopedNewCount})
                 </Button>
                 <Button
                   type="button"
@@ -1031,7 +1050,7 @@ export function MotionProvitPage() {
                   variant={importFilter === 'all' ? 'default' : 'ghost'}
                   onClick={() => setImportFilter('all')}
                 >
-                  Semua ({jobs.length})
+                  Semua ({scopedAllCount})
                 </Button>
               </div>
             </div>
@@ -1045,9 +1064,13 @@ export function MotionProvitPage() {
                 variant={styleFilter === 'all' ? 'default' : 'outline'}
                 onClick={() => setStyleFilter('all')}
               >
-                Semua Gaya
+                Semua Gaya (
+                {importFilter === 'new'
+                  ? searchMatchedJobs.filter((j) => !j.alreadyImported).length
+                  : searchMatchedJobs.length}
+                )
               </Button>
-              {availableStyles.map(([styleName, count]) => (
+              {availableStyles.map(({ styleName, count }) => (
                 <Button
                   key={styleName}
                   type="button"
@@ -1106,14 +1129,14 @@ export function MotionProvitPage() {
                 <p className="text-xs font-light text-muted-foreground/75">
                   Tidak ada video yang cocok dengan filter saat ini.
                 </p>
-                {importFilter === 'new' && jobs.length > 0 ? (
+                {importFilter === 'new' && scopedAllCount > 0 ? (
                   <Button
                     type="button"
                     size="xs"
                     variant="outline"
                     onClick={() => setImportFilter('all')}
                   >
-                    Tampilkan semua ({jobs.length})
+                    Tampilkan semua ({scopedAllCount})
                   </Button>
                 ) : null}
               </CardContent>
