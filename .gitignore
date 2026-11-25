@@ -6,6 +6,7 @@ dist/
 # Local Runtime Data, User Workspaces, Tokens & Browser Sessions (NEVER commit)
 data/
 !data/.gitkeep
+.cache/
 
 # Local Agent/IDE Artifacts & Temporary Files
 graphify-out/

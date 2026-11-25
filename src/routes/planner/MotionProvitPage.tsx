@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CloudDownload,
+  DatabaseZap,
   ExternalLink,
   Film,
   KeyRound,
@@ -13,11 +14,13 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Trash2,
   X,
   AlertCircle,
 } from 'lucide-react';
 import type { NextSuggestedSlot } from '@/types/workspace';
 import type {
+  MotionProvitCacheStats,
   MotionProvitConfigPublic,
   MotionProvitDownloadAssetsSelection,
   MotionProvitImportProgress,
@@ -72,6 +75,9 @@ export function MotionProvitPage() {
   const [config, setConfig] = useState<MotionProvitConfigPublic | null>(null);
   const [jobs, setJobs] = useState<MotionProvitJobSummary[]>([]);
   const [nextSlot, setNextSlot] = useState<NextSuggestedSlot | null>(null);
+  const [cacheStats, setCacheStats] = useState<MotionProvitCacheStats | null>(
+    null
+  );
   const [importProgress, setImportProgress] =
     useState<MotionProvitImportProgress | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -108,6 +114,7 @@ export function MotionProvitPage() {
       setConfig(res.config);
       setJobs(res.jobs);
       setNextSlot(res.nextSlot);
+      if (res.cacheStats) setCacheStats(res.cacheStats);
       setImportProgress(res.importProgress);
       setEmail((prev) => prev || res.config.email || '');
       if (!res.config.connected) {
@@ -251,26 +258,49 @@ export function MotionProvitPage() {
     }
   };
 
-  const handleFetchJobs = async () => {
-    setBusyAction('fetch-jobs');
+  const handleFetchJobs = async (
+    mode: 'incremental' | 'full' = 'incremental'
+  ) => {
+    setBusyAction(mode === 'full' ? 'fetch-full' : 'fetch-jobs');
     try {
-      const res = await motionprovitApi.fetchJobs();
+      const res = await motionprovitApi.fetchJobs(mode);
       setConfig(res.config);
       setJobs(res.jobs);
       setNextSlot(res.nextSlot);
+      if (res.cacheStats) setCacheStats(res.cacheStats);
       if (res.nextSlot && !startDateIso) {
         setStartDateIso(slotToIsoDate(res.nextSlot, workspaceYear));
         setStartSlotCode(res.nextSlot.slotCode || '01');
       }
-      showToast(
-        `Berhasil memuat ${res.jobs.length} video dari MotionProvit (belum diunduh).`,
-        'success'
-      );
+      const modeNote =
+        res.syncMode === 'incremental'
+          ? `Cek baru selesai (${res.newFoundCount ?? 0} video baru, ${res.pagesScanned ?? 1} halaman).`
+          : `Sinkron penuh selesai: ${res.jobs.length} video dari ${res.pagesScanned ?? 1} halaman.`;
+      showToast(modeNote, 'success');
     } catch (error) {
       showToast(
         error instanceof Error
           ? error.message
           : 'Gagal mengambil daftar video MotionProvit.',
+        'error'
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleClearCache = async () => {
+    setBusyAction('clear-cache');
+    try {
+      const res = await motionprovitApi.clearCache();
+      setCacheStats(res.cacheStats);
+      showToast(
+        `Cache thumbnail dibersihkan (${res.cacheStats.cacheDir}).`,
+        'info'
+      );
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : 'Gagal membersihkan cache.',
         'error'
       );
     } finally {
@@ -499,20 +529,50 @@ export function MotionProvitPage() {
 
           <div className="flex flex-wrap items-center gap-1.5">
             {config?.connected ? (
-              <Button
-                type="button"
-                size="xs"
-                variant="editorial"
-                disabled={isBusy || isImporting}
-                onClick={() => void handleFetchJobs()}
-              >
-                {busyAction === 'fetch-jobs' ? (
-                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                ) : (
-                  <RefreshCw className="size-3.5" aria-hidden="true" />
-                )}
-                Ambil Daftar
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="editorial"
+                  disabled={isBusy || isImporting}
+                  onClick={() => void handleFetchJobs('incremental')}
+                >
+                  {busyAction === 'fetch-jobs' ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <RefreshCw className="size-3.5" aria-hidden="true" />
+                  )}
+                  {jobs.length > 0 ? 'Cek Baru' : 'Ambil Daftar'}
+                </Button>
+                <IconActionButton
+                  icon={busyAction === 'fetch-full' ? Loader2 : DatabaseZap}
+                  iconClassName={
+                    busyAction === 'fetch-full' ? 'animate-spin' : undefined
+                  }
+                  label="Sinkron penuh seluruh halaman MotionProvit"
+                  variant="outline"
+                  disabled={isBusy || isImporting}
+                  onClick={() => void handleFetchJobs('full')}
+                />
+                <IconActionButton
+                  icon={busyAction === 'clear-cache' ? Loader2 : Trash2}
+                  iconClassName={
+                    busyAction === 'clear-cache' ? 'animate-spin' : undefined
+                  }
+                  label={
+                    cacheStats
+                      ? `Bersihkan cache thumbnail (${cacheStats.filesCount} berkas, ${Math.round(cacheStats.totalBytes / 1024)} KB di ${cacheStats.cacheDir})`
+                      : 'Bersihkan cache thumbnail lokal'
+                  }
+                  variant="outline"
+                  disabled={
+                    isBusy ||
+                    isImporting ||
+                    (cacheStats !== null && cacheStats.filesCount === 0)
+                  }
+                  onClick={() => void handleClearCache()}
+                />
+              </>
             ) : null}
             <Button
               type="button"

@@ -5,6 +5,7 @@ import { defineConfig, type Plugin } from 'vite';
 import { createApiRouter } from './server/api.ts';
 
 const RUNTIME_DATA_DIR = path.resolve(__dirname, 'data').toLowerCase();
+const CACHE_DIR = path.resolve(__dirname, '.cache').toLowerCase();
 const GRAPHIFY_OUT_DIR = path.resolve(__dirname, 'graphify-out').toLowerCase();
 
 export function jurnalDuniaApiPlugin(): Plugin {
@@ -23,6 +24,7 @@ export function jurnalDuniaApiPlugin(): Plugin {
       const normalized = path.resolve(file).toLowerCase();
       if (
         normalized.startsWith(RUNTIME_DATA_DIR) ||
+        normalized.startsWith(CACHE_DIR) ||
         normalized.startsWith(GRAPHIFY_OUT_DIR) ||
         normalized.endsWith('planner-data.json') ||
         normalized.endsWith('watermark-presets.json')
@@ -46,6 +48,7 @@ export default defineConfig({
     watch: {
       ignored: [
         '**/data/**',
+        '**/.cache/**',
         '**/graphify-out/**',
         '**/planner-data.json',
         '**/watermark-presets.json',

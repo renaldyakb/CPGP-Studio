@@ -1,10 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import PQueue from 'p-queue';
 import type { BrowserContext, Page } from 'patchright';
 import { DEFAULT_TIME_SLOTS } from '../../shared/rulePresets.ts';
 import type { WorkspaceMetadata } from '../../shared/types/workspace.ts';
 import type {
+  MotionProvitCacheStats,
   MotionProvitConfigPublic,
   MotionProvitImportItemResult,
   MotionProvitImportProgress,
@@ -19,6 +21,7 @@ import {
 } from '../core/contentCreator.ts';
 import { getOrInitDatabase, syncDatabaseWithDisk } from '../storage.ts';
 import {
+  APP_ROOT,
   getActiveWorkspace,
   getWorkspaceById,
   getWorkspacePaths,
@@ -50,6 +53,19 @@ const INDONESIAN_MONTHS = [
 
 const importRunsByWorkspace = new Map<string, MotionProvitImportProgress>();
 const activeImportControllers = new Map<string, AbortController>();
+const lastSyncTimestampByWorkspace = new Map<string, number>();
+
+export const MOTIONPROVIT_THUMB_CACHE_ROOT = path.join(
+  APP_ROOT,
+  '.cache',
+  'motionprovit-thumbs'
+);
+const SYNC_COOLDOWN_MS = 30_000;
+
+function randomJitter(minMs: number, maxMs: number): Promise<void> {
+  const delay = Math.floor(minMs + Math.random() * Math.max(1, maxMs - minMs));
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
 
 function normalizeShortId(rawId: string): string {
   const cleaned = rawId.trim().replace(/^#/, '');
@@ -739,11 +755,42 @@ async function ensureAuthenticatedOnPage(
   return false;
 }
 
-export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
+export type MotionProvitSyncMode = 'incremental' | 'full';
+
+export async function scrapeMotionProvitJobs(
+  workspaceId?: string,
+  options?: { mode?: MotionProvitSyncMode; bypassCooldown?: boolean }
+): Promise<{
   jobs: MotionProvitJobSummary[];
   config: MotionProvitConfigPublic;
+  syncMode: MotionProvitSyncMode;
+  newFoundCount: number;
+  pagesScanned: number;
 }> {
   const current = getInternalMotionProvitConfig(workspaceId);
+  const resolvedWsId =
+    workspaceId && workspaceId.trim()
+      ? workspaceId.trim()
+      : getActiveWorkspace().id;
+
+  const lastSyncMs = lastSyncTimestampByWorkspace.get(resolvedWsId) ?? 0;
+  const elapsedMs = Date.now() - lastSyncMs;
+  if (
+    !options?.bypassCooldown &&
+    current.cachedJobs.length > 0 &&
+    elapsedMs < SYNC_COOLDOWN_MS
+  ) {
+    const waitSec = Math.max(1, Math.ceil((SYNC_COOLDOWN_MS - elapsedMs) / 1000));
+    throw new Error(
+      `Tunggu ${waitSec} detik lagi sebelum sinkron ulang agar aman dari rate-limit MotionProvit.`
+    );
+  }
+
+  const syncMode: MotionProvitSyncMode =
+    options?.mode === 'full' || current.cachedJobs.length === 0
+      ? 'full'
+      : 'incremental';
+
   const context = await getOrLaunchBrowserContext(undefined, workspaceId);
   const page = await context.newPage();
 
@@ -774,13 +821,25 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
       );
     }
 
-    const PER_PAGE = 48;
-    const MAX_PAGES = 20;
-    const mergedMap = new Map<string, MotionProvitJobSummary>();
-    let totalRemoteCount = 0;
+    const PER_PAGE = syncMode === 'incremental' ? 24 : 48;
+    const MAX_PAGES = syncMode === 'incremental' ? 3 : 20;
+    const existingIds = new Set(current.cachedJobs.map((j) => j.id));
+    const freshOrderMap = new Map<string, MotionProvitJobSummary>();
+    let totalRemoteCount = current.totalRemoteCount;
     let totalPages = 1;
+    let pagesScanned = 0;
+    let newFoundCount = 0;
 
-    for (let currentPage = 1; currentPage <= Math.min(totalPages, MAX_PAGES); currentPage += 1) {
+    for (
+      let currentPage = 1;
+      currentPage <= Math.min(totalPages, MAX_PAGES);
+      currentPage += 1
+    ) {
+      // Human-like polite pause between pages so pagination never looks like a bot burst
+      if (currentPage > 1) {
+        await randomJitter(2200, 4200);
+      }
+
       const targetUrl = `${current.baseUrl}/app/jobs?hal=${currentPage}&per=${PER_PAGE}`;
       await page.goto(targetUrl, {
         waitUntil: 'domcontentloaded',
@@ -792,7 +851,8 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
         .first()
         .waitFor({ state: 'visible', timeout: 15_000 })
         .catch(() => {});
-      await page.waitForTimeout(800);
+      await randomJitter(700, 1200);
+      pagesScanned += 1;
 
       // Extract exact cards & pagination metadata from this page (100% inline, zero inner functions)
       const pageData = await page.evaluate((baseUrl) => {
@@ -884,12 +944,18 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
           // Dynamic style badge (first rounded-full badge pill before status badge)
           let style = 'MotionProvit';
           const pillSpans = Array.from(
-            card.querySelectorAll<HTMLElement>('span.rounded-full, span[class*="rounded-full"]')
+            card.querySelectorAll<HTMLElement>(
+              'span.rounded-full, span[class*="rounded-full"]'
+            )
           );
           for (const pill of pillSpans) {
             const pText = (pill.textContent ?? '').replace(/\s+/g, ' ').trim();
             if (!pText || pText.length > 48) continue;
-            if (/^(?:selesai|diproses|gagal|completed|processing|failed)$/i.test(pText)) {
+            if (
+              /^(?:selesai|diproses|gagal|completed|processing|failed)$/i.test(
+                pText
+              )
+            ) {
               continue;
             }
             style = pText;
@@ -954,7 +1020,7 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
         };
       }, current.baseUrl);
 
-      if (pageData.parsedTotal > totalRemoteCount) {
+      if (pageData.parsedTotal > 0) {
         totalRemoteCount = pageData.parsedTotal;
       }
       const computedPagesFromTotal =
@@ -966,12 +1032,19 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
       );
 
       let addedThisPage = 0;
+      let hitExistingCachedItem = false;
+
       for (const domJob of pageData.items) {
-        if (!mergedMap.has(domJob.id)) {
+        if (existingIds.has(domJob.id)) {
+          hitExistingCachedItem = true;
+        } else {
+          newFoundCount += 1;
+        }
+        if (!freshOrderMap.has(domJob.id)) {
           addedThisPage += 1;
         }
         const statusInfo = normalizeJobStatus(domJob.statusText);
-        mergedMap.set(domJob.id, {
+        freshOrderMap.set(domJob.id, {
           id: domJob.id,
           shortId: domJob.shortId,
           title: domJob.title,
@@ -995,6 +1068,21 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
 
       if (addedThisPage === 0) {
         break;
+      }
+
+      // Incremental mode stops immediately once we overlap existing cached items (typically 1 page load!)
+      if (syncMode === 'incremental' && hitExistingCachedItem) {
+        break;
+      }
+    }
+
+    // Build final merged list: freshly scraped items first (newest), followed by remaining cached items in incremental mode
+    const mergedMap = new Map<string, MotionProvitJobSummary>(freshOrderMap);
+    if (syncMode === 'incremental') {
+      for (const cachedJob of current.cachedJobs) {
+        if (!mergedMap.has(cachedJob.id)) {
+          mergedMap.set(cachedJob.id, cachedJob);
+        }
       }
     }
 
@@ -1034,6 +1122,7 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
     const session = await readNextAuthSessionFromPage(page, current.baseUrl);
     const mergedList = Array.from(mergedMap.values());
     const nowIso = new Date().toISOString();
+    lastSyncTimestampByWorkspace.set(resolvedWsId, Date.now());
 
     const updatedConfig = updateMotionProvitConfig(
       {
@@ -1053,6 +1142,9 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
     return {
       jobs: enriched,
       config: toPublicMotionProvitConfig(updatedConfig, workspaceId),
+      syncMode,
+      newFoundCount,
+      pagesScanned,
     };
   } finally {
     if (!page.isClosed()) {
@@ -1070,6 +1162,139 @@ interface CachedThumbEntry {
 const THUMB_CACHE_MAX = 200;
 const THUMB_CACHE_TTL_MS = 30 * 60 * 1000;
 const thumbCache = new Map<string, CachedThumbEntry>();
+const thumbFetchQueue = new PQueue({ concurrency: 2 });
+const inFlightThumbFetches = new Map<
+  string,
+  Promise<{ buffer: Buffer; contentType: string } | null>
+>();
+
+function getWorkspaceThumbCacheDir(workspaceId: string): string {
+  const safeWs = workspaceId.replace(/[^a-zA-Z0-9_-]/g, '_') || 'default';
+  return path.join(MOTIONPROVIT_THUMB_CACHE_ROOT, safeWs);
+}
+
+function resolveThumbDiskBaseName(targetUrl: string): string {
+  const jobMatch = targetUrl.match(/\/api\/jobs\/([a-f0-9-]{8,64})\//i);
+  if (jobMatch?.[1]) {
+    return jobMatch[1].toLowerCase();
+  }
+  return createHash('sha1').update(targetUrl).digest('hex').slice(0, 16);
+}
+
+function extForImageContentType(ct: string): string {
+  const lower = ct.toLowerCase();
+  if (lower.includes('png')) return '.png';
+  if (lower.includes('webp')) return '.webp';
+  return '.jpg';
+}
+
+function contentTypeForExt(ext: string): string {
+  const lower = ext.toLowerCase();
+  if (lower === '.png') return 'image/png';
+  if (lower === '.webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+function readThumbFromDisk(
+  workspaceId: string,
+  targetUrl: string
+): { buffer: Buffer; contentType: string } | null {
+  try {
+    const dir = getWorkspaceThumbCacheDir(workspaceId);
+    if (!fs.existsSync(dir)) return null;
+    const baseName = resolveThumbDiskBaseName(targetUrl);
+    for (const ext of ['.jpg', '.webp', '.png']) {
+      const fullPath = path.join(dir, `${baseName}${ext}`);
+      if (fs.existsSync(fullPath)) {
+        const buffer = fs.readFileSync(fullPath);
+        if (buffer.length > 0) {
+          return { buffer, contentType: contentTypeForExt(ext) };
+        }
+      }
+    }
+  } catch {
+    // ignore disk cache read errors
+  }
+  return null;
+}
+
+function writeThumbToDisk(
+  workspaceId: string,
+  targetUrl: string,
+  buffer: Buffer,
+  contentType: string
+): void {
+  try {
+    const dir = getWorkspaceThumbCacheDir(workspaceId);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const baseName = resolveThumbDiskBaseName(targetUrl);
+    const ext = extForImageContentType(contentType);
+    fs.writeFileSync(path.join(dir, `${baseName}${ext}`), buffer);
+  } catch {
+    // non-fatal disk cache write error
+  }
+}
+
+export function getMotionProvitCacheStats(
+  workspaceId?: string
+): MotionProvitCacheStats {
+  const resolvedWsId =
+    workspaceId && workspaceId.trim()
+      ? workspaceId.trim()
+      : getActiveWorkspace().id;
+  const dir = getWorkspaceThumbCacheDir(resolvedWsId);
+  let filesCount = 0;
+  let totalBytes = 0;
+
+  try {
+    if (fs.existsSync(dir)) {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const stat = fs.statSync(path.join(dir, entry.name));
+        filesCount += 1;
+        totalBytes += stat.size;
+      }
+    }
+  } catch {
+    // ignore stat errors
+  }
+
+  return {
+    filesCount,
+    totalBytes,
+    cacheDir: path.relative(APP_ROOT, dir).replace(/\\/g, '/'),
+  };
+}
+
+export function clearMotionProvitThumbCache(
+  workspaceId?: string
+): MotionProvitCacheStats {
+  const resolvedWsId =
+    workspaceId && workspaceId.trim()
+      ? workspaceId.trim()
+      : getActiveWorkspace().id;
+  const dir = getWorkspaceThumbCacheDir(resolvedWsId);
+
+  try {
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } catch {
+    // ignore rm errors
+  }
+
+  const prefix = `${resolvedWsId}::`;
+  for (const key of Array.from(thumbCache.keys())) {
+    if (key.startsWith(prefix)) {
+      thumbCache.delete(key);
+    }
+  }
+
+  return getMotionProvitCacheStats(resolvedWsId);
+}
 
 function buildSavedMotionProvitCookieHeader(workspaceId?: string): string {
   try {
@@ -1109,51 +1334,80 @@ export async function fetchMotionProvitImageBuffer(
       : getActiveWorkspace().id;
   const cacheKey = `${resolvedWsId}::${targetUrl}`;
 
+  // 1. RAM cache (instant 0ms)
   const cached = thumbCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < THUMB_CACHE_TTL_MS) {
     return { buffer: cached.buffer, contentType: cached.contentType };
   }
 
-  // IMPORTANT: Fetch thumbnails strictly via pure HTTP using saved workspace cookies
-  // so browsing pages 1..N NEVER launches Chrome!
-  try {
-    const cookieHeader = buildSavedMotionProvitCookieHeader(resolvedWsId);
-    const headers: Record<string, string> = {
-      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-      Referer: `${MOTIONPROVIT_BASE_URL}/app/jobs`,
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-    };
-    if (cookieHeader) {
-      headers.Cookie = cookieHeader;
-    }
-
-    const res = await fetch(targetUrl, {
-      headers,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    if (!res.ok) return null;
-    const contentType = res.headers.get('content-type') || 'image/jpeg';
-    if (!contentType.toLowerCase().startsWith('image/')) {
-      return null;
-    }
-
-    const arrayBuf = await res.arrayBuffer();
-    const buffer = Buffer.from(arrayBuf);
-    if (buffer.length === 0) return null;
-
+  // 2. Permanent Disk Cache in <project-root>/.cache/motionprovit-thumbs/<workspaceId>/
+  const diskHit = readThumbFromDisk(resolvedWsId, targetUrl);
+  if (diskHit) {
     if (thumbCache.size >= THUMB_CACHE_MAX) {
       const oldestKey = thumbCache.keys().next().value;
       if (oldestKey) thumbCache.delete(oldestKey);
     }
-    thumbCache.set(cacheKey, { buffer, contentType, cachedAt: Date.now() });
-
-    return { buffer, contentType };
-  } catch {
-    return null;
+    thumbCache.set(cacheKey, {
+      buffer: diskHit.buffer,
+      contentType: diskHit.contentType,
+      cachedAt: Date.now(),
+    });
+    return diskHit;
   }
+
+  // 3. Deduplicate concurrent requests for the same URL + throttle via PQueue (max 2 concurrent + jitter)
+  const existingInFlight = inFlightThumbFetches.get(cacheKey);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const fetchPromise = thumbFetchQueue.add(async () => {
+    try {
+      await randomJitter(160, 380);
+      const cookieHeader = buildSavedMotionProvitCookieHeader(resolvedWsId);
+      const headers: Record<string, string> = {
+        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        Referer: `${MOTIONPROVIT_BASE_URL}/app/jobs`,
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
+      };
+      if (cookieHeader) {
+        headers.Cookie = cookieHeader;
+      }
+
+      const res = await fetch(targetUrl, {
+        headers,
+        redirect: 'follow',
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (!res.ok) return null;
+      const contentType = res.headers.get('content-type') || 'image/jpeg';
+      if (!contentType.toLowerCase().startsWith('image/')) {
+        return null;
+      }
+
+      const arrayBuf = await res.arrayBuffer();
+      const buffer = Buffer.from(arrayBuf);
+      if (buffer.length === 0) return null;
+
+      writeThumbToDisk(resolvedWsId, targetUrl, buffer, contentType);
+      if (thumbCache.size >= THUMB_CACHE_MAX) {
+        const oldestKey = thumbCache.keys().next().value;
+        if (oldestKey) thumbCache.delete(oldestKey);
+      }
+      thumbCache.set(cacheKey, { buffer, contentType, cachedAt: Date.now() });
+
+      return { buffer, contentType };
+    } catch {
+      return null;
+    } finally {
+      inFlightThumbFetches.delete(cacheKey);
+    }
+  });
+
+  inFlightThumbFetches.set(cacheKey, fetchPromise);
+  return fetchPromise;
 }
 
 function allocateNextAvailableSlots(
@@ -1446,6 +1700,18 @@ export async function startMotionProvitBatchImport(
           runProgress.currentStep = 'Dibatalkan oleh pengguna.';
           runProgress.finishedAt = new Date().toISOString();
           return;
+        }
+
+        // Human-paced pause between consecutive downloads to stay well below rate limits
+        if (i > 0) {
+          runProgress.currentStep = `(${i + 1}/${selectedJobs.length}) Menunggu jeda aman sebelum video berikutnya...`;
+          await randomJitter(2800, 5200);
+          if (controller.signal.aborted) {
+            runProgress.status = 'cancelled';
+            runProgress.currentStep = 'Dibatalkan oleh pengguna.';
+            runProgress.finishedAt = new Date().toISOString();
+            return;
+          }
         }
 
         const job = selectedJobs[i];

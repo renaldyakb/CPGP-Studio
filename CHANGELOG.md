@@ -4,6 +4,21 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.6.3] - 2026-11-25 (MotionProvit Root Disk Cache, Incremental Sync, Anti-Burst Rate Limiter & Human Jitter)
+
+### Peningkatan (Improved)
+- **Disk Cache Thumbnail Permanen di Root Project (`.cache/motionprovit-thumbs/<workspaceId>/`)**:
+  - Setiap thumbnail yang sudah dimuat otomatis disimpan ke disk di folder `.cache/motionprovit-thumbs/<workspaceId>/` (diabaikan oleh `.gitignore` dan `vite.config.ts` agar aman dari git dan tidak memicu HMR reload), sehingga setelah restart server pun thumbnail lama tidak di-request ulang ke MotionProvit.
+  - Menambahkan endpoint `POST /api/addons/motionprovit/cache/clear` dan tombol **`Bersihkan Cache`** (lengkap dengan info jumlah berkas, ukuran KB, dan lokasi folder) langsung di halaman Add-on MotionProvit.
+- **Incremental Sync (`Cek Baru`) vs `Sinkron Semua` & Cooldown 30 Detik**:
+  - Tombol **`Cek Baru`** kini secara default melakukan sinkronisasi inkremental (cukup 1 halaman `/app/jobs?hal=1&per=24` dan berhenti otomatis saat bertemu `#ID` yang sudah ada di cache lokal), sementara tombol ikon **`Sinkron Semua`** tersedia jika ingin memindai ulang seluruh halaman.
+  - Dilengkapi cooldown perlindungan **30 detik** antar sinkronisasi agar tidak memicu proteksi rate-limit.
+- **Anti-Burst Rate Limiter & Jeda Acak Manusiawi (`server/addons/motionprovitScraper.ts`)**:
+  - Pembatasan antrean fetch thumbnail baru maksimal **2 paralel** (`PQueue`) + deduplikasi request + jeda acak `160-380ms`.
+  - Jeda acak `2.2-4.2 detik` antar halaman saat sinkron penuh dan `2.8-5.2 detik` antar video saat batch download.
+
+---
+
 ## [v2.6.2] - 2026-11-25 (Fix Chrome Auto-Opening When Paginating MotionProvit List)
 
 ### Perbaikan (Fixed)

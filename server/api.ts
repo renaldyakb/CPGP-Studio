@@ -30,9 +30,11 @@ import {
 import {
   cancelMotionProvitImport,
   checkMotionProvitSession,
+  clearMotionProvitThumbCache,
   disconnectMotionProvit,
   enrichJobsWithWorkspaceStatus,
   fetchMotionProvitImageBuffer,
+  getMotionProvitCacheStats,
   getMotionProvitImportProgress,
   loginMotionProvit,
   openMotionProvitLoginBrowser,
@@ -2329,6 +2331,7 @@ export function createApiRouter(): Express {
         config: toPublicMotionProvitConfig(internal, workspace.id),
         jobs,
         nextSlot,
+        cacheStats: getMotionProvitCacheStats(workspace.id),
         importProgress: getMotionProvitImportProgress(workspace.id),
       });
     } catch (error) {
@@ -2431,10 +2434,12 @@ export function createApiRouter(): Express {
   // POST /api/addons/motionprovit/jobs/fetch
   app.post(
     '/api/addons/motionprovit/jobs/fetch',
-    async (_req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       try {
         const workspace = getActiveWorkspace();
-        const result = await scrapeMotionProvitJobs(workspace.id);
+        const rawMode = req.body?.mode;
+        const mode = rawMode === 'full' ? 'full' : 'incremental';
+        const result = await scrapeMotionProvitJobs(workspace.id, { mode });
         const db = getOrInitDatabase();
         const nextSlot = suggestNextAvailableSlot(db, workspace);
 
@@ -2443,6 +2448,10 @@ export function createApiRouter(): Express {
           config: result.config,
           jobs: result.jobs,
           nextSlot,
+          syncMode: result.syncMode,
+          newFoundCount: result.newFoundCount,
+          pagesScanned: result.pagesScanned,
+          cacheStats: getMotionProvitCacheStats(workspace.id),
         });
       } catch (error) {
         res.status(500).json({
@@ -2451,6 +2460,26 @@ export function createApiRouter(): Express {
             error instanceof Error
               ? error.message
               : 'Gagal mengambil daftar video dari MotionProvit',
+        });
+      }
+    }
+  );
+
+  // POST /api/addons/motionprovit/cache/clear
+  app.post(
+    '/api/addons/motionprovit/cache/clear',
+    (_req: Request, res: Response) => {
+      try {
+        const workspace = getActiveWorkspace();
+        const cacheStats = clearMotionProvitThumbCache(workspace.id);
+        res.json({ ok: true, cacheStats });
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal membersihkan cache thumbnail MotionProvit',
         });
       }
     }

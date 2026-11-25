@@ -1,3 +1,9 @@
+export interface MotionProvitCacheStats {
+  filesCount: number;
+  totalBytes: number;
+  cacheDir: string;
+}
+
 export interface MotionProvitConfigPublic {
   workspaceId: string;
   baseUrl: string;

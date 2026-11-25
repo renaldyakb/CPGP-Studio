@@ -1,5 +1,6 @@
 import type { NextSuggestedSlot } from '@/types/workspace';
 import type {
+  MotionProvitCacheStats,
   MotionProvitConfigPublic,
   MotionProvitImportProgress,
   MotionProvitImportRequest,
@@ -26,6 +27,7 @@ export interface MotionProvitStatusResponse {
   config: MotionProvitConfigPublic;
   jobs: MotionProvitJobSummary[];
   nextSlot: NextSuggestedSlot;
+  cacheStats?: MotionProvitCacheStats;
   importProgress: MotionProvitImportProgress | null;
 }
 
@@ -70,13 +72,24 @@ export const motionprovitApi = {
     });
   },
 
-  fetchJobs(): Promise<{
+  fetchJobs(mode: 'incremental' | 'full' = 'incremental'): Promise<{
     ok: boolean;
     config: MotionProvitConfigPublic;
     jobs: MotionProvitJobSummary[];
     nextSlot: NextSuggestedSlot;
+    syncMode?: 'incremental' | 'full';
+    newFoundCount?: number;
+    pagesScanned?: number;
+    cacheStats?: MotionProvitCacheStats;
   }> {
     return requestJson('/api/addons/motionprovit/jobs/fetch', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    });
+  },
+
+  clearCache(): Promise<{ ok: boolean; cacheStats: MotionProvitCacheStats }> {
+    return requestJson('/api/addons/motionprovit/cache/clear', {
       method: 'POST',
     });
   },
