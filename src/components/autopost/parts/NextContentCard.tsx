@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import {
   Droplets,
   Ellipsis,
@@ -39,6 +38,8 @@ export interface NextContentCardProps {
   items: ContentPlannerItem[];
   data: UseAutoPostDataResult;
   selectedId: string;
+  mode: AutoPostMode;
+  onModeChange: (mode: AutoPostMode) => void;
   onSelectChange: (itemId: string) => void;
   onEditCaption: (item: ContentPlannerItem) => void;
   onOpenWatermark: (item: ContentPlannerItem) => void;
@@ -62,13 +63,13 @@ export function NextContentCard({
   items,
   data,
   selectedId,
+  mode,
+  onModeChange,
   onSelectChange,
   onEditCaption,
   onOpenWatermark,
   onOpenContentDetail,
 }: NextContentCardProps) {
-  const [mode, setMode] = useState<AutoPostMode>(data.settings.defaultMode);
-
   const selected =
     items.find((item) => item.id === selectedId) ??
     pickNextContent(items) ??
@@ -208,7 +209,7 @@ export function NextContentCard({
             size="xs"
             variant={mode === 'review' ? 'default' : 'ghost'}
             aria-pressed={mode === 'review'}
-            onClick={() => setMode('review')}
+            onClick={() => onModeChange('review')}
           >
             Tinjau
           </Button>
@@ -217,7 +218,7 @@ export function NextContentCard({
             size="xs"
             variant={mode === 'publish' ? 'default' : 'ghost'}
             aria-pressed={mode === 'publish'}
-            onClick={() => setMode('publish')}
+            onClick={() => onModeChange('publish')}
           >
             Langsung
           </Button>
@@ -231,7 +232,9 @@ export function NextContentCard({
           onClick={() => void data.triggerPost(selected.id, pendingKeys, mode)}
         >
           <Send className="size-3.5" aria-hidden="true" />
-          Kirim ({pendingKeys.length} Platform)
+          {mode === 'publish'
+            ? `Publish (${pendingKeys.length} Platform)`
+            : `Tinjau (${pendingKeys.length} Platform)`}
         </Button>
 
         <div className="flex items-center gap-1">

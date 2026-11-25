@@ -4,6 +4,18 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.3.1] - 2026-11-25 (1-Click Direct Publish per Platform & Synced Publish/Review Mode)
+
+### Peningkatan (Improved)
+- **Tombol Langsung Publish (Tanpa Tinjau) di Setiap Platform (`PlatformStatusList.tsx`)**:
+  - Setiap baris platform (**YouTube**, **TikTok**, **Instagram**, **Facebook**) kini memiliki 2 aksi cepat yang jelas: **`Tinjau`** (ikon mata) dan **`Langsung Publish`** (ikon kirim, langsung upload dan klik Publish/Post/Share tanpa berhenti untuk review).
+  - Tombol gabungan **`Publish FB + IG`** / **`Tinjau FB + IG`** di footer kartu mengikuti mode aktif yang dipilih.
+- **Sinkronisasi & Persistensi Mode `Tinjau` / `Langsung` (`DashboardPage.tsx`, `NextContentCard.tsx`)**:
+  - Memperbaiki masalah sebelumnya di mana toggle **`Tinjau` | `Langsung`** hanya memengaruhi tombol di `NextContentCard` sementara tombol per platform dan tabel **Antrean Konten** selalu memakai mode `review`.
+  - Kini pilihan **`Tinjau` | `Langsung`** tersinkronisasi di seluruh halaman Dashboard (kartu utama, **`FB + IG`**, dan tombol Play di tabel **Antrean Konten**) serta otomatis tersimpan sebagai `defaultMode` workspace.
+
+---
+
 ## [v2.3.0] - 2026-11-25 (Unified Meta Business Suite Auto-Post for Facebook & Instagram Reels)
 
 ### Fitur Baru & Peningkatan (Added / Improved)

@@ -23,6 +23,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import type { AutoPostMode } from '@/types/autopost';
 import type { PlatformKey, WorkflowStatus } from '@/types/planner';
 import type { AutoPostPageProps } from '../pageProps';
 import { useDerivedStats, pickNextContent } from '../useAutoPostData';
@@ -70,6 +71,20 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
   const [selectedId, setSelectedId] = useState<string>(
     () => pickNextContent(ctx.items)?.id ?? ''
   );
+  const [mode, setMode] = useState<AutoPostMode>(
+    () => ctx.data.settings.defaultMode
+  );
+
+  useEffect(() => {
+    setMode(ctx.data.settings.defaultMode);
+  }, [ctx.data.settings.defaultMode]);
+
+  const handleModeChange = (nextMode: AutoPostMode) => {
+    setMode(nextMode);
+    if (ctx.data.settings.defaultMode !== nextMode) {
+      void ctx.data.saveSettings({ defaultMode: nextMode });
+    }
+  };
 
   useEffect(() => {
     if (
@@ -119,6 +134,8 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
             items={ctx.items}
             data={ctx.data}
             selectedId={activeItem?.id ?? ''}
+            mode={mode}
+            onModeChange={handleModeChange}
             onSelectChange={setSelectedId}
             onEditCaption={ctx.onEditCaption}
             onOpenWatermark={ctx.onOpenWatermark}
@@ -126,7 +143,7 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
           />
         </div>
         <div className="xl:col-span-5">
-          <PlatformStatusList item={activeItem} data={ctx.data} />
+          <PlatformStatusList item={activeItem} data={ctx.data} mode={mode} />
         </div>
       </div>
 
@@ -265,8 +282,12 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
                         <IconActionButton
-                          icon={Play}
-                          label="Auto-Post konten ini"
+                          icon={mode === 'publish' ? Send : Play}
+                          label={
+                            mode === 'publish'
+                              ? 'Langsung publish konten ini'
+                              : 'Tinjau auto-post konten ini'
+                          }
                           disabled={
                             pendingKeys.length === 0 ||
                             !hasWmFinal ||
@@ -276,7 +297,7 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
                             void ctx.data.triggerPost(
                               item.id,
                               pendingKeys,
-                              'review'
+                              mode
                             )
                           }
                         />

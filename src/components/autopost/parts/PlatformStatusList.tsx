@@ -1,4 +1,4 @@
-import { ExternalLink, Monitor, Play, Zap } from 'lucide-react';
+import { ExternalLink, Eye, Monitor, Send, Zap } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -13,7 +13,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import type { AutoPostCapabilities } from '@/types/autopost';
+import type { AutoPostCapabilities, AutoPostMode } from '@/types/autopost';
 import type {
   ContentPlannerItem,
   PlatformKey,
@@ -30,6 +30,7 @@ import { PLATFORM_ORDER, PlatformIcon } from './platformMeta';
 export interface PlatformStatusListProps {
   item: ContentPlannerItem | null;
   data: UseAutoPostDataResult;
+  mode: AutoPostMode;
 }
 
 type PlatformStatusVariant =
@@ -64,7 +65,11 @@ function platformStatusMeta(status: PlatformUploadStatus): {
   }
 }
 
-export function PlatformStatusList({ item, data }: PlatformStatusListProps) {
+export function PlatformStatusList({
+  item,
+  data,
+  mode,
+}: PlatformStatusListProps) {
   const publishedCount = countPublishedPlatforms(item);
 
   return (
@@ -156,18 +161,25 @@ export function PlatformStatusList({ item, data }: PlatformStatusListProps) {
                       }
                     />
                   ) : (
-                    <IconActionButton
-                      icon={Play}
-                      label={`Auto-Post ${platformName}`}
-                      disabled={!hasWmFinal || isBusy}
-                      onClick={() =>
-                        void data.triggerPost(
-                          item.id,
-                          [key],
-                          data.settings.defaultMode
-                        )
-                      }
-                    />
+                    <div className="flex items-center gap-1">
+                      <IconActionButton
+                        icon={Eye}
+                        label={`Tinjau ${platformName}`}
+                        disabled={!hasWmFinal || isBusy}
+                        onClick={() =>
+                          void data.triggerPost(item.id, [key], 'review')
+                        }
+                      />
+                      <IconActionButton
+                        icon={Send}
+                        label={`Langsung publish ${platformName}`}
+                        variant="outline"
+                        disabled={!hasWmFinal || isBusy}
+                        onClick={() =>
+                          void data.triggerPost(item.id, [key], 'publish')
+                        }
+                      />
+                    </div>
                   )}
                 </div>
               </div>
@@ -181,37 +193,43 @@ export function PlatformStatusList({ item, data }: PlatformStatusListProps) {
           {publishedCount}/4 selesai
         </span>
         {item ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="outline"
-                  disabled={
-                    !item.autoMetadata.readiness.hasWmFinal ||
-                    data.busyKey === `trigger:${item.id}`
-                  }
-                  onClick={() =>
-                    void data.triggerPost(
-                      item.id,
-                      ['fb_reels', 'ig_reels'],
-                      data.settings.defaultMode
-                    )
-                  }
-                />
-              }
-            >
-              <span className="inline-flex items-center gap-1">
-                <PlatformIcon platform="fb_reels" size={12} />
-                <PlatformIcon platform="ig_reels" size={12} />
-                <span>FB + IG</span>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="top">
-              Upload Facebook &amp; Instagram sekaligus via Meta Business Suite
-            </TooltipContent>
-          </Tooltip>
+          <div className="flex items-center gap-1.5">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    disabled={
+                      !item.autoMetadata.readiness.hasWmFinal ||
+                      data.busyKey === `trigger:${item.id}`
+                    }
+                    onClick={() =>
+                      void data.triggerPost(
+                        item.id,
+                        ['fb_reels', 'ig_reels'],
+                        mode
+                      )
+                    }
+                  />
+                }
+              >
+                <span className="inline-flex items-center gap-1">
+                  <PlatformIcon platform="fb_reels" size={12} />
+                  <PlatformIcon platform="ig_reels" size={12} />
+                  <span>
+                    {mode === 'publish' ? 'Publish FB + IG' : 'Tinjau FB + IG'}
+                  </span>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                {mode === 'publish'
+                  ? 'Langsung publish Facebook & Instagram sekaligus via Meta Business Suite'
+                  : 'Tinjau Facebook & Instagram sekaligus via Meta Business Suite'}
+              </TooltipContent>
+            </Tooltip>
+          </div>
         ) : null}
       </CardFooter>
     </Card>
