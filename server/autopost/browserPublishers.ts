@@ -874,58 +874,73 @@ async function uploadFacebookReelCover(
       return true;
     }
 
-    // If clicking switched to an Upload Image sub-panel, inject via image file input or secondary button
-    await abortableWait(500, signal);
+    // Step 2: Meta Business Suite reveals a secondary row ("[icon] Upload image ... [Upload Image]")
+    // Prioritize clicking the revealed "Upload Image" button/link on the right side of that row!
+    await abortableWait(650, signal);
 
-    const imageInputCandidates: Locator[] = [
+    const secondaryCandidates: Locator[] = [
+      // Exact case match for the blue "Upload Image" link/button shown in Meta Business Suite
       reelSurface
-        .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
+        .locator('a, button, [role="button"], span, div')
+        .filter({ hasText: /^Upload Image$/ })
         .last(),
+      reelSurface
+        .locator('a, button, [role="button"]')
+        .filter({ hasText: UPLOAD_IMAGE_LABEL })
+        .last(),
+      reelSurface.getByText(UPLOAD_IMAGE_LABEL).last(),
       page
         .locator(
-          '[data-surface*="bizweb_create_reel"] input[type="file"][accept*="image"]:not([accept*="video"])'
+          '[data-surface$="bizweb_create_reel:left_panel"] a, [data-surface$="bizweb_create_reel:left_panel"] button, [data-surface$="bizweb_create_reel:left_panel"] [role="button"]'
         )
-        .last(),
-      page
-        .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
+        .filter({ hasText: UPLOAD_IMAGE_LABEL })
         .last(),
     ];
 
-    for (const imgInput of imageInputCandidates) {
-      const count = await imgInput.count().catch(() => 0);
-      if (count > 0) {
-        await imgInput.setInputFiles(coverPath);
-        await humanDelay(2000, 2800, signal);
-        onProgress({
-          step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
-          progressPercent: 73,
-          log: `Cover ${coverFileName} terpasang melalui input gambar Thumbnail.`,
-          level: 'success',
-        });
-        return true;
+    for (const secondBtn of secondaryCandidates) {
+      const visible = await secondBtn
+        .isVisible({ timeout: 1000 })
+        .catch(() => false);
+      if (!visible) continue;
+
+      try {
+        await secondBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+        const secondChooserPromise = page
+          .waitForEvent('filechooser', { timeout: 5500 })
+          .catch(() => null);
+        await secondBtn.click({ timeout: 6000 });
+        const secondChooser = await raceWithAbort(secondChooserPromise, signal);
+
+        if (secondChooser) {
+          await secondChooser.setFiles([coverPath]);
+          await humanDelay(2200, 3000, signal);
+          onProgress({
+            step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
+            progressPercent: 73,
+            log: `Cover ${coverFileName} terpasang melalui tombol kedua Upload Image.`,
+            level: 'success',
+          });
+          return true;
+        }
+      } catch (err) {
+        if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          throw createAbortError();
+        }
+        // Try next candidate
       }
     }
 
-    // Secondary upload button inside revealed Upload Image panel
-    const allUploadBtns = reelSurface
-      .locator('[role="button"], button')
-      .filter({ hasText: UPLOAD_IMAGE_LABEL });
-    const btnCount = await allUploadBtns.count().catch(() => 0);
-    if (btnCount >= 2) {
-      const secondBtn = allUploadBtns.last();
-      const [secondChooser] = await raceWithAbort(
-        Promise.all([
-          page.waitForEvent('filechooser', { timeout: 8000 }),
-          secondBtn.click({ timeout: 6000 }),
-        ]),
-        signal
-      );
-      await secondChooser.setFiles([coverPath]);
-      await humanDelay(2000, 2800, signal);
+    // Fallback: direct image file input scoped strictly inside bizweb_create_reel (not hidden post composer)
+    const scopedImageInput = reelSurface
+      .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
+      .last();
+    if ((await scopedImageInput.count().catch(() => 0)) > 0) {
+      await scopedImageInput.setInputFiles(coverPath);
+      await humanDelay(2200, 3000, signal);
       onProgress({
         step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
         progressPercent: 73,
-        log: `Cover ${coverFileName} terpasang melalui panel Upload image.`,
+        log: `Cover ${coverFileName} terpasang melalui input gambar di Reels Composer.`,
         level: 'success',
       });
       return true;

@@ -4,6 +4,13 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.2.2] - 2026-11-25 (Fix 2-Step "Upload image" -> "Upload Image" Thumbnail Flow on Facebook Reels)
+
+### Perbaikan (Fixed)
+- **Alur 2-Langkah Tombol `Upload image` -> `Upload Image` di Meta Business Suite**: Memperbaiki `uploadFacebookReelCover()` di `server/autopost/browserPublishers.ts` agar setelah mengklik tab `Upload image`, sistem langsung memprioritaskan klik tombol/tautan biru kedua **`Upload Image`** yang muncul di panel bawahnya (memicu `filechooser` secara presisi), serta membatasi fallback `<input type="file" accept="image/*">` hanya di dalam `reelSurface` agar tidak menyuntikkan gambar ke input tersembunyi milik composer lama.
+
+---
+
 ## [v2.2.1] - 2026-11-25 (Auto-Upload Custom 9:16 Cover Thumbnail on Facebook Reels)
 
 ### Peningkatan (Improved)
