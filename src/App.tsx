@@ -81,6 +81,10 @@ const ROUTE_TITLES: Record<string, { title: string; subtitle: string }> = {
     title: 'Watermark',
     subtitle: 'Atur overlay dan render video',
   },
+  '/addons/motionprovit': {
+    title: 'MotionProvit',
+    subtitle: 'Add-on impor video, cover, dan caption dari motion.clipprovit.com',
+  },
 };
 
 function normalizePath(pathname: string): string {
@@ -888,7 +892,9 @@ export function App() {
         onOpenQuickGuide={openQuickGuide}
         onOpenCreateContent={() => openCreateContent('single')}
         toolbar={
-          activePath === '/' || activePath === '/watermark' ? undefined : (
+          activePath === '/' ||
+          activePath === '/watermark' ||
+          activePath === '/addons/motionprovit' ? undefined : (
             <PlannerToolbar />
           )
         }

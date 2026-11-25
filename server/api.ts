@@ -24,6 +24,22 @@ import type {
   UpdateWorkspaceInput,
 } from '../shared/types/workspace.ts';
 import {
+  getInternalMotionProvitConfig,
+  toPublicMotionProvitConfig,
+} from './addons/motionprovitConfig.ts';
+import {
+  cancelMotionProvitImport,
+  checkMotionProvitSession,
+  disconnectMotionProvit,
+  enrichJobsWithWorkspaceStatus,
+  fetchMotionProvitImageBuffer,
+  getMotionProvitImportProgress,
+  loginMotionProvit,
+  openMotionProvitLoginBrowser,
+  scrapeMotionProvitJobs,
+  startMotionProvitBatchImport,
+} from './addons/motionprovitScraper.ts';
+import {
   checkPlatformLoginSessions,
   closeBrowserSession,
   getActiveBrowserProfileDir,
@@ -2291,6 +2307,261 @@ export function createApiRouter(): Express {
       unsubscribeBrowser();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // 9b. Add-on: MotionProvit Scraper & Selective Batch Importer
+  // ---------------------------------------------------------------------------
+
+  // GET /api/addons/motionprovit/status
+  app.get('/api/addons/motionprovit/status', (_req: Request, res: Response) => {
+    try {
+      const workspace = getActiveWorkspace();
+      const internal = getInternalMotionProvitConfig(workspace.id);
+      const db = getOrInitDatabase();
+      const jobs = enrichJobsWithWorkspaceStatus(
+        internal.cachedJobs,
+        workspace.id
+      );
+      const nextSlot = suggestNextAvailableSlot(db, workspace);
+
+      res.json({
+        ok: true,
+        config: toPublicMotionProvitConfig(internal, workspace.id),
+        jobs,
+        nextSlot,
+        importProgress: getMotionProvitImportProgress(workspace.id),
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: 'Gagal memuat status Add-on MotionProvit',
+        details: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // POST /api/addons/motionprovit/login
+  app.post(
+    '/api/addons/motionprovit/login',
+    async (req: Request, res: Response) => {
+      try {
+        const workspace = getActiveWorkspace();
+        const email =
+          typeof req.body?.email === 'string' ? req.body.email : undefined;
+        const password =
+          typeof req.body?.password === 'string'
+            ? req.body.password
+            : undefined;
+
+        const result = await loginMotionProvit(
+          { email, password },
+          workspace.id
+        );
+        res.status(result.ok ? 200 : 401).json(result);
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal login ke MotionProvit',
+        });
+      }
+    }
+  );
+
+  // POST /api/addons/motionprovit/open-login
+  app.post(
+    '/api/addons/motionprovit/open-login',
+    async (_req: Request, res: Response) => {
+      try {
+        const workspace = getActiveWorkspace();
+        const result = await openMotionProvitLoginBrowser(workspace.id);
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal membuka halaman login MotionProvit di browser',
+        });
+      }
+    }
+  );
+
+  // POST /api/addons/motionprovit/check-session
+  app.post(
+    '/api/addons/motionprovit/check-session',
+    async (_req: Request, res: Response) => {
+      try {
+        const workspace = getActiveWorkspace();
+        const result = await checkMotionProvitSession(workspace.id);
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          connected: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal memeriksa sesi MotionProvit',
+        });
+      }
+    }
+  );
+
+  // POST /api/addons/motionprovit/disconnect
+  app.post(
+    '/api/addons/motionprovit/disconnect',
+    async (_req: Request, res: Response) => {
+      try {
+        const workspace = getActiveWorkspace();
+        const config = await disconnectMotionProvit(workspace.id);
+        res.json({ ok: true, config });
+      } catch (error) {
+        res.status(500).json({
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal memutuskan koneksi MotionProvit',
+        });
+      }
+    }
+  );
+
+  // POST /api/addons/motionprovit/jobs/fetch
+  app.post(
+    '/api/addons/motionprovit/jobs/fetch',
+    async (_req: Request, res: Response) => {
+      try {
+        const workspace = getActiveWorkspace();
+        const result = await scrapeMotionProvitJobs(workspace.id);
+        const db = getOrInitDatabase();
+        const nextSlot = suggestNextAvailableSlot(db, workspace);
+
+        res.json({
+          ok: true,
+          config: result.config,
+          jobs: result.jobs,
+          nextSlot,
+        });
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal mengambil daftar video dari MotionProvit',
+        });
+      }
+    }
+  );
+
+  // GET /api/addons/motionprovit/thumb?url=...
+  app.get(
+    '/api/addons/motionprovit/thumb',
+    async (req: Request, res: Response) => {
+      try {
+        const rawUrl = typeof req.query.url === 'string' ? req.query.url : '';
+        if (!rawUrl || !rawUrl.startsWith('http')) {
+          res.status(400).end();
+          return;
+        }
+        const workspace = getActiveWorkspace();
+        const result = await fetchMotionProvitImageBuffer(rawUrl, workspace.id);
+        if (!result) {
+          res.status(404).end();
+          return;
+        }
+        res.setHeader('Content-Type', result.contentType);
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        res.send(result.buffer);
+      } catch {
+        res.status(500).end();
+      }
+    }
+  );
+
+  // POST /api/addons/motionprovit/import
+  app.post(
+    '/api/addons/motionprovit/import',
+    async (req: Request, res: Response) => {
+      try {
+        const workspace = getActiveWorkspace();
+        const body = req.body ?? {};
+        const jobIds = Array.isArray(body.jobIds)
+          ? body.jobIds.filter(
+              (id: unknown): id is string =>
+                typeof id === 'string' && id.trim().length > 0
+            )
+          : [];
+        const rawAssets = body.assets ?? {};
+        const assets = {
+          video: rawAssets.video !== false,
+          cover: rawAssets.cover !== false,
+          caption: rawAssets.caption !== false,
+        };
+        const startDateIso =
+          typeof body.startDateIso === 'string' && body.startDateIso.trim()
+            ? body.startDateIso.trim()
+            : undefined;
+        const startSlotCode =
+          typeof body.startSlotCode === 'string' && body.startSlotCode.trim()
+            ? body.startSlotCode.trim()
+            : undefined;
+
+        const progress = await startMotionProvitBatchImport(
+          {
+            jobIds,
+            assets,
+            startDateIso,
+            startSlotCode,
+          },
+          workspace.id,
+          (reason, updatedDb, wsId) => {
+            if (wsId === getActiveWorkspace().id) {
+              broadcastUpdate(reason, updatedDb);
+            }
+          }
+        );
+
+        res.json({ ok: true, importProgress: progress });
+      } catch (error) {
+        res.status(400).json({
+          ok: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Gagal memulai pengunduhan MotionProvit',
+        });
+      }
+    }
+  );
+
+  // GET /api/addons/motionprovit/import/status
+  app.get(
+    '/api/addons/motionprovit/import/status',
+    (_req: Request, res: Response) => {
+      const workspace = getActiveWorkspace();
+      res.json({
+        ok: true,
+        importProgress: getMotionProvitImportProgress(workspace.id),
+      });
+    }
+  );
+
+  // POST /api/addons/motionprovit/import/cancel
+  app.post(
+    '/api/addons/motionprovit/import/cancel',
+    (_req: Request, res: Response) => {
+      const workspace = getActiveWorkspace();
+      const cancelled = cancelMotionProvitImport(workspace.id);
+      res.json({
+        ok: true,
+        cancelled,
+        importProgress: getMotionProvitImportProgress(workspace.id),
+      });
+    }
+  );
 
   // 10. GET /media/* - Streams files from active workspace contentRootPath with HTTP Range (206 Partial Content)
   app.get(/^\/media\/(.+)$/, (req: Request, res: Response) => {

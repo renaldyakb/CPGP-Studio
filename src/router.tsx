@@ -21,6 +21,7 @@ import { CalendarPage } from './routes/planner/CalendarPage';
 import { SchedulePage } from './routes/planner/SchedulePage';
 import { GalleryPage } from './routes/planner/GalleryPage';
 import { WatermarkPage } from './routes/planner/WatermarkPage';
+import { MotionProvitPage } from './routes/planner/MotionProvitPage';
 
 function readString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -172,6 +173,12 @@ const watermarkRoute = createRoute({
   component: WatermarkPage,
 });
 
+const motionProvitAddonRoute = createRoute({
+  getParentRoute: () => plannerLayoutRoute,
+  path: '/addons/motionprovit',
+  component: MotionProvitPage,
+});
+
 const autoPostRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/auto-post',
@@ -246,6 +253,7 @@ const routeTree = rootRoute.addChildren([
     scheduleRoute,
     galleryRoute,
     watermarkRoute,
+    motionProvitAddonRoute,
   ]),
   autoPostRoute.addChildren([
     autoPostIndexRoute,

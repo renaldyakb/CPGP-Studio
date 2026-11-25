@@ -57,6 +57,8 @@ export interface WorkspacePaths {
   watermarkPresetsFile: string;
   autopostFile: string;
   browserProfileDir: string;
+  motionprovitConfigFile: string;
+  motionprovitSessionFile: string;
 }
 
 export function getWorkspacePaths(workspaceId?: string): WorkspacePaths {
@@ -71,6 +73,8 @@ export function getWorkspacePaths(workspaceId?: string): WorkspacePaths {
     watermarkPresetsFile: path.join(dir, 'watermark-presets.json'),
     autopostFile: path.join(dir, 'autopost-config.json'),
     browserProfileDir: path.join(dir, 'browser-profile'),
+    motionprovitConfigFile: path.join(dir, 'motionprovit-config.json'),
+    motionprovitSessionFile: path.join(dir, 'motionprovit-session.json'),
   };
 }
 
@@ -85,6 +89,8 @@ function ensureWorkspaceDataDirectory(workspaceId: string): WorkspacePaths {
     watermarkPresetsFile: path.join(dir, 'watermark-presets.json'),
     autopostFile: path.join(dir, 'autopost-config.json'),
     browserProfileDir: path.join(dir, 'browser-profile'),
+    motionprovitConfigFile: path.join(dir, 'motionprovit-config.json'),
+    motionprovitSessionFile: path.join(dir, 'motionprovit-session.json'),
   };
 }
 

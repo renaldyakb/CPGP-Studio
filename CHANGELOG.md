@@ -4,6 +4,17 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.6.0] - 2026-11-25 (Optional Add-on: MotionProvit Scraper, Workspace Credentials & Selective Batch Importer)
+
+### Fitur Baru (Added)
+- **Add-on Khusus MotionProvit (`server/addons/motionprovitConfig.ts`, `server/addons/motionprovitScraper.ts`, `src/routes/planner/MotionProvitPage.tsx`)**:
+  - Menu opsional **`Add-ons -> MotionProvit`** (`/addons/motionprovit`, juga tersedia di Command Palette `Ctrl+K`) untuk mengambil data video render dari `https://motion.clipprovit.com/app/jobs` dan detail `https://motion.clipprovit.com/app/jobs/{id}` menggunakan engine browser lokal `patchright` (mendukung NextAuth `/api/auth/session`, `/api/sec/hello`, dan Cloudflare Turnstile).
+  - **Autentikasi & Penyimpanan Kredensial Per Workspace**: Mendukung login via form **Email & Password** (`POST /api/addons/motionprovit/login`) maupun **Login via Browser** (`POST /api/addons/motionprovit/open-login` + `Cek Sesi`), dengan kredensial (`motionprovit-config.json`) dan cookies sesi (`motionprovit-session.json`) tersimpan terisolasi di masing-masing workspace (`data/workspaces/<id>/`).
+  - **Pratinjau Daftar Video Tanpa Mengunduh (`POST /api/addons/motionprovit/jobs/fetch`)**: Memindai seluruh video di `/app/jobs` (gabungan intercept JSON API + DOM scraping), menampilkan kartu preview (thumbnail via proxy terautentikasi `/api/addons/motionprovit/thumb`, judul, `#ID`, gaya, rasio, durasi, tanggal), filter gaya & pencarian, serta otomatis menandai video yang **sudah ada di CPGP** (`Di CPGP: DD.SLOT`) dibanding video **`Baru`**.
+  - **Unduh Selektif & Auto-Assign ke Tanggal/Slot Kosong (`POST /api/addons/motionprovit/import`)**: Pengguna bebas memilih video tertentu atau semua video baru, memilih jenis berkas yang ingin diunduh (`Video MP4`, `Cover 9:16`, `Caption`), serta mengatur **Tanggal Mulai (`DatePicker`)** dan **Slot Awal (`01` / `02`)** dengan pratinjau slot target live (`-> November 30.01`, dst.). Sistem otomatis membuat folder konten untuk tanggal/slot yang belum ada (`motionprovit-{id}.mp4`, `cover-{id}-9x16.jpg`, `caption.txt`) dan langsung menyinkronkan Planner CPGP tanpa reload halaman.
+
+---
+
 ## [v2.5.0] - 2026-11-25 (AI-Generated Content Disclosure Alert Dialog, Workspace Default & Auto-Toggle on Platforms)
 
 ### Fitur Baru (Added)

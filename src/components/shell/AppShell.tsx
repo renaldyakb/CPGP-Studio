@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CloudDownload,
   Columns3,
   Droplets,
   FolderKanban,
@@ -86,6 +87,7 @@ type NavTo =
   | '/jadwal'
   | '/galeri'
   | '/watermark'
+  | '/addons/motionprovit'
   | '/auto-post'
   | '/auto-post/history'
   | '/auto-post/studio'
@@ -598,6 +600,27 @@ export function AppShell({
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+
+          <SidebarSeparator />
+
+          {/* Group 3: Add-ons Opsional */}
+          <SidebarGroup>
+            <SidebarGroupLabel>Add-ons</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={activePath === '/addons/motionprovit'}
+                    tooltip="MotionProvit"
+                    onClick={() => void navigate({ to: '/addons/motionprovit' })}
+                  >
+                    <CloudDownload aria-hidden="true" />
+                    <span>MotionProvit</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

@@ -3,6 +3,7 @@ import { useNavigate } from '@tanstack/react-router';
 import {
   CalendarClock,
   CalendarDays,
+  CloudDownload,
   Columns3,
   Droplets,
   HelpCircle,
@@ -107,6 +108,14 @@ export function CommandPalette({
             >
               <Droplets className="size-3.5" aria-hidden="true" />
               <span>Watermark Studio</span>
+            </CommandItem>
+            <CommandItem
+              onSelect={() =>
+                run(() => void navigate({ to: '/addons/motionprovit' }))
+              }
+            >
+              <CloudDownload className="size-3.5" aria-hidden="true" />
+              <span>Add-on MotionProvit</span>
             </CommandItem>
             {onRescan ? (
               <CommandItem onSelect={() => run(onRescan)}>
