@@ -1,6 +1,16 @@
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
+@custom-variant data-horizontal (&:where([data-orientation="horizontal"], [data-horizontal]));
+@custom-variant data-vertical (&:where([data-orientation="vertical"], [data-vertical]));
+@custom-variant data-checked (&:where([data-checked], [data-state="checked"]));
+@custom-variant data-unchecked (&:where([data-unchecked], [data-state="unchecked"]));
+@custom-variant data-open (&:where([data-open], [data-state="open"]));
+@custom-variant data-closed (&:where([data-closed], [data-state="closed"]));
+@custom-variant data-active (&:where([data-active], [data-state="active"]));
+@custom-variant data-disabled (&:where([data-disabled], :disabled));
+@custom-variant data-inset (&:where([data-inset]));
+@custom-variant data-popup-open (&:where([data-popup-open]));
 
 @theme inline {
   --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -174,6 +184,49 @@
 
 .border-t-cpgp {
   border-top: 2px solid #7f1d1d;
+}
+
+/* High-contrast, clean scrollbars for Light & Dark modes */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c7b8bc #f2eaec;
+}
+
+.dark * {
+  scrollbar-width: thin;
+  scrollbar-color: #543e45 #171214;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f2eaec;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: #171214;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c7b8bc;
+  border-radius: 9999px;
+  border: 2px solid #f2eaec;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #7f1d1d;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #543e45;
+  border: 2px solid #171214;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #be123c;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -4,6 +4,14 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.0.3] - 2026-11-25 (Slider Rail & Scrollbar Contrast Fix)
+
+### Perbaikan (Fixed)
+- **Fix Rel `Slider` Hilang / Menyatu dengan Background**: Menambahkan `@custom-variant` Tailwind CSS v4 untuk atribut Base UI (`data-horizontal`, `data-vertical`, `data-checked`, `data-unchecked`, `data-open`, `data-closed`, `data-active`, `data-disabled`) di `src/index.css` dan memperjelas rel slider (`h-2`, warna rel `#dfd5d8` / `#35282c`, indikator burgundy `#7f1d1d` / `#be123c`, thumb `size-4`).
+- **Kontras Scrollbar Light & Dark Mode**: Memperjelas rel dan thumb scrollbar global (`src/index.css`) serta `ScrollArea` (`src/components/ui/scroll-area.tsx`) agar mudah terlihat di mode terang maupun mode gelap.
+
+---
+
 ## [v2.0.2] - 2026-11-25 (Windows Batch Launcher Fix)
 
 ### Perbaikan (Fixed)
