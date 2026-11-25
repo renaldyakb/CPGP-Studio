@@ -4,6 +4,15 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.6.2] - 2026-11-25 (Fix Chrome Auto-Opening When Paginating MotionProvit List)
+
+### Perbaikan (Fixed)
+- **Proxy Thumbnail Tanpa Membuka Chrome (`server/addons/motionprovitScraper.ts`)**:
+  - Memperbaiki bug di mana berpindah ke halaman 2/3/4 di daftar Add-on MotionProvit memicu Chrome terbuka otomatis karena `fetchMotionProvitImageBuffer()` sebelumnya memanggil `getOrLaunchBrowserContext()`.
+  - Kini thumbnail diambil murni lewat HTTP `fetch()` Node.js memakai cookies sesi tersimpan di `motionprovit-session.json` ditambah cache memori 30 menit (maks 200 gambar) sehingga perpindahan halaman berlangsung instan tanpa pernah memunculkan jendela Chrome.
+
+---
+
 ## [v2.6.1] - 2026-11-25 (MotionProvit Full Multi-Page Pagination, Official Kit Caption/Cover Endpoints & Exact ID Matching)
 
 ### Peningkatan & Perbaikan (Improved / Fixed — Live-Tested on 49/49 MotionProvit Videos)

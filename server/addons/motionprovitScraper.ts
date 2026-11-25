@@ -1061,18 +1061,95 @@ export async function scrapeMotionProvitJobs(workspaceId?: string): Promise<{
   }
 }
 
+interface CachedThumbEntry {
+  buffer: Buffer;
+  contentType: string;
+  cachedAt: number;
+}
+
+const THUMB_CACHE_MAX = 200;
+const THUMB_CACHE_TTL_MS = 30 * 60 * 1000;
+const thumbCache = new Map<string, CachedThumbEntry>();
+
+function buildSavedMotionProvitCookieHeader(workspaceId?: string): string {
+  try {
+    const paths = getWorkspacePaths(workspaceId);
+    if (!fs.existsSync(paths.motionprovitSessionFile)) return '';
+    const raw = fs.readFileSync(paths.motionprovitSessionFile, 'utf-8');
+    const parsed = JSON.parse(raw) as {
+      cookies?: Array<{ name?: string; value?: string; expires?: number }>;
+    };
+    if (!Array.isArray(parsed.cookies) || parsed.cookies.length === 0) {
+      return '';
+    }
+    const nowSec = Date.now() / 1000;
+    return parsed.cookies
+      .filter(
+        (c) =>
+          typeof c.name === 'string' &&
+          typeof c.value === 'string' &&
+          (!c.expires || c.expires <= 0 || c.expires > nowSec)
+      )
+      .map((c) => `${c.name}=${c.value}`)
+      .join('; ');
+  } catch {
+    return '';
+  }
+}
+
 export async function fetchMotionProvitImageBuffer(
   targetUrl: string,
   workspaceId?: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
   if (!targetUrl || !targetUrl.startsWith('http')) return null;
+
+  const resolvedWsId =
+    workspaceId && workspaceId.trim()
+      ? workspaceId.trim()
+      : getActiveWorkspace().id;
+  const cacheKey = `${resolvedWsId}::${targetUrl}`;
+
+  const cached = thumbCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < THUMB_CACHE_TTL_MS) {
+    return { buffer: cached.buffer, contentType: cached.contentType };
+  }
+
+  // IMPORTANT: Fetch thumbnails strictly via pure HTTP using saved workspace cookies
+  // so browsing pages 1..N NEVER launches Chrome!
   try {
-    const context = await getOrLaunchBrowserContext(undefined, workspaceId);
-    await restoreCookiesIfNeeded(context, workspaceId);
-    const res = await context.request.get(targetUrl, { timeout: 20_000 });
-    if (!res.ok()) return null;
-    const contentType = res.headers()['content-type'] || 'image/jpeg';
-    const buffer = await res.body();
+    const cookieHeader = buildSavedMotionProvitCookieHeader(resolvedWsId);
+    const headers: Record<string, string> = {
+      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      Referer: `${MOTIONPROVIT_BASE_URL}/app/jobs`,
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
+    };
+    if (cookieHeader) {
+      headers.Cookie = cookieHeader;
+    }
+
+    const res = await fetch(targetUrl, {
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!res.ok) return null;
+    const contentType = res.headers.get('content-type') || 'image/jpeg';
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      return null;
+    }
+
+    const arrayBuf = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+    if (buffer.length === 0) return null;
+
+    if (thumbCache.size >= THUMB_CACHE_MAX) {
+      const oldestKey = thumbCache.keys().next().value;
+      if (oldestKey) thumbCache.delete(oldestKey);
+    }
+    thumbCache.set(cacheKey, { buffer, contentType, cachedAt: Date.now() });
+
     return { buffer, contentType };
   } catch {
     return null;
