@@ -4,6 +4,8 @@ import type { AutoPostPage, UseAutoPostDataResult } from './useAutoPostData';
 export interface AutoPostPageContext {
   items: ContentPlannerItem[];
   data: UseAutoPostDataResult;
+  initialItemId: string | null;
+  initialPlatform: string | null;
   onNavigate: (page: AutoPostPage) => void;
   onOpenContentDetail: (item: ContentPlannerItem) => void;
   onEditCaption: (item: ContentPlannerItem) => void;

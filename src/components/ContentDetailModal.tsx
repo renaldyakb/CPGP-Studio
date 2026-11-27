@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   X,
   Maximize2,
@@ -360,19 +360,60 @@ export function ContentDetailModal({
     setCaptionMode(nextMode);
   };
 
+  const copyTimerRef = useRef<number | null>(null);
+  const captionNoticeTimerRef = useRef<number | null>(null);
+  const notesSavingTimerRef = useRef<number | null>(null);
+
+  const onCloseRef = useRef(onClose);
+  const onSelectItemRef = useRef(onSelectItem);
+  const onNavigateRef = useRef(onNavigate);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    onSelectItemRef.current = onSelectItem;
+    onNavigateRef.current = onNavigate;
+  }, [onClose, onSelectItem, onNavigate]);
+
+  useEffect(() => {
+    const clearTimers = () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
+      if (captionNoticeTimerRef.current !== null) {
+        window.clearTimeout(captionNoticeTimerRef.current);
+        captionNoticeTimerRef.current = null;
+      }
+      if (notesSavingTimerRef.current !== null) {
+        window.clearTimeout(notesSavingTimerRef.current);
+        notesSavingTimerRef.current = null;
+      }
+    };
+    if (!isOpen) {
+      clearTimers();
+    }
+    return clearTimers;
+  }, [isOpen]);
+
   useEffect(() => {
     if (!item || !isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        onCloseRef.current();
       } else if (e.altKey && e.key === 'ArrowLeft' && prevItem) {
         e.preventDefault();
-        onSelectItem?.(prevItem);
-        onNavigate?.(prevItem.id);
+        if (onSelectItemRef.current) {
+          onSelectItemRef.current(prevItem);
+        } else {
+          onNavigateRef.current?.(prevItem.id);
+        }
       } else if (e.altKey && e.key === 'ArrowRight' && nextItem) {
         e.preventDefault();
-        onSelectItem?.(nextItem);
-        onNavigate?.(nextItem.id);
+        if (onSelectItemRef.current) {
+          onSelectItemRef.current(nextItem);
+        } else {
+          onNavigateRef.current?.(nextItem.id);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -389,8 +430,11 @@ export function ContentDetailModal({
     (autoMetadata.captionParsed.rawText ?? '').replace(/\r\n/g, '\n').trim();
 
   const handleGoToItem = (target: ContentPlannerItem) => {
-    onSelectItem?.(target);
-    onNavigate?.(target.id);
+    if (onSelectItem) {
+      onSelectItem(target);
+    } else {
+      onNavigate?.(target.id);
+    }
   };
 
   const triggerCopy = async (text: string, key: string) => {
@@ -398,7 +442,11 @@ export function ContentDetailModal({
     try {
       await navigator.clipboard.writeText(text);
       setCopiedKey(key);
-      setTimeout(() => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        copyTimerRef.current = null;
         setCopiedKey((prev) => (prev === key ? null : prev));
       }, 2000);
     } catch {
@@ -569,7 +617,13 @@ export function ContentDetailModal({
       setCtaDraft(parsed.ctaQuestion);
       setHashtagDraft(parsed.hashtags.join(' '));
       setCaptionSavedNotice(true);
-      setTimeout(() => setCaptionSavedNotice(false), 2500);
+      if (captionNoticeTimerRef.current !== null) {
+        window.clearTimeout(captionNoticeTimerRef.current);
+      }
+      captionNoticeTimerRef.current = window.setTimeout(() => {
+        captionNoticeTimerRef.current = null;
+        setCaptionSavedNotice(false);
+      }, 2500);
     } finally {
       setIsSavingCaption(false);
     }
@@ -658,7 +712,13 @@ export function ContentDetailModal({
       setIsSavingNotes(true);
       await persistPropertiesPatch({ notes: notesDraft });
     } finally {
-      setTimeout(() => setIsSavingNotes(false), 500);
+      if (notesSavingTimerRef.current !== null) {
+        window.clearTimeout(notesSavingTimerRef.current);
+      }
+      notesSavingTimerRef.current = window.setTimeout(() => {
+        notesSavingTimerRef.current = null;
+        setIsSavingNotes(false);
+      }, 500);
     }
   };
 
@@ -946,6 +1006,7 @@ export function ContentDetailModal({
                     alt={`Cover ${item.folderCode}`}
                     width={360}
                     height={640}
+                    decoding="async"
                     className="w-full h-full object-contain bg-black"
                   />
                 ) : (

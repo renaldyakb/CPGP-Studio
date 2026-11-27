@@ -1,12 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { chromium, type BrowserContext, type Page } from 'patchright';
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Page,
+} from 'patchright';
 import type { AutoPostBrowserSessionStatus } from '../../src/types/autopost.ts';
 import type { PlatformKey } from '../../src/types/planner.ts';
 import { ALL_PLATFORM_KEYS } from '../storage.ts';
 import {
   detectAutoPostCapabilities,
   getInternalAutoPostConfig,
+  invalidateAutoPostCapabilitiesCache,
 } from './config.ts';
 
 export const PLATFORM_STUDIO_URLS: Record<PlatformKey, string> = {
@@ -29,11 +35,16 @@ export type BrowserSessionListener = (
   status: AutoPostBrowserSessionStatus
 ) => void;
 
+const STATUS_EMIT_DEBOUNCE_MS = 150;
+
 let activeContext: BrowserContext | null = null;
+let activeCdpBrowser: Browser | null = null;
+let activeCdpUrl: string | null = null;
 let activeChannel: 'chrome' | 'msedge' | null = null;
 let activeProfileDir: string | null = null;
 let launchInFlight: Promise<BrowserContext> | null = null;
-let launchInFlightProfileDir: string | null = null;
+let launchInFlightTargetKey: string | null = null;
+let statusEmitTimer: ReturnType<typeof setTimeout> | null = null;
 const sessionListeners = new Set<BrowserSessionListener>();
 
 function normalizeProfilePath(dir: string): string {
@@ -46,12 +57,32 @@ function isSameProfileDir(a: string | null, b: string): boolean {
   return normalizeProfilePath(a) === normalizeProfilePath(b);
 }
 
+function resolveCdpUrl(raw?: string): string {
+  if (typeof raw !== 'string') return '';
+  return raw.trim();
+}
+
+function clearStatusEmitTimer(): void {
+  if (statusEmitTimer) {
+    clearTimeout(statusEmitTimer);
+    statusEmitTimer = null;
+  }
+}
+
+function resetActiveSessionState(): void {
+  activeContext = null;
+  activeCdpBrowser = null;
+  activeCdpUrl = null;
+  activeChannel = null;
+  activeProfileDir = null;
+}
+
 function isContextAlive(context: BrowserContext | null): boolean {
   if (!context) return false;
   try {
     const pages = context.pages();
     // If the underlying browser was closed, pages() throws or browser()?.isConnected() is false
-    const browser = context.browser();
+    const browser = activeCdpBrowser ?? context.browser();
     if (browser && !browser.isConnected()) {
       return false;
     }
@@ -61,22 +92,33 @@ function isContextAlive(context: BrowserContext | null): boolean {
   }
 }
 
+export interface BrowserSessionStatusDetail
+  extends AutoPostBrowserSessionStatus {
+  isCdp: boolean;
+  activeProfileDir: string | null;
+  profileDir: string;
+}
+
 export function getActiveBrowserProfileDir(): string | null {
   if (!isContextAlive(activeContext)) {
+    return null;
+  }
+  if (activeCdpBrowser || activeCdpUrl) {
     return null;
   }
   return activeProfileDir;
 }
 
-export function getBrowserSessionStatus(): AutoPostBrowserSessionStatus {
+export function getBrowserSessionStatus(): BrowserSessionStatusDetail {
   if (!isContextAlive(activeContext)) {
-    activeContext = null;
-    activeChannel = null;
-    activeProfileDir = null;
+    resetActiveSessionState();
     return {
       isOpen: false,
       channel: null,
       openTabsCount: 0,
+      isCdp: false,
+      activeProfileDir: null,
+      profileDir: '',
     };
   }
 
@@ -87,21 +129,27 @@ export function getBrowserSessionStatus(): AutoPostBrowserSessionStatus {
     openTabsCount = 0;
   }
 
-  if (openTabsCount === 0 && activeContext?.browser()?.isConnected() === false) {
-    activeContext = null;
-    activeChannel = null;
-    activeProfileDir = null;
+  const underlyingBrowser = activeCdpBrowser ?? activeContext?.browser();
+  if (openTabsCount === 0 && underlyingBrowser?.isConnected() === false) {
+    resetActiveSessionState();
     return {
       isOpen: false,
       channel: null,
       openTabsCount: 0,
+      isCdp: false,
+      activeProfileDir: null,
+      profileDir: '',
     };
   }
 
+  const isCdpSession = Boolean(activeCdpBrowser || activeCdpUrl);
   return {
     isOpen: true,
     channel: activeChannel,
     openTabsCount,
+    isCdp: isCdpSession,
+    activeProfileDir: isCdpSession ? null : activeProfileDir,
+    profileDir: isCdpSession ? '' : (activeProfileDir ?? ''),
   };
 }
 
@@ -114,6 +162,27 @@ function emitBrowserSessionStatus(): void {
       // ignore subscriber errors
     }
   }
+}
+
+function scheduleDebouncedStatusEmit(
+  context: BrowserContext,
+  isCdpMode: boolean
+): void {
+  clearStatusEmitTimer();
+  statusEmitTimer = setTimeout(() => {
+    statusEmitTimer = null;
+    if (activeContext === context) {
+      const alive = isContextAlive(context);
+      const remaining = alive
+        ? context.pages().filter((p) => !p.isClosed()).length
+        : 0;
+      if (!alive || (!isCdpMode && remaining === 0)) {
+        resetActiveSessionState();
+        invalidateAutoPostCapabilitiesCache();
+      }
+      emitBrowserSessionStatus();
+    }
+  }, STATUS_EMIT_DEBOUNCE_MS);
 }
 
 export function subscribeBrowserSession(
@@ -150,25 +219,31 @@ export async function getOrLaunchBrowserContext(
   workspaceId?: string
 ): Promise<BrowserContext> {
   const config = getInternalAutoPostConfig(workspaceId);
+  const cdpUrl = resolveCdpUrl(config.browser.cdpUrl);
   const profileDir = path.resolve(config.browser.profileDir);
   const resolvedChannel = resolveBrowserChannel(channel, workspaceId);
+  const targetKey = cdpUrl
+    ? `cdp:${cdpUrl}`
+    : `profile:${resolvedChannel}:${normalizeProfilePath(profileDir)}`;
 
   if (isContextAlive(activeContext)) {
-    const sameChannel = !channel || activeChannel === resolvedChannel;
-    const sameProfile = isSameProfileDir(activeProfileDir, profileDir);
-    if (sameChannel && sameProfile) {
+    const matchesTarget = cdpUrl
+      ? activeCdpUrl === cdpUrl
+      : !activeCdpUrl &&
+        (!channel || activeChannel === resolvedChannel) &&
+        isSameProfileDir(activeProfileDir, profileDir);
+    if (matchesTarget) {
       return activeContext as BrowserContext;
     }
     await closeBrowserSession();
-  } else if (activeContext !== null) {
-    activeContext = null;
-    activeChannel = null;
-    activeProfileDir = null;
+  } else if (activeContext !== null || activeCdpBrowser !== null) {
+    resetActiveSessionState();
+    invalidateAutoPostCapabilitiesCache();
     emitBrowserSessionStatus();
   }
 
   if (launchInFlight) {
-    if (isSameProfileDir(launchInFlightProfileDir, profileDir)) {
+    if (launchInFlightTargetKey === targetKey) {
       return launchInFlight;
     }
     try {
@@ -176,69 +251,74 @@ export async function getOrLaunchBrowserContext(
     } catch {
       // Previous launch failed; proceed with new launch
     }
-    if (
-      isContextAlive(activeContext) &&
-      !isSameProfileDir(activeProfileDir, profileDir)
-    ) {
+    if (isContextAlive(activeContext)) {
+      const matchesAfterWait = cdpUrl
+        ? activeCdpUrl === cdpUrl
+        : !activeCdpUrl &&
+          (!channel || activeChannel === resolvedChannel) &&
+          isSameProfileDir(activeProfileDir, profileDir);
+      if (matchesAfterWait) {
+        return activeContext as BrowserContext;
+      }
       await closeBrowserSession();
-    } else if (isContextAlive(activeContext)) {
-      return activeContext as BrowserContext;
     }
   }
 
-  if (!fs.existsSync(profileDir)) {
+  if (!cdpUrl && !fs.existsSync(profileDir)) {
     fs.mkdirSync(profileDir, { recursive: true });
   }
 
-  launchInFlightProfileDir = profileDir;
+  launchInFlightTargetKey = targetKey;
   launchInFlight = (async () => {
     try {
-      const context = await chromium.launchPersistentContext(profileDir, {
-        channel: resolvedChannel,
-        headless: false,
-        viewport: null,
-        ignoreDefaultArgs: ['--enable-automation'],
-        args: [
-          '--start-maximized',
-          '--disable-blink-features=AutomationControlled',
-        ],
-      });
+      let context: BrowserContext;
+      let cdpBrowser: Browser | null = null;
+      const isCdpMode = Boolean(cdpUrl);
+
+      if (cdpUrl) {
+        cdpBrowser = await chromium.connectOverCDP(cdpUrl);
+        const existingContexts = cdpBrowser.contexts();
+        context = existingContexts[0] ?? (await cdpBrowser.newContext());
+      } else {
+        context = await chromium.launchPersistentContext(profileDir, {
+          channel: resolvedChannel,
+          headless: false,
+          viewport: null,
+          ignoreDefaultArgs: ['--enable-automation'],
+          args: [
+            '--start-maximized',
+            '--disable-blink-features=AutomationControlled',
+          ],
+        });
+      }
 
       activeContext = context;
+      activeCdpBrowser = cdpBrowser;
+      activeCdpUrl = cdpUrl || null;
       activeChannel = resolvedChannel;
-      activeProfileDir = profileDir;
+      activeProfileDir = isCdpMode ? null : profileDir;
 
       const handleContextClosed = () => {
         if (activeContext === context) {
-          activeContext = null;
-          activeChannel = null;
-          activeProfileDir = null;
+          clearStatusEmitTimer();
+          resetActiveSessionState();
+          invalidateAutoPostCapabilitiesCache();
           emitBrowserSessionStatus();
         }
       };
 
       const attachPageCloseListener = (page: Page) => {
         page.on('close', () => {
-          // Small tick so context/browser close state settles if it was the last tab
-          setTimeout(() => {
-            if (activeContext === context) {
-              const alive = isContextAlive(context);
-              const remaining = alive
-                ? context.pages().filter((p) => !p.isClosed()).length
-                : 0;
-              if (!alive || remaining === 0) {
-                activeContext = null;
-                activeChannel = null;
-                activeProfileDir = null;
-              }
-              emitBrowserSessionStatus();
-            }
-          }, 120);
+          scheduleDebouncedStatusEmit(context, isCdpMode);
         });
       };
 
       context.on('close', handleContextClosed);
-      context.browser()?.on('disconnected', handleContextClosed);
+      if (cdpBrowser) {
+        cdpBrowser.on('disconnected', handleContextClosed);
+      } else {
+        context.browser()?.on('disconnected', handleContextClosed);
+      }
 
       for (const existingPage of context.pages()) {
         attachPageCloseListener(existingPage);
@@ -248,20 +328,25 @@ export async function getOrLaunchBrowserContext(
         emitBrowserSessionStatus();
       });
 
+      invalidateAutoPostCapabilitiesCache();
       emitBrowserSessionStatus();
       return context;
     } catch (error) {
-      activeContext = null;
-      activeChannel = null;
-      activeProfileDir = null;
+      resetActiveSessionState();
+      invalidateAutoPostCapabilitiesCache();
       emitBrowserSessionStatus();
       const details = error instanceof Error ? error.message : String(error);
+      if (cdpUrl) {
+        throw new Error(
+          `Gagal menyambung ke Chrome melalui CDP (${cdpUrl}): ${details}`
+        );
+      }
       throw new Error(
         `Gagal membuka browser lokal (${resolvedChannel}) dengan profil persisten: ${details}`
       );
     } finally {
       launchInFlight = null;
-      launchInFlightProfileDir = null;
+      launchInFlightTargetKey = null;
     }
   })();
 
@@ -342,7 +427,10 @@ export async function openLoginProfile(
   return {
     openedUrls,
     channel: activeChannel ?? resolvedChannel,
-    profileDir: config.browser.profileDir,
+    profileDir:
+      activeCdpBrowser || activeCdpUrl
+        ? ''
+        : (activeProfileDir ?? config.browser.profileDir),
     browserSession: getBrowserSessionStatus(),
   };
 }
@@ -582,12 +670,18 @@ async function checkSinglePlatformSession(
 }
 
 export async function closeBrowserSession(): Promise<AutoPostBrowserSessionStatus> {
+  clearStatusEmitTimer();
   const context = activeContext;
-  activeContext = null;
-  activeChannel = null;
-  activeProfileDir = null;
+  const cdpBrowser = activeCdpBrowser;
+  resetActiveSessionState();
 
-  if (context) {
+  if (cdpBrowser) {
+    try {
+      await cdpBrowser.close();
+    } catch {
+      // CDP browser may have already disconnected
+    }
+  } else if (context) {
     try {
       await context.close();
     } catch {
@@ -595,6 +689,7 @@ export async function closeBrowserSession(): Promise<AutoPostBrowserSessionStatu
     }
   }
 
+  invalidateAutoPostCapabilitiesCache();
   emitBrowserSessionStatus();
   return getBrowserSessionStatus();
 }

@@ -176,15 +176,31 @@ export function suggestNextAvailableSlot(
   };
 }
 
+function sanitizeSlotCode(rawSlot: string | undefined): string {
+  const cleaned = (rawSlot ?? '')
+    .trim()
+    .replace(/\.\./g, '')
+    .replace(/[\\/]+/g, '')
+    .replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!cleaned) {
+    return '01';
+  }
+  return /^\d+$/.test(cleaned) ? cleaned.padStart(2, '0') : cleaned;
+}
+
+function getMaxDaysInMonth(year: number, monthNumber: number): number {
+  const safeYear =
+    Number.isFinite(year) && year >= 2000 && year <= 2100
+      ? Math.floor(year)
+      : new Date().getFullYear();
+  const safeMonth = Math.min(12, Math.max(1, Math.floor(monthNumber) || 1));
+  return new Date(safeYear, safeMonth, 0).getDate();
+}
+
 export function createContentFolderOnDisk(
   workspace: WorkspaceMetadata,
   input: CreateContentSlotInput
 ): { itemId: string; folderPath: string; captionPath: string } {
-  const day = Math.min(31, Math.max(1, Math.floor(Number(input.dayOfMonth) || 1)));
-  const rawSlot = (input.slotCode ?? '01').trim();
-  const slotCode = /^\d+$/.test(rawSlot) ? rawSlot.padStart(2, '0') : rawSlot || '01';
-  const folderCode = `${String(day).padStart(2, '0')}.${slotCode}`;
-
   const rawMonth = (input.monthFolder ?? '').trim();
   const isFlat =
     workspace.rules.folderStructure === 'flat_slot' && !rawMonth;
@@ -194,6 +210,22 @@ export function createContentFolderOnDisk(
     : rawMonth
       ? normalizeYearMonthFolderName(rawMonth, fallbackYear)
       : getDefaultMonthFolderName(fallbackYear);
+
+  const monthInfo = resolveMonthInfo(
+    monthFolder || getDefaultMonthFolderName(fallbackYear),
+    fallbackYear
+  );
+  const maxDaysInMonth = getMaxDaysInMonth(
+    monthInfo.year,
+    monthInfo.monthNumber
+  );
+
+  const day = Math.min(
+    maxDaysInMonth,
+    Math.max(1, Math.floor(Number(input.dayOfMonth) || 1))
+  );
+  const slotCode = sanitizeSlotCode(input.slotCode);
+  const folderCode = `${String(day).padStart(2, '0')}.${slotCode}`;
 
   const folderPath = monthFolder
     ? path.join(workspace.contentRootPath, monthFolder, folderCode)
@@ -259,22 +291,6 @@ export function batchGenerateSlotsOnDisk(
   skippedCodes: string[];
   monthFolder: string;
 } {
-  const startDay = Math.min(
-    31,
-    Math.max(1, Math.floor(Number(input.startDay) || 1))
-  );
-  const endDay = Math.min(
-    31,
-    Math.max(startDay, Math.floor(Number(input.endDay) || startDay))
-  );
-
-  const slotCodes =
-    Array.isArray(input.slotCodes) && input.slotCodes.length > 0
-      ? input.slotCodes.map((s) =>
-          /^\d+$/.test(s.trim()) ? s.trim().padStart(2, '0') : s.trim()
-        )
-      : ['01', '02'];
-
   const rawMonth = (input.monthFolder ?? '').trim();
   const isFlat =
     workspace.rules.folderStructure === 'flat_slot' && !rawMonth;
@@ -284,6 +300,29 @@ export function batchGenerateSlotsOnDisk(
     : rawMonth
       ? normalizeYearMonthFolderName(rawMonth, fallbackYear)
       : getDefaultMonthFolderName(fallbackYear);
+
+  const monthInfo = resolveMonthInfo(
+    monthFolder || getDefaultMonthFolderName(fallbackYear),
+    fallbackYear
+  );
+  const maxDaysInMonth = getMaxDaysInMonth(
+    monthInfo.year,
+    monthInfo.monthNumber
+  );
+
+  const startDay = Math.min(
+    maxDaysInMonth,
+    Math.max(1, Math.floor(Number(input.startDay) || 1))
+  );
+  const endDay = Math.min(
+    maxDaysInMonth,
+    Math.max(startDay, Math.floor(Number(input.endDay) || startDay))
+  );
+
+  const slotCodes =
+    Array.isArray(input.slotCodes) && input.slotCodes.length > 0
+      ? Array.from(new Set(input.slotCodes.map((s) => sanitizeSlotCode(s))))
+      : ['01', '02'];
 
   const hashtags =
     Array.isArray(input.defaultHashtags) && input.defaultHashtags.length > 0

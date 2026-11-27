@@ -18,6 +18,7 @@ export interface AutoPostBrowserConfig {
   channel: 'chrome' | 'msedge';
   profileDir: string;
   keepTabOpenOnReview: boolean;
+  cdpUrl?: string;
 }
 
 export interface AutoPostYouTubeApiConfig {

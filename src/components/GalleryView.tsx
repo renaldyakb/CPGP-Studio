@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ContentPlannerItem,
   PLATFORMS,
@@ -48,25 +48,39 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
 }) => {
   const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
   const [unmutedId, setUnmutedId] = useState<string | null>(null);
+  const hoverTimerRef = useRef<number | null>(null);
 
-  const handleOpenExplorerSafe = async (
-    targetPath: string,
-    selectFile = true
-  ) => {
-    if (onOpenExplorer) {
-      onOpenExplorer(targetPath, selectFile);
-      return;
+  const clearHoverTimer = useCallback(() => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
     }
-    try {
-      await fetch('/api/system/open-explorer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: targetPath, targetPath, selectFile }),
-      });
-    } catch {
-      // ignore explorer errors
-    }
-  };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearHoverTimer();
+    };
+  }, [clearHoverTimer]);
+
+  const handleOpenExplorerSafe = useCallback(
+    async (targetPath: string, selectFile = true) => {
+      if (onOpenExplorer) {
+        onOpenExplorer(targetPath, selectFile);
+        return;
+      }
+      try {
+        await fetch('/api/system/open-explorer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: targetPath, targetPath, selectFile }),
+        });
+      } catch {
+        // ignore explorer errors
+      }
+    },
+    [onOpenExplorer]
+  );
 
   const sortedItems = useMemo(
     () =>
@@ -132,11 +146,16 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
               {/* 9:16 Vertical Media Canvas */}
               <div
                 onMouseEnter={() => {
+                  clearHoverTimer();
                   if (activeVideoAsset?.mediaUrl) {
-                    setActivePreviewId(item.id);
+                    hoverTimerRef.current = window.setTimeout(() => {
+                      hoverTimerRef.current = null;
+                      setActivePreviewId(item.id);
+                    }, 300);
                   }
                 }}
                 onMouseLeave={() => {
+                  clearHoverTimer();
                   setActivePreviewId((prev) =>
                     prev === item.id ? null : prev
                   );
@@ -146,7 +165,12 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
               >
                 <button
                   type="button"
-                  onClick={() => onSelectItem(item)}
+                  onClick={() => {
+                    clearHoverTimer();
+                    setActivePreviewId(null);
+                    setUnmutedId(null);
+                    onSelectItem(item);
+                  }}
                   aria-label={`Buka detail konten ${item.folderCode}`}
                   className="block h-full w-full text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
                 >
@@ -157,6 +181,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                       width={270}
                       height={480}
                       loading="lazy"
+                      decoding="async"
                       className="h-full w-full aspect-[9/16] object-cover"
                     />
                   ) : (
@@ -175,6 +200,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                       poster={assets.cover.mediaUrl || undefined}
                       width={270}
                       height={480}
+                      preload="metadata"
                       autoPlay
                       loop
                       playsInline
@@ -205,6 +231,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                       }
                       onClick={(e) => {
                         e.stopPropagation();
+                        clearHoverTimer();
                         setActivePreviewId((prev) =>
                           prev === item.id ? null : item.id
                         );
@@ -271,7 +298,12 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                 <div className="flex items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => onSelectItem(item)}
+                    onClick={() => {
+                      clearHoverTimer();
+                      setActivePreviewId(null);
+                      setUnmutedId(null);
+                      onSelectItem(item);
+                    }}
                     className="flex-1 min-w-0 text-left text-xs font-medium text-foreground truncate hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                     title={displayTitle}
                   >

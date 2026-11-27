@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -155,9 +155,20 @@ export const WorkspaceModal: React.FC<WorkspaceModalProps> = ({
     }
   }, []);
 
-  // Initialize form state when modal opens
+  const lastInitKeyRef = useRef<string | null>(null);
+
+  // Initialize form state only when open/mode/workspace key changes so SSE refreshes never overwrite drafts
   useEffect(() => {
-    if (!isOpen) return;
+    const initKey = isOpen
+      ? `${mode}:${activeWorkspace?.id ?? 'new'}`
+      : null;
+    if (!initKey) {
+      lastInitKeyRef.current = null;
+      return;
+    }
+    if (initKey === lastInitKeyRef.current) return;
+    lastInitKeyRef.current = initKey;
+
     setStepTab('identity');
     setSubmitError(null);
     setValidationError(null);

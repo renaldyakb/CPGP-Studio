@@ -1,3 +1,4 @@
+import { openManagedEventSource } from '../lib/managedEventSource';
 import type {
   WatermarkCapabilities,
   WatermarkEncoderMode,
@@ -186,7 +187,8 @@ export const watermarkApi = {
     onEvent: (event: WatermarkSseEvent) => void,
     onError?: (err: Event) => void
   ): () => void {
-    const source = new EventSource('/api/watermark/events');
+    const managed = openManagedEventSource('/api/watermark/events');
+    const { source } = managed;
 
     source.onmessage = (msg) => {
       try {
@@ -207,7 +209,7 @@ export const watermarkApi = {
     }
 
     return () => {
-      source.close();
+      managed.close();
     };
   },
 };

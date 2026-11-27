@@ -37,6 +37,7 @@ import {
   fetchMotionProvitImageBuffer,
   getMotionProvitCacheStats,
   getMotionProvitImportProgress,
+  isAllowedMotionProvitUrl,
   loginMotionProvit,
   openMotionProvitLoginBrowser,
   scrapeMotionProvitJobs,
@@ -54,8 +55,10 @@ import {
   clearMetaConfig,
   clearYouTubeTokens,
   detectAutoPostCapabilities,
+  evictAutoPostConfigCache,
   getInternalAutoPostConfig,
   getPublicAutoPostSettings,
+  invalidateAutoPostCapabilitiesCache,
   updateAutoPostSettings,
   type UpdateAutoPostSettingsPatch,
 } from './autopost/config.ts';
@@ -91,6 +94,7 @@ import {
   ALL_PLATFORM_KEYS,
   batchUpdateItemPlatforms,
   createEmptyDatabase,
+  evictDatabaseMemoryCache,
   getOrInitDatabase,
   syncDatabaseWithDisk,
   updateItemCaptionOnDisk,
@@ -101,6 +105,7 @@ import { getFontFileById, listAvailableFonts } from './watermark/fonts.ts';
 import {
   createPreset,
   deletePreset,
+  evictPresetStoreCache,
   getPresetById,
   getPresetStore,
   normalizeWatermarkConfig,
@@ -141,9 +146,41 @@ const MIME_TYPES: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
 };
 
+const FONT_MIME_TYPES: Record<string, string> = {
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.ttc': 'font/collection',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
+
+const CPGP_FALLBACK_EMBLEM_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="CPGP Studio Emblem">
+  <defs>
+    <linearGradient id="cpgpBurgundy" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7B1630"/>
+      <stop offset="55%" stop-color="#580E22"/>
+      <stop offset="100%" stop-color="#3B0816"/>
+    </linearGradient>
+    <linearGradient id="cpgpGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F1D9B5"/>
+      <stop offset="100%" stop-color="#C89B62"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#cpgpBurgundy)"/>
+  <rect x="12" y="12" width="104" height="104" rx="22" fill="none" stroke="url(#cpgpGold)" stroke-opacity="0.55" stroke-width="2"/>
+  <text x="64" y="68" text-anchor="middle" fill="#F8EBDA" font-family="Georgia, 'Times New Roman', serif" font-size="34" font-weight="700" letter-spacing="2">CPGP</text>
+  <line x1="34" y1="80" x2="94" y2="80" stroke="url(#cpgpGold)" stroke-opacity="0.6" stroke-width="1.5"/>
+  <text x="64" y="96" text-anchor="middle" fill="#E4C69B" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" letter-spacing="3.5">STUDIO</text>
+</svg>`;
+
 function getMimeType(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   return MIME_TYPES[ext] ?? 'application/octet-stream';
+}
+
+function getFontMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  return FONT_MIME_TYPES[ext] ?? 'font/ttf';
 }
 
 function readRouteParam(value: string | string[] | undefined): string {
@@ -174,15 +211,28 @@ function resolveItemId(db: PlannerDatabase, rawParamId: string): string | null {
 }
 
 function openInWindowsExplorer(targetPath: string, selectFile: boolean): void {
-  const normalizedWinPath = path.win32.normalize(targetPath);
-  const args = selectFile
-    ? ['/select,', normalizedWinPath]
-    : [normalizedWinPath];
+  let command: string;
+  let args: string[];
 
-  const child = spawn('explorer.exe', args, {
+  if (process.platform === 'win32') {
+    const normalizedWinPath = path.win32.normalize(targetPath);
+    command = 'explorer.exe';
+    args = selectFile ? ['/select,', normalizedWinPath] : [normalizedWinPath];
+  } else if (process.platform === 'darwin') {
+    command = 'open';
+    args = selectFile ? ['-R', targetPath] : [targetPath];
+  } else {
+    command = 'xdg-open';
+    args = [selectFile ? path.dirname(targetPath) : targetPath];
+  }
+
+  const child = spawn(command, args, {
     detached: true,
     stdio: 'ignore',
-    windowsHide: false,
+    windowsHide: process.platform !== 'win32',
+  });
+  child.on('error', () => {
+    // Prevent unhandled ENOENT crash when OS file manager binary is unavailable
   });
   child.unref();
 }
@@ -320,9 +370,15 @@ export interface ApiRouterInstance {
   app: Express;
   watcher: FSWatcher | null;
   broadcastUpdate: (reason: string, db: PlannerDatabase) => void;
+  shutdown: () => Promise<void>;
 }
 
 let singletonInstance: ApiRouterInstance | null = null;
+
+export async function shutdownApiRouter(): Promise<void> {
+  if (!singletonInstance) return;
+  await singletonInstance.shutdown();
+}
 
 export function createApiRouter(): Express {
   if (singletonInstance) {
@@ -330,16 +386,37 @@ export function createApiRouter(): Express {
   }
 
   const app = express();
-  const sseClients = new Set<Response>();
+  const sseClients = new Map<Response, () => void>();
+  const watermarkSseClients = new Map<Response, () => void>();
+  const autopostSseClients = new Map<Response, () => void>();
 
   // Ensure initial scan / JSON database exists on startup (skip if awaiting first-run onboarding)
   let cachedDb: PlannerDatabase = hasConfiguredWorkspace()
     ? syncDatabaseWithDisk()
     : createEmptyDatabase('', new Date().getFullYear());
+  let cachedDbWorkspaceId: string | null = hasConfiguredWorkspace()
+    ? getActiveWorkspace().id
+    : null;
+
+  function broadcastSseFrame(
+    clients: Map<Response, () => void>,
+    frame: string
+  ): void {
+    for (const [client, cleanupClient] of Array.from(clients.entries())) {
+      try {
+        client.write(frame);
+      } catch {
+        cleanupClient();
+      }
+    }
+  }
 
   function broadcastUpdate(reason: string, db: PlannerDatabase) {
     cachedDb = db;
     const activeWorkspace = getActiveWorkspace();
+    cachedDbWorkspaceId = activeWorkspace.id;
+    if (sseClients.size === 0) return;
+
     const payload = JSON.stringify({
       type: 'planner-updated',
       reason,
@@ -348,21 +425,16 @@ export function createApiRouter(): Express {
       stats: db.stats,
       lastFullScanAt: db.workspaceConfig.lastFullScanAt,
     });
-
-    for (const client of sseClients) {
-      try {
-        client.write(`event: planner-updated\ndata: ${payload}\n\n`);
-        client.write(`data: ${payload}\n\n`);
-      } catch {
-        sseClients.delete(client);
-      }
-    }
+    broadcastSseFrame(sseClients, `data: ${payload}\n\n`);
   }
 
   function broadcastWorkspaceSwitch(reason: string, db: PlannerDatabase) {
     cachedDb = db;
     const registry = getWorkspacesRegistry();
     const activeWorkspace = getActiveWorkspace();
+    cachedDbWorkspaceId = activeWorkspace.id;
+    if (sseClients.size === 0) return;
+
     const payload = JSON.stringify({
       type: 'workspace-switched',
       reason,
@@ -372,22 +444,23 @@ export function createApiRouter(): Express {
       registry,
       stats: db.stats,
     });
+    broadcastSseFrame(sseClients, `data: ${payload}\n\n`);
+  }
 
-    for (const client of sseClients) {
-      try {
-        client.write(`event: workspace-switched\ndata: ${payload}\n\n`);
-        client.write(`data: ${payload}\n\n`);
-      } catch {
-        sseClients.delete(client);
-      }
-    }
+  // Set up dynamic chokidar watcher bound to active workspace contentRootPath
+  let watcher: FSWatcher | null = null;
+  let watchedRootPath: string | null = null;
+  let debounceTimer: NodeJS.Timeout | null = null;
+  let lastSelfScanAt = 0;
 
-    broadcastUpdate(reason, db);
+  function markSelfDiskMutation(): void {
+    lastSelfScanAt = Date.now();
   }
 
   const watermarkQueue = createWatermarkQueue({
     onJobCompleted: (itemId, job) => {
       try {
+        markSelfDiskMutation();
         const activeWs = getActiveWorkspace();
         if (job.workspaceId && job.workspaceId !== activeWs.id) {
           const targetWs = getWorkspaceById(job.workspaceId);
@@ -403,6 +476,7 @@ export function createApiRouter(): Express {
           return;
         }
         const updatedDb = syncDatabaseWithDisk();
+        markSelfDiskMutation();
         broadcastUpdate(`watermark-completed:${itemId}`, updatedDb);
       } catch (err) {
         console.error('[WatermarkQueue Sync Error]:', err);
@@ -419,30 +493,68 @@ export function createApiRouter(): Express {
     },
   });
 
-  function syncBrowserSessionForActiveWorkspace() {
-    const activeProfileDir = getActiveBrowserProfileDir();
-    if (!activeProfileDir) {
+  const unsubscribeWatermarkBroadcast = watermarkQueue.subscribe((event) => {
+    if (watermarkSseClients.size === 0) return;
+    const activeWsId = getActiveWorkspace().id;
+    if (event.job.workspaceId && event.job.workspaceId !== activeWsId) {
       return;
     }
-    const expectedProfileDir = getInternalAutoPostConfig().browser.profileDir;
-    const normActive =
-      process.platform === 'win32'
-        ? path.resolve(activeProfileDir).toLowerCase()
-        : path.resolve(activeProfileDir);
-    const normExpected =
-      process.platform === 'win32'
-        ? path.resolve(expectedProfileDir).toLowerCase()
-        : path.resolve(expectedProfileDir);
-    if (normActive !== normExpected) {
-      void closeBrowserSession();
+    const payload = JSON.stringify({
+      ...event,
+      jobs: watermarkQueue.listJobs(activeWsId),
+    });
+    broadcastSseFrame(watermarkSseClients, `data: ${payload}\n\n`);
+  });
+
+  const unsubscribeAutopostJobsBroadcast = autoPostQueue.subscribe((event) => {
+    if (autopostSseClients.size === 0) return;
+    const activeWsId = getActiveWorkspace().id;
+    if (event.job.workspaceId && event.job.workspaceId !== activeWsId) {
+      return;
     }
+    const payload = JSON.stringify({
+      ...event,
+      jobs: autoPostQueue.listJobs(activeWsId),
+      browserSession: getBrowserSessionStatus(),
+    });
+    broadcastSseFrame(autopostSseClients, `data: ${payload}\n\n`);
+  });
+
+  const unsubscribeAutopostBrowserBroadcast = subscribeBrowserSession(
+    (browserSession) => {
+      if (autopostSseClients.size === 0) return;
+      const payload = JSON.stringify({
+        type: 'browser-session',
+        browserSession,
+        timestamp: new Date().toISOString(),
+      });
+      broadcastSseFrame(autopostSseClients, `data: ${payload}\n\n`);
+    }
+  );
+
+  function syncBrowserSessionForActiveWorkspace() {
+    const status = getBrowserSessionStatus();
+    if (!status.isOpen) {
+      return;
+    }
+    const activeProfileDir = getActiveBrowserProfileDir();
+    const expectedProfileDir = getInternalAutoPostConfig().browser.profileDir;
+    const normalizePath = (p: string) =>
+      process.platform === 'win32'
+        ? path.resolve(p).toLowerCase()
+        : path.resolve(p);
+    const samePersistentProfile = Boolean(
+      activeProfileDir &&
+        expectedProfileDir &&
+        normalizePath(activeProfileDir) === normalizePath(expectedProfileDir)
+    );
+    if (samePersistentProfile) {
+      return;
+    }
+    void closeBrowserSession();
   }
 
-  // Set up dynamic chokidar watcher bound to active workspace contentRootPath
-  let watcher: FSWatcher | null = null;
-  let watchedRootPath: string | null = null;
-  let debounceTimer: NodeJS.Timeout | null = null;
-  let lastSelfScanAt = 0;
+  const SELF_SCAN_SUPPRESS_WINDOW_MS = 600;
 
   const internalIgnoredRoots = [
     path.resolve(APP_ROOT, 'data'),
@@ -476,7 +588,10 @@ export function createApiRouter(): Express {
     '.cpgp-watermarked.json',
   ]);
 
-  function isIgnoredWatchPath(candidatePath: string): boolean {
+  function isIgnoredWatchPath(
+    candidatePath: string,
+    rootPath?: string | null
+  ): boolean {
     if (!candidatePath) return true;
     const resolved = path.resolve(candidatePath);
     const norm = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
@@ -501,7 +616,21 @@ export function createApiRouter(): Express {
       return true;
     }
 
-    const segments = norm.split(/[\\/]+/);
+    let pathToCheck = norm;
+    if (rootPath) {
+      const resolvedRoot = path.resolve(rootPath);
+      const normRoot =
+        process.platform === 'win32' ? resolvedRoot.toLowerCase() : resolvedRoot;
+      const relPath = path.relative(normRoot, norm);
+      if (!relPath) {
+        return false;
+      }
+      if (!relPath.startsWith('..') && !path.isAbsolute(relPath)) {
+        pathToCheck = relPath;
+      }
+    }
+
+    const segments = pathToCheck.split(/[\\/]+/).filter(Boolean);
     for (const seg of segments) {
       if (internalIgnoredDirNames.has(seg)) {
         return true;
@@ -543,7 +672,7 @@ export function createApiRouter(): Express {
       ignoreInitial: true,
       persistent: true,
       depth: 4,
-      ignored: (watchPath: string) => isIgnoredWatchPath(watchPath),
+      ignored: (watchPath: string) => isIgnoredWatchPath(watchPath, targetRoot),
       awaitWriteFinish: {
         stabilityThreshold: 300,
         pollInterval: 100,
@@ -551,16 +680,16 @@ export function createApiRouter(): Express {
     });
 
     const triggerDebouncedScan = (eventType: string, changedPath: string) => {
-      if (isIgnoredWatchPath(changedPath)) {
+      if (isIgnoredWatchPath(changedPath, targetRoot)) {
         return;
       }
-      if (Date.now() - lastSelfScanAt < 800) {
+      if (Date.now() - lastSelfScanAt < SELF_SCAN_SUPPRESS_WINDOW_MS) {
         return;
       }
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         try {
-          lastSelfScanAt = Date.now();
+          markSelfDiskMutation();
           const updatedDb = syncDatabaseWithDisk();
           broadcastUpdate(
             `fs:${eventType}:${path.basename(changedPath)}`,
@@ -586,16 +715,33 @@ export function createApiRouter(): Express {
 
   rebindWatcherToActiveWorkspace();
 
-  // Only process /api and /media routes so Vite frontend requests pass straight through
-  app.use((req, _res, next) => {
-    const url = req.originalUrl || req.url || '';
-    if (!url.startsWith('/api') && !url.startsWith('/media')) {
-      return next();
-    }
-    next();
-  });
-
-  app.use('/api', cors());
+  app.use(
+    '/api',
+    cors({
+      origin(origin, callback) {
+        if (!origin) {
+          callback(null, true);
+          return;
+        }
+        try {
+          const parsed = new URL(origin);
+          if (
+            (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+            (parsed.hostname === 'localhost' ||
+              parsed.hostname === '127.0.0.1' ||
+              parsed.hostname === '[::1]' ||
+              parsed.hostname === '::1')
+          ) {
+            callback(null, true);
+            return;
+          }
+        } catch {
+          // Reject malformed origin
+        }
+        callback(null, false);
+      },
+    })
+  );
   app.use('/api', express.json({ limit: '10mb' }));
 
   // 1. GET /api/events: Server-Sent Events for real-time UI sync
@@ -603,30 +749,40 @@ export function createApiRouter(): Express {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
+
+    let cleaned = false;
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: heartbeat ${Date.now()}\n\n`);
+      } catch {
+        cleanup();
+      }
+    }, 25000);
+
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    };
+
+    sseClients.set(res, cleanup);
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    res.on('error', cleanup);
 
     const initPayload = JSON.stringify({
       type: 'connected',
       timestamp: new Date().toISOString(),
       stats: cachedDb.stats,
     });
-    res.write(`data: ${initPayload}\n\n`);
-
-    sseClients.add(res);
-
-    const heartbeat = setInterval(() => {
-      try {
-        res.write(`: heartbeat ${Date.now()}\n\n`);
-      } catch {
-        clearInterval(heartbeat);
-        sseClients.delete(res);
-      }
-    }, 25000);
-
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      sseClients.delete(res);
-    });
+    try {
+      res.write(`data: ${initPayload}\n\n`);
+    } catch {
+      cleanup();
+    }
   });
 
   // 2. GET /api/planner - Returns full PlannerDatabase
@@ -636,10 +792,15 @@ export function createApiRouter(): Express {
         res.json(createEmptyDatabase('', new Date().getFullYear()));
         return;
       }
+      const activeWs = getActiveWorkspace();
       const forceRefresh = req.query.refresh === 'true';
-      cachedDb = forceRefresh
-        ? syncDatabaseWithDisk()
-        : getOrInitDatabase();
+      if (forceRefresh) {
+        cachedDb = syncDatabaseWithDisk();
+        cachedDbWorkspaceId = activeWs.id;
+      } else if (cachedDbWorkspaceId !== activeWs.id) {
+        cachedDb = getOrInitDatabase();
+        cachedDbWorkspaceId = activeWs.id;
+      }
       res.json(cachedDb);
     } catch (error) {
       res.status(500).json({
@@ -652,7 +813,9 @@ export function createApiRouter(): Express {
   // 3. POST /api/scan - Forces full disk rescan of active workspace contentRootPath
   app.post('/api/scan', (_req: Request, res: Response) => {
     try {
+      markSelfDiskMutation();
       const updatedDb = syncDatabaseWithDisk();
+      markSelfDiskMutation();
       broadcastUpdate('manual-scan', updatedDb);
       res.json(updatedDb);
     } catch (error) {
@@ -689,11 +852,13 @@ export function createApiRouter(): Express {
   // POST /api/workspaces
   app.post('/api/workspaces', (req: Request, res: Response) => {
     try {
+      markSelfDiskMutation();
       const input = (req.body ?? {}) as CreateWorkspaceInput;
       const { workspace, registry } = createWorkspace(input);
       syncBrowserSessionForActiveWorkspace();
       rebindWatcherToActiveWorkspace();
       const updatedDb = syncDatabaseWithDisk();
+      markSelfDiskMutation();
       broadcastWorkspaceSwitch(`workspace-created:${workspace.id}`, updatedDb);
 
       res.status(201).json({
@@ -735,10 +900,12 @@ export function createApiRouter(): Express {
   app.post('/api/workspaces/:id/activate', (req: Request, res: Response) => {
     try {
       const workspaceId = readRouteParam(req.params.id);
+      markSelfDiskMutation();
       const { workspace, registry } = activateWorkspace(workspaceId);
       syncBrowserSessionForActiveWorkspace();
       rebindWatcherToActiveWorkspace();
       const updatedDb = syncDatabaseWithDisk();
+      markSelfDiskMutation();
       broadcastWorkspaceSwitch(`workspace-activated:${workspace.id}`, updatedDb);
 
       res.json({
@@ -748,6 +915,10 @@ export function createApiRouter(): Express {
         database: updatedDb,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL workspace tidak valid' });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const status = message.includes('tidak ditemukan') ? 404 : 500;
       res.status(status).json({ error: message });
@@ -759,10 +930,12 @@ export function createApiRouter(): Express {
     try {
       const workspaceId = readRouteParam(req.params.id);
       const patch = (req.body ?? {}) as UpdateWorkspaceInput;
+      markSelfDiskMutation();
       const { workspace, registry } = updateWorkspace(workspaceId, patch);
       syncBrowserSessionForActiveWorkspace();
       rebindWatcherToActiveWorkspace();
       const updatedDb = syncDatabaseWithDisk();
+      markSelfDiskMutation();
       broadcastWorkspaceSwitch(`workspace-updated:${workspace.id}`, updatedDb);
 
       res.json({
@@ -772,6 +945,10 @@ export function createApiRouter(): Express {
         database: updatedDb,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL workspace tidak valid' });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const status = message.includes('tidak ditemukan') ? 404 : 500;
       res.status(status).json({ error: message });
@@ -782,10 +959,17 @@ export function createApiRouter(): Express {
   app.delete('/api/workspaces/:id', (req: Request, res: Response) => {
     try {
       const workspaceId = readRouteParam(req.params.id);
+      const deletedPaths = getWorkspacePaths(workspaceId);
+      markSelfDiskMutation();
       const registry = deleteWorkspace(workspaceId);
+      evictDatabaseMemoryCache(deletedPaths.plannerFile);
+      evictPresetStoreCache(deletedPaths.watermarkPresetsFile);
+      evictAutoPostConfigCache(workspaceId);
+      invalidateAutoPostCapabilitiesCache(workspaceId);
       syncBrowserSessionForActiveWorkspace();
       rebindWatcherToActiveWorkspace();
       const updatedDb = syncDatabaseWithDisk();
+      markSelfDiskMutation();
       const activeWorkspace = getActiveWorkspace();
       broadcastWorkspaceSwitch(`workspace-deleted:${workspaceId}`, updatedDb);
 
@@ -797,6 +981,10 @@ export function createApiRouter(): Express {
         database: updatedDb,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL workspace tidak valid' });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const status = message.includes('tidak ditemukan')
         ? 404
@@ -905,8 +1093,10 @@ export function createApiRouter(): Express {
     try {
       const input = (req.body ?? {}) as CreateContentSlotInput;
       const workspace = getActiveWorkspace();
+      markSelfDiskMutation();
       const created = createContentFolderOnDisk(workspace, input);
       let updatedDb = syncDatabaseWithDisk();
+      markSelfDiskMutation();
 
       let item = updatedDb.items[created.itemId];
       if (
@@ -959,8 +1149,10 @@ export function createApiRouter(): Express {
     try {
       const input = (req.body ?? {}) as BatchGenerateSlotsInput;
       const workspace = getActiveWorkspace();
+      markSelfDiskMutation();
       const result = batchGenerateSlotsOnDisk(workspace, input);
       const updatedDb = syncDatabaseWithDisk();
+      markSelfDiskMutation();
       broadcastUpdate(
         `batch-generated:${result.monthFolder}:${result.createdCodes.length}`,
         updatedDb
@@ -1026,6 +1218,10 @@ export function createApiRouter(): Express {
           database: result.db,
         });
       } catch (error) {
+        if (error instanceof URIError) {
+          res.status(400).json({ error: 'Parameter URL item tidak valid' });
+          return;
+        }
         res.status(500).json({
           error: 'Gagal memperbarui status platform',
           details: error instanceof Error ? error.message : String(error),
@@ -1063,6 +1259,10 @@ export function createApiRouter(): Express {
           database: result.db,
         });
       } catch (error) {
+        if (error instanceof URIError) {
+          res.status(400).json({ error: 'Parameter URL item tidak valid' });
+          return;
+        }
         res.status(500).json({
           error: 'Gagal memperbarui batch platform',
           details: error instanceof Error ? error.message : String(error),
@@ -1096,7 +1296,9 @@ export function createApiRouter(): Express {
         return;
       }
 
+      markSelfDiskMutation();
       const result = updateItemCaptionOnDisk(itemId, rawText);
+      markSelfDiskMutation();
       broadcastUpdate(`caption:${itemId}`, result.db);
 
       res.json({
@@ -1107,6 +1309,10 @@ export function createApiRouter(): Express {
         database: result.db,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL item tidak valid' });
+        return;
+      }
       res.status(500).json({
         error: 'Gagal menyimpan caption.txt ke disk',
         details: error instanceof Error ? error.message : String(error),
@@ -1161,6 +1367,10 @@ export function createApiRouter(): Express {
         database: result.db,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL item tidak valid' });
+        return;
+      }
       res.status(500).json({
         error: 'Gagal memperbarui properti konten',
         details: error instanceof Error ? error.message : String(error),
@@ -1267,15 +1477,19 @@ export function createApiRouter(): Express {
         error: 'Parameter itemId atau path diperlukan untuk membuka Explorer',
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL item tidak valid' });
+        return;
+      }
       res.status(500).json({
-        error: 'Gagal membuka Windows Explorer',
+        error: 'Gagal membuka file manager sistem',
         details: error instanceof Error ? error.message : String(error),
       });
     }
   });
 
-  // 9. GET /api/brand/emblem - Serves Jurnal Dunia emblem image
-  app.get('/api/brand/emblem', (_req: Request, res: Response) => {
+  // 9. GET /api/brand/emblem - Serves workspace emblem PNG or Luxury Burgundy CPGP SVG fallback
+  app.get('/api/brand/emblem', (req: Request, res: Response) => {
     const primaryEmblem = path.join(
       WORKSPACE_ROOT,
       'Vintage Historical Journal Emblem.png'
@@ -1288,18 +1502,74 @@ export function createApiRouter(): Express {
         ? fallbackEmblem
         : null;
 
-    if (!chosenPath) {
-      res.status(404).json({ error: 'File emblem Jurnal Dunia tidak ditemukan' });
+    let stat: fs.Stats | null = null;
+    if (chosenPath) {
+      try {
+        stat = fs.statSync(chosenPath);
+      } catch {
+        stat = null;
+      }
+    }
+
+    if (!chosenPath || !stat) {
+      const svgBuffer = Buffer.from(CPGP_FALLBACK_EMBLEM_SVG, 'utf-8');
+      const svgEtag = `W/"cpgp-emblem-svg-${svgBuffer.length}"`;
+      if (req.headers['if-none-match'] === svgEtag) {
+        res.writeHead(304, {
+          ETag: svgEtag,
+          'Cache-Control': 'public, max-age=86400',
+        });
+        res.end();
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Content-Length': svgBuffer.length,
+        ETag: svgEtag,
+        'Cache-Control': 'public, max-age=86400',
+      });
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      res.end(svgBuffer);
       return;
     }
 
-    const stat = fs.statSync(chosenPath);
+    const etag = `W/"${stat.size}-${Math.floor(stat.mtimeMs)}"`;
+    const lastModified = stat.mtime.toUTCString();
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, {
+        ETag: etag,
+        'Last-Modified': lastModified,
+        'Cache-Control': 'public, max-age=3600',
+      });
+      res.end();
+      return;
+    }
+
     res.writeHead(200, {
       'Content-Type': 'image/png',
       'Content-Length': stat.size,
+      ETag: etag,
+      'Last-Modified': lastModified,
       'Cache-Control': 'public, max-age=3600',
     });
-    fs.createReadStream(chosenPath).pipe(res);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+
+    const stream = fs.createReadStream(chosenPath);
+    res.on('close', () => {
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    });
+    stream.on('error', () => {
+      if (!res.writableEnded) res.end();
+    });
+    stream.pipe(res);
   });
 
   // Watermark Studio API Routes
@@ -1328,18 +1598,48 @@ export function createApiRouter(): Express {
       }
 
       const stat = fs.statSync(resolved.absolutePath);
+      const etag = `W/"${stat.size}-${Math.floor(stat.mtimeMs)}"`;
+      const lastModified = stat.mtime.toUTCString();
+      const cacheControl = 'public, max-age=86400';
+
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, {
+          ETag: etag,
+          'Last-Modified': lastModified,
+          'Cache-Control': cacheControl,
+        });
+        res.end();
+        return;
+      }
+
       res.writeHead(200, {
-        'Content-Type': 'font/ttf',
+        'Content-Type': getFontMimeType(resolved.absolutePath),
         'Content-Length': stat.size,
-        'Cache-Control': 'public, max-age=86400',
+        ETag: etag,
+        'Last-Modified': lastModified,
+        'Cache-Control': cacheControl,
       });
 
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+
       const stream = fs.createReadStream(resolved.absolutePath);
+      res.on('close', () => {
+        if (!stream.destroyed) {
+          stream.destroy();
+        }
+      });
       stream.on('error', () => {
         if (!res.writableEnded) res.end();
       });
       stream.pipe(res);
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL font tidak valid' });
+        return;
+      }
       res.status(500).json({
         error: 'Gagal memuat file font',
         details: error instanceof Error ? error.message : String(error),
@@ -1427,6 +1727,10 @@ export function createApiRouter(): Express {
         store: result.store,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL preset tidak valid' });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const statusCode = message.includes('tidak ditemukan')
         ? 404
@@ -1448,6 +1752,10 @@ export function createApiRouter(): Express {
         store: result.store,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter URL preset tidak valid' });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const statusCode = message.includes('tidak ditemukan')
         ? 404
@@ -1471,6 +1779,10 @@ export function createApiRouter(): Express {
           store: result.store,
         });
       } catch (error) {
+        if (error instanceof URIError) {
+          res.status(400).json({ error: 'Parameter URL preset tidak valid' });
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         const statusCode = message.includes('tidak ditemukan') ? 404 : 500;
         res.status(statusCode).json({ error: message });
@@ -1632,6 +1944,10 @@ export function createApiRouter(): Express {
         skipped,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter itemId tidak valid' });
+        return;
+      }
       res.status(500).json({
         error: 'Gagal memulai antrean render watermark',
         details: error instanceof Error ? error.message : String(error),
@@ -1659,6 +1975,10 @@ export function createApiRouter(): Express {
           job,
         });
       } catch (error) {
+        if (error instanceof URIError) {
+          res.status(400).json({ error: 'Parameter URL job tidak valid' });
+          return;
+        }
         res.status(500).json({
           error: 'Gagal membatalkan job render watermark',
           details: error instanceof Error ? error.message : String(error),
@@ -1675,44 +1995,37 @@ export function createApiRouter(): Express {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
+    let cleaned = false;
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: heartbeat ${Date.now()}\n\n`);
+      } catch {
+        cleanup();
+      }
+    }, 15000);
+
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(heartbeat);
+      watermarkSseClients.delete(res);
+    };
+
+    watermarkSseClients.set(res, cleanup);
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+
     const initialPayload = JSON.stringify({
       type: 'jobs-snapshot',
       jobs: watermarkQueue.listJobs(getActiveWorkspace().id),
       timestamp: new Date().toISOString(),
     });
-    res.write(`event: jobs-snapshot\ndata: ${initialPayload}\n\n`);
-    res.write(`data: ${initialPayload}\n\n`);
-
-    const unsubscribe = watermarkQueue.subscribe((event) => {
-      try {
-        const activeWsId = getActiveWorkspace().id;
-        if (event.job.workspaceId && event.job.workspaceId !== activeWsId) {
-          return;
-        }
-        const payload = JSON.stringify({
-          ...event,
-          jobs: watermarkQueue.listJobs(activeWsId),
-        });
-        res.write(`event: job-updated\ndata: ${payload}\n\n`);
-        res.write(`data: ${payload}\n\n`);
-      } catch {
-        unsubscribe();
-      }
-    });
-
-    const heartbeat = setInterval(() => {
-      try {
-        res.write(`: heartbeat ${Date.now()}\n\n`);
-      } catch {
-        clearInterval(heartbeat);
-        unsubscribe();
-      }
-    }, 15000);
-
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      unsubscribe();
-    });
+    try {
+      res.write(`data: ${initialPayload}\n\n`);
+    } catch {
+      cleanup();
+    }
   });
 
   // Auto-Post Manual Trigger API Routes
@@ -1779,6 +2092,13 @@ export function createApiRouter(): Express {
         capabilities: detectAutoPostCapabilities(),
       });
     } catch (error) {
+      if (
+        error instanceof Error &&
+        (error.name === 'ValidationError' || error.message.includes('URL CDP'))
+      ) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
       res.status(500).json({
         error: 'Gagal menyimpan pengaturan Auto-Post',
         details: error instanceof Error ? error.message : String(error),
@@ -2274,6 +2594,10 @@ export function createApiRouter(): Express {
         jobs,
       });
     } catch (error) {
+      if (error instanceof URIError) {
+        res.status(400).json({ error: 'Parameter itemId tidak valid' });
+        return;
+      }
       res.status(500).json({
         error: 'Gagal memulai antrean Auto-Post',
         details: error instanceof Error ? error.message : String(error),
@@ -2301,6 +2625,10 @@ export function createApiRouter(): Express {
           job,
         });
       } catch (error) {
+        if (error instanceof URIError) {
+          res.status(400).json({ error: 'Parameter URL job tidak valid' });
+          return;
+        }
         res.status(500).json({
           error: 'Gagal membatalkan job Auto-Post',
           details: error instanceof Error ? error.message : String(error),
@@ -2339,6 +2667,10 @@ export function createApiRouter(): Express {
           database: result.db,
         });
       } catch (error) {
+        if (error instanceof URIError) {
+          res.status(400).json({ error: 'Parameter URL job tidak valid' });
+          return;
+        }
         const message =
           error instanceof Error
             ? error.message
@@ -2359,64 +2691,38 @@ export function createApiRouter(): Express {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
+    let cleaned = false;
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: heartbeat ${Date.now()}\n\n`);
+      } catch {
+        cleanup();
+      }
+    }, 15000);
+
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(heartbeat);
+      autopostSseClients.delete(res);
+    };
+
+    autopostSseClients.set(res, cleanup);
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+
     const initialPayload = JSON.stringify({
       type: 'jobs-snapshot',
       jobs: autoPostQueue.listJobs(getActiveWorkspace().id),
       browserSession: getBrowserSessionStatus(),
       timestamp: new Date().toISOString(),
     });
-    res.write(`event: jobs-snapshot\ndata: ${initialPayload}\n\n`);
-    res.write(`data: ${initialPayload}\n\n`);
-
-    const unsubscribeJobs = autoPostQueue.subscribe((event) => {
-      try {
-        const activeWsId = getActiveWorkspace().id;
-        if (event.job.workspaceId && event.job.workspaceId !== activeWsId) {
-          return;
-        }
-        const payload = JSON.stringify({
-          ...event,
-          jobs: autoPostQueue.listJobs(activeWsId),
-          browserSession: getBrowserSessionStatus(),
-        });
-        res.write(`event: job-updated\ndata: ${payload}\n\n`);
-        res.write(`data: ${payload}\n\n`);
-      } catch {
-        unsubscribeJobs();
-        unsubscribeBrowser();
-      }
-    });
-
-    const unsubscribeBrowser = subscribeBrowserSession((browserSession) => {
-      try {
-        const payload = JSON.stringify({
-          type: 'browser-session',
-          browserSession,
-          timestamp: new Date().toISOString(),
-        });
-        res.write(`event: browser-session\ndata: ${payload}\n\n`);
-        res.write(`data: ${payload}\n\n`);
-      } catch {
-        unsubscribeJobs();
-        unsubscribeBrowser();
-      }
-    });
-
-    const heartbeat = setInterval(() => {
-      try {
-        res.write(`: heartbeat ${Date.now()}\n\n`);
-      } catch {
-        clearInterval(heartbeat);
-        unsubscribeJobs();
-        unsubscribeBrowser();
-      }
-    }, 15000);
-
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      unsubscribeJobs();
-      unsubscribeBrowser();
-    });
+    try {
+      res.write(`data: ${initialPayload}\n\n`);
+    } catch {
+      cleanup();
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -2599,9 +2905,23 @@ export function createApiRouter(): Express {
     '/api/addons/motionprovit/thumb',
     async (req: Request, res: Response) => {
       try {
-        const rawUrl = typeof req.query.url === 'string' ? req.query.url : '';
-        if (!rawUrl || !rawUrl.startsWith('http')) {
+        const rawUrl =
+          typeof req.query.url === 'string' ? req.query.url.trim() : '';
+        if (!rawUrl) {
           res.status(400).end();
+          return;
+        }
+        try {
+          new URL(rawUrl);
+        } catch {
+          res.status(400).end();
+          return;
+        }
+        if (!isAllowedMotionProvitUrl(rawUrl)) {
+          res.status(403).json({
+            error:
+              'Domain thumbnail tidak diizinkan. Hanya https://motion.clipprovit.com yang didukung.',
+          });
           return;
         }
         const workspace = getActiveWorkspace();
@@ -2656,9 +2976,13 @@ export function createApiRouter(): Express {
           },
           workspace.id,
           (reason, updatedDb, wsId) => {
+            markSelfDiskMutation();
             if (wsId === getActiveWorkspace().id) {
               broadcastUpdate(reason, updatedDb);
             }
+          },
+          () => {
+            markSelfDiskMutation();
           }
         );
 
@@ -2701,20 +3025,41 @@ export function createApiRouter(): Express {
     }
   );
 
-  // 10. GET /media/* - Streams files from active workspace contentRootPath with HTTP Range (206 Partial Content)
+  // 10. GET /media/* - Streams files from active workspace contentRootPath with HTTP Range (206 Partial Content) & ETag/304
   app.get(/^\/media\/(.+)$/, (req: Request, res: Response) => {
     try {
       const rawRelative = req.params[0] ?? '';
-      const decodedRelative = rawRelative
-        .split('/')
-        .map((segment) => decodeURIComponent(segment))
-        .join('/');
+      let decodedRelative: string;
+      try {
+        decodedRelative = rawRelative
+          .split('/')
+          .map((segment) => decodeURIComponent(segment))
+          .join('/');
+      } catch (err) {
+        if (err instanceof URIError) {
+          res.status(400).json({ error: 'URL media tidak valid' });
+          return;
+        }
+        throw err;
+      }
 
       const activeRoot = getActiveWorkspace().contentRootPath;
-      const resolvedFilePath = path.resolve(activeRoot, decodedRelative);
-      const normalizedRoot = path.resolve(activeRoot).toLowerCase();
+      if (!activeRoot) {
+        res.status(404).json({ error: 'Folder konten workspace belum diatur' });
+        return;
+      }
 
-      if (!resolvedFilePath.toLowerCase().startsWith(normalizedRoot)) {
+      const resolvedRoot = path.resolve(activeRoot);
+      const resolvedFilePath = path.resolve(resolvedRoot, decodedRelative);
+      const rel = path.relative(resolvedRoot, resolvedFilePath);
+
+      if (
+        !rel ||
+        rel === '..' ||
+        rel.startsWith(`..${path.sep}`) ||
+        rel.startsWith('../') ||
+        path.isAbsolute(rel)
+      ) {
         res.status(403).json({ error: 'Akses path di luar KONTEN ditolak' });
         return;
       }
@@ -2732,22 +3077,63 @@ export function createApiRouter(): Express {
 
       const fileSize = stat.size;
       const mimeType = getMimeType(resolvedFilePath);
+      const etag = `W/"${fileSize}-${Math.floor(stat.mtimeMs)}"`;
+      const lastModified = stat.mtime.toUTCString();
+      const cacheControl = 'private, max-age=60, must-revalidate';
       const rangeHeader = req.headers.range;
 
+      const ifNoneMatch = req.headers['if-none-match'];
+      if (
+        !rangeHeader &&
+        typeof ifNoneMatch === 'string' &&
+        (ifNoneMatch === etag ||
+          ifNoneMatch.split(',').some((tag) => tag.trim() === etag))
+      ) {
+        res.writeHead(304, {
+          ETag: etag,
+          'Last-Modified': lastModified,
+          'Cache-Control': cacheControl,
+        });
+        res.end();
+        return;
+      }
+
       if (rangeHeader) {
-        const parts = rangeHeader.replace(/bytes=/, '').split('-');
-        const start = parseInt(parts[0], 10);
-        const end =
-          parts[1] && parts[1].trim() !== ''
-            ? parseInt(parts[1], 10)
-            : fileSize - 1;
+        const rangeMatch = /^bytes=([^,]+)$/.exec(rangeHeader.trim());
+        const parts = (
+          rangeMatch ? rangeMatch[1] : rangeHeader.replace(/^bytes=/i, '')
+        ).split('-');
+
+        let start: number;
+        let end: number;
+
+        if (parts[0].trim() === '' && parts[1] && parts[1].trim() !== '') {
+          // Suffix byte range (e.g. bytes=-500)
+          const suffixLength = parseInt(parts[1].trim(), 10);
+          if (Number.isNaN(suffixLength) || suffixLength <= 0 || fileSize === 0) {
+            res.writeHead(416, {
+              'Content-Range': `bytes */${fileSize}`,
+            });
+            res.end();
+            return;
+          }
+          start = Math.max(0, fileSize - suffixLength);
+          end = fileSize - 1;
+        } else {
+          start = parseInt(parts[0].trim(), 10);
+          const rawEnd =
+            parts[1] && parts[1].trim() !== ''
+              ? parseInt(parts[1].trim(), 10)
+              : fileSize - 1;
+          end = Math.min(rawEnd, fileSize - 1);
+        }
 
         if (
+          fileSize === 0 ||
           Number.isNaN(start) ||
           Number.isNaN(end) ||
           start < 0 ||
           start >= fileSize ||
-          end >= fileSize ||
           start > end
         ) {
           res.writeHead(416, {
@@ -2763,10 +3149,22 @@ export function createApiRouter(): Express {
           'Accept-Ranges': 'bytes',
           'Content-Length': chunkSize,
           'Content-Type': mimeType,
-          'Cache-Control': 'no-cache',
+          ETag: etag,
+          'Last-Modified': lastModified,
+          'Cache-Control': cacheControl,
         });
 
+        if (req.method === 'HEAD') {
+          res.end();
+          return;
+        }
+
         const stream = fs.createReadStream(resolvedFilePath, { start, end });
+        res.on('close', () => {
+          if (!stream.destroyed) {
+            stream.destroy();
+          }
+        });
         stream.on('error', () => {
           if (!res.writableEnded) res.end();
         });
@@ -2778,10 +3176,22 @@ export function createApiRouter(): Express {
         'Content-Length': fileSize,
         'Content-Type': mimeType,
         'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache',
+        ETag: etag,
+        'Last-Modified': lastModified,
+        'Cache-Control': cacheControl,
       });
 
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+
       const stream = fs.createReadStream(resolvedFilePath);
+      res.on('close', () => {
+        if (!stream.destroyed) {
+          stream.destroy();
+        }
+      });
       stream.on('error', () => {
         if (!res.writableEnded) res.end();
       });
@@ -2794,10 +3204,60 @@ export function createApiRouter(): Express {
     }
   });
 
+  const shutdown = async (): Promise<void> => {
+    for (const [res, cleanupClient] of Array.from(sseClients.entries())) {
+      cleanupClient();
+      try {
+        if (!res.writableEnded) res.end();
+      } catch {
+        // ignore close failure
+      }
+    }
+    sseClients.clear();
+
+    for (const [res, cleanupClient] of Array.from(watermarkSseClients.entries())) {
+      cleanupClient();
+      try {
+        if (!res.writableEnded) res.end();
+      } catch {
+        // ignore close failure
+      }
+    }
+    watermarkSseClients.clear();
+
+    for (const [res, cleanupClient] of Array.from(autopostSseClients.entries())) {
+      cleanupClient();
+      try {
+        if (!res.writableEnded) res.end();
+      } catch {
+        // ignore close failure
+      }
+    }
+    autopostSseClients.clear();
+
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    unsubscribeWatermarkBroadcast();
+    unsubscribeAutopostJobsBroadcast();
+    unsubscribeAutopostBrowserBroadcast();
+
+    if (watcher) {
+      const oldWatcher = watcher;
+      watcher = null;
+      watchedRootPath = null;
+      await oldWatcher.close().catch(() => {});
+    }
+
+    await closeBrowserSession().catch(() => {});
+  };
+
   singletonInstance = {
     app,
     watcher,
     broadcastUpdate,
+    shutdown,
   };
 
   return app;

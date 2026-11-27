@@ -245,6 +245,46 @@ function reconcileStoreDefaults(
   };
 }
 
+interface CachedPresetStoreEntry {
+  store: WatermarkPresetStore;
+  mtimeMs: number;
+  size: number;
+}
+
+const presetStoreCache = new Map<string, CachedPresetStoreEntry>();
+
+function normalizePresetCacheKey(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+export function evictPresetStoreCache(filePath?: string): void {
+  if (filePath) {
+    presetStoreCache.delete(normalizePresetCacheKey(filePath));
+    return;
+  }
+  presetStoreCache.clear();
+}
+
+function getCachedPresetStoreIfFresh(
+  filePath: string
+): WatermarkPresetStore | null {
+  const cacheKey = normalizePresetCacheKey(filePath);
+  const entry = presetStoreCache.get(cacheKey);
+  if (!entry) return null;
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.mtimeMs !== entry.mtimeMs || stat.size !== entry.size) {
+      presetStoreCache.delete(cacheKey);
+      return null;
+    }
+    return entry.store;
+  } catch {
+    presetStoreCache.delete(cacheKey);
+    return null;
+  }
+}
+
 function savePresetStore(
   store: WatermarkPresetStore,
   filePath?: string
@@ -255,22 +295,46 @@ function savePresetStore(
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(
-    resolvedPath,
-    JSON.stringify(normalized, null, 2) + '\n',
-    'utf-8'
-  );
+  try {
+    fs.writeFileSync(
+      resolvedPath,
+      JSON.stringify(normalized, null, 2) + '\n',
+      'utf-8'
+    );
+    const stat = fs.statSync(resolvedPath);
+    presetStoreCache.set(normalizePresetCacheKey(resolvedPath), {
+      store: normalized,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    });
+  } catch (err) {
+    evictPresetStoreCache(resolvedPath);
+    throw err;
+  }
   return normalized;
 }
 
 export function getPresetStore(filePath?: string): WatermarkPresetStore {
   const resolvedPath = resolvePresetsFilePath(filePath);
+  const cached = getCachedPresetStoreIfFresh(resolvedPath);
+  if (cached) {
+    return cached;
+  }
+
+  const cacheKey = normalizePresetCacheKey(resolvedPath);
   if (fs.existsSync(resolvedPath)) {
     try {
+      const stat = fs.statSync(resolvedPath);
       const raw = fs.readFileSync(resolvedPath, 'utf-8');
       const parsed = JSON.parse(raw) as WatermarkPresetStore;
       if (parsed && typeof parsed === 'object' && Array.isArray(parsed.presets)) {
-        return reconcileStoreDefaults(parsed);
+        const reconciled = reconcileStoreDefaults(parsed);
+        presetStoreCache.set(cacheKey, {
+          store: reconciled,
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+        });
+        return reconciled;
       }
     } catch {
       // Fall through to re-seed default store if file is unreadable

@@ -1,3 +1,4 @@
+import { lazy, Suspense, type ReactNode } from 'react';
 import {
   createRootRoute,
   createRoute,
@@ -7,21 +8,101 @@ import {
 } from '@tanstack/react-router';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import App from './App';
-import { AutoPostLayout } from '@/components/autopost/AutoPostLayout';
 import { useAutoPostPageContext } from '@/components/autopost/AutoPostContext';
-import { DashboardPage } from '@/components/autopost/pages/DashboardPage';
-import { HistoryPage } from '@/components/autopost/pages/HistoryPage';
-import { StudioPage } from '@/components/autopost/pages/StudioPage';
-import { MetaApiPage } from '@/components/autopost/pages/MetaApiPage';
-import { YouTubeApiPage } from '@/components/autopost/pages/YouTubeApiPage';
 import { OverviewPage } from './routes/planner/OverviewPage';
-import { KanbanPage } from './routes/planner/KanbanPage';
-import { TablePage } from './routes/planner/TablePage';
-import { CalendarPage } from './routes/planner/CalendarPage';
-import { SchedulePage } from './routes/planner/SchedulePage';
-import { GalleryPage } from './routes/planner/GalleryPage';
-import { WatermarkPage } from './routes/planner/WatermarkPage';
-import { MotionProvitPage } from './routes/planner/MotionProvitPage';
+
+const KanbanPage = lazy(() =>
+  import('./routes/planner/KanbanPage').then((m) => ({ default: m.KanbanPage }))
+);
+const TablePage = lazy(() =>
+  import('./routes/planner/TablePage').then((m) => ({ default: m.TablePage }))
+);
+const CalendarPage = lazy(() =>
+  import('./routes/planner/CalendarPage').then((m) => ({
+    default: m.CalendarPage,
+  }))
+);
+const SchedulePage = lazy(() =>
+  import('./routes/planner/SchedulePage').then((m) => ({
+    default: m.SchedulePage,
+  }))
+);
+const GalleryPage = lazy(() =>
+  import('./routes/planner/GalleryPage').then((m) => ({
+    default: m.GalleryPage,
+  }))
+);
+const WatermarkPage = lazy(() =>
+  import('./routes/planner/WatermarkPage').then((m) => ({
+    default: m.WatermarkPage,
+  }))
+);
+const MotionProvitPage = lazy(() =>
+  import('./routes/planner/MotionProvitPage').then((m) => ({
+    default: m.MotionProvitPage,
+  }))
+);
+
+const AutoPostLayout = lazy(() =>
+  import('@/components/autopost/AutoPostLayout').then((m) => ({
+    default: m.AutoPostLayout,
+  }))
+);
+const DashboardPage = lazy(() =>
+  import('@/components/autopost/pages/DashboardPage').then((m) => ({
+    default: m.DashboardPage,
+  }))
+);
+const HistoryPage = lazy(() =>
+  import('@/components/autopost/pages/HistoryPage').then((m) => ({
+    default: m.HistoryPage,
+  }))
+);
+const StudioPage = lazy(() =>
+  import('@/components/autopost/pages/StudioPage').then((m) => ({
+    default: m.StudioPage,
+  }))
+);
+const MetaApiPage = lazy(() =>
+  import('@/components/autopost/pages/MetaApiPage').then((m) => ({
+    default: m.MetaApiPage,
+  }))
+);
+const YouTubeApiPage = lazy(() =>
+  import('@/components/autopost/pages/YouTubeApiPage').then((m) => ({
+    default: m.YouTubeApiPage,
+  }))
+);
+
+function RouteLoadingFallback({ fullPage = false }: { fullPage?: boolean }) {
+  const content = (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex min-h-[220px] w-full items-center justify-center rounded-lg border border-border bg-card/60 px-4 py-12 text-xs text-muted-foreground"
+    >
+      Memuat halaman...
+    </div>
+  );
+
+  if (fullPage) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <div className="w-full max-w-md">{content}</div>
+      </div>
+    );
+  }
+
+  return content;
+}
+
+function withRouteSuspense(node: ReactNode, options?: { fullPage?: boolean }) {
+  return (
+    <Suspense fallback={<RouteLoadingFallback fullPage={options?.fullPage} />}>
+      {node}
+    </Suspense>
+  );
+}
 
 function readString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -137,46 +218,78 @@ const overviewRoute = createRoute({
   component: OverviewPage,
 });
 
+function KanbanRoute() {
+  return withRouteSuspense(<KanbanPage />);
+}
+
+function TableRoute() {
+  return withRouteSuspense(<TablePage />);
+}
+
+function CalendarRoute() {
+  return withRouteSuspense(<CalendarPage />);
+}
+
+function ScheduleRoute() {
+  return withRouteSuspense(<SchedulePage />);
+}
+
+function GalleryRoute() {
+  return withRouteSuspense(<GalleryPage />);
+}
+
+function WatermarkRoute() {
+  return withRouteSuspense(<WatermarkPage />);
+}
+
+function MotionProvitRoute() {
+  return withRouteSuspense(<MotionProvitPage />);
+}
+
+function AutoPostLayoutRoute() {
+  return withRouteSuspense(<AutoPostLayout />, { fullPage: true });
+}
+
 const kanbanRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/kanban',
-  component: KanbanPage,
+  component: KanbanRoute,
 });
 
 const tableRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/tabel',
-  component: TablePage,
+  component: TableRoute,
 });
 
 const calendarRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/kalender',
-  component: CalendarPage,
+  component: CalendarRoute,
 });
 
 const scheduleRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/jadwal',
-  component: SchedulePage,
+  component: ScheduleRoute,
 });
 
 const galleryRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/galeri',
-  component: GalleryPage,
+  component: GalleryRoute,
 });
 
 const watermarkRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/watermark',
-  component: WatermarkPage,
+  component: WatermarkRoute,
 });
 
 const motionProvitAddonRoute = createRoute({
   getParentRoute: () => plannerLayoutRoute,
   path: '/addons/motionprovit',
-  component: MotionProvitPage,
+  component: MotionProvitRoute,
 });
 
 const autoPostRoute = createRoute({
@@ -186,32 +299,32 @@ const autoPostRoute = createRoute({
     item: readString(search.item),
     platform: readString(search.platform),
   }),
-  component: AutoPostLayout,
+  component: AutoPostLayoutRoute,
 });
 
 function DashboardRoute() {
   const ctx = useAutoPostPageContext();
-  return <DashboardPage ctx={ctx} />;
+  return withRouteSuspense(<DashboardPage ctx={ctx} />);
 }
 
 function HistoryRoute() {
   const ctx = useAutoPostPageContext();
-  return <HistoryPage ctx={ctx} />;
+  return withRouteSuspense(<HistoryPage ctx={ctx} />);
 }
 
 function StudioRoute() {
   const ctx = useAutoPostPageContext();
-  return <StudioPage ctx={ctx} />;
+  return withRouteSuspense(<StudioPage ctx={ctx} />);
 }
 
 function MetaApiRoute() {
   const ctx = useAutoPostPageContext();
-  return <MetaApiPage ctx={ctx} />;
+  return withRouteSuspense(<MetaApiPage ctx={ctx} />);
 }
 
 function YouTubeApiRoute() {
   const ctx = useAutoPostPageContext();
-  return <YouTubeApiPage ctx={ctx} />;
+  return withRouteSuspense(<YouTubeApiPage ctx={ctx} />);
 }
 
 const autoPostIndexRoute = createRoute({

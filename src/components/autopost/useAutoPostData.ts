@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { openManagedEventSource } from '@/lib/managedEventSource';
 import type {
   AiContentDisclosureMode,
   AutoPostBrowserSessionStatus,
@@ -30,14 +31,20 @@ export interface PlatformSessionCheckResult {
   checkedAt: string;
 }
 
-const SESSION_CHECKS_STORAGE_KEY = 'autopost.studio.sessionChecks.v1';
+const SESSION_CHECKS_STORAGE_PREFIX = 'autopost.studio.sessionChecks.v1';
 
-function loadStoredSessionChecks(): Partial<
-  Record<PlatformKey, PlatformSessionCheckResult>
-> {
+function getSessionChecksStorageKey(workspaceId: string): string {
+  return `${SESSION_CHECKS_STORAGE_PREFIX}:${workspaceId || 'default'}`;
+}
+
+function loadStoredSessionChecks(
+  workspaceId: string
+): Partial<Record<PlatformKey, PlatformSessionCheckResult>> {
   if (typeof window === 'undefined') return {};
   try {
-    const raw = window.sessionStorage.getItem(SESSION_CHECKS_STORAGE_KEY);
+    const raw = window.sessionStorage.getItem(
+      getSessionChecksStorageKey(workspaceId)
+    );
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object') return {};
@@ -48,12 +55,13 @@ function loadStoredSessionChecks(): Partial<
 }
 
 function persistSessionChecks(
+  workspaceId: string,
   checks: Partial<Record<PlatformKey, PlatformSessionCheckResult>>
 ): void {
   if (typeof window === 'undefined') return;
   try {
     window.sessionStorage.setItem(
-      SESSION_CHECKS_STORAGE_KEY,
+      getSessionChecksStorageKey(workspaceId),
       JSON.stringify(checks)
     );
   } catch {
@@ -67,6 +75,7 @@ export interface AutoPostSettingsPatch {
   browser?: {
     channel?: 'chrome' | 'msedge';
     keepTabOpenOnReview?: boolean;
+    cdpUrl?: string;
   };
   metaApi?: {
     enabled?: boolean;
@@ -116,6 +125,7 @@ const EMPTY_SETTINGS: AutoPostSettings = {
     channel: 'chrome',
     profileDir: 'data/browser-profile',
     keepTabOpenOnReview: true,
+    cdpUrl: '',
   },
   youtubeApi: {
     enabled: false,
@@ -185,6 +195,7 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export interface UseAutoPostDataOptions {
   isOpen: boolean;
+  workspaceId?: string;
   onToast?: (message: string, type?: ToastKind) => void;
   onPlannerSync?: () => void;
 }
@@ -228,7 +239,21 @@ export interface UseAutoPostDataResult {
 export function useAutoPostData(
   options: UseAutoPostDataOptions
 ): UseAutoPostDataResult {
-  const { isOpen, onToast, onPlannerSync } = options;
+  const { isOpen, workspaceId, onToast, onPlannerSync } = options;
+  const activeWorkspaceKey = workspaceId || 'default';
+
+  const onToastRef = useRef(onToast);
+  const onPlannerSyncRef = useRef(onPlannerSync);
+  const workspaceKeyRef = useRef(activeWorkspaceKey);
+  workspaceKeyRef.current = activeWorkspaceKey;
+
+  useEffect(() => {
+    onToastRef.current = onToast;
+  }, [onToast]);
+
+  useEffect(() => {
+    onPlannerSyncRef.current = onPlannerSync;
+  }, [onPlannerSync]);
 
   const [capabilities, setCapabilities] =
     useState<AutoPostCapabilities>(EMPTY_CAPABILITIES);
@@ -238,43 +263,71 @@ export function useAutoPostData(
     useState<AutoPostBrowserSessionStatus>(EMPTY_SESSION);
   const [sessionChecks, setSessionChecks] = useState<
     Partial<Record<PlatformKey, PlatformSessionCheckResult>>
-  >(() => loadStoredSessionChecks());
+  >(() => loadStoredSessionChecks(activeWorkspaceKey));
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   const syncedCompletedJobs = useRef<Set<string>>(new Set());
+  const prevWorkspaceIdRef = useRef<string | undefined>(workspaceId);
+  const inFlightRefreshRef = useRef<Promise<void> | null>(null);
+
+  useEffect(() => {
+    const prev = prevWorkspaceIdRef.current;
+    const next = workspaceId;
+    if (prev && next && prev !== next) {
+      syncedCompletedJobs.current.clear();
+    }
+    setSessionChecks(loadStoredSessionChecks(activeWorkspaceKey));
+    prevWorkspaceIdRef.current = next;
+  }, [workspaceId, activeWorkspaceKey]);
 
   const refresh = useCallback(async () => {
-    setIsRefreshing(true);
-    try {
-      const [capRes, setRes, jobsRes] = await Promise.allSettled([
-        requestJson<AutoPostCapabilities>('/api/autopost/capabilities'),
-        requestJson<AutoPostSettings>('/api/autopost/settings'),
-        requestJson<{ jobs?: AutoPostJob[] }>('/api/autopost/jobs'),
-      ]);
+    if (inFlightRefreshRef.current) {
+      return inFlightRefreshRef.current;
+    }
 
-      if (capRes.status === 'fulfilled') {
-        setCapabilities(capRes.value);
-        if (capRes.value.browserSession) {
-          setBrowserSession(capRes.value.browserSession);
-        }
-      }
-      if (setRes.status === 'fulfilled') {
-        setSettings(setRes.value);
-      }
-      if (jobsRes.status === 'fulfilled' && Array.isArray(jobsRes.value.jobs)) {
-        for (const job of jobsRes.value.jobs) {
-          if (job.status === 'completed') {
-            syncedCompletedJobs.current.add(job.jobId);
+    let run: Promise<void> | null = null;
+    run = (async () => {
+      setIsRefreshing(true);
+      try {
+        const [capRes, setRes, jobsRes] = await Promise.allSettled([
+          requestJson<AutoPostCapabilities>('/api/autopost/capabilities'),
+          requestJson<AutoPostSettings>('/api/autopost/settings'),
+          requestJson<{ jobs?: AutoPostJob[] }>('/api/autopost/jobs'),
+        ]);
+
+        if (capRes.status === 'fulfilled') {
+          setCapabilities(capRes.value);
+          if (capRes.value.browserSession) {
+            setBrowserSession(capRes.value.browserSession);
           }
         }
-        setJobs(jobsRes.value.jobs);
+        if (setRes.status === 'fulfilled') {
+          setSettings(setRes.value);
+        }
+        if (
+          jobsRes.status === 'fulfilled' &&
+          Array.isArray(jobsRes.value.jobs)
+        ) {
+          for (const job of jobsRes.value.jobs) {
+            if (job.status === 'completed') {
+              syncedCompletedJobs.current.add(job.jobId);
+            }
+          }
+          setJobs(jobsRes.value.jobs);
+        }
+      } finally {
+        setIsLoading(false);
+        setIsRefreshing(false);
+        if (inFlightRefreshRef.current === run) {
+          inFlightRefreshRef.current = null;
+        }
       }
-    } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
-    }
+    })();
+
+    inFlightRefreshRef.current = run;
+    return run;
   }, []);
 
   useEffect(() => {
@@ -285,9 +338,10 @@ export function useAutoPostData(
   useEffect(() => {
     if (!isOpen) return;
 
-    let source: EventSource | null = null;
+    let managed: { source: EventSource; close: () => void } | null = null;
     try {
-      source = new EventSource('/api/autopost/events');
+      managed = openManagedEventSource('/api/autopost/events');
+      const { source } = managed;
       source.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data) as {
@@ -313,7 +367,7 @@ export function useAutoPostData(
               }
             }
             setJobs(payload.jobs);
-            if (completedNow) onPlannerSync?.();
+            if (completedNow) onPlannerSyncRef.current?.();
           } else if (payload.job) {
             const incoming = payload.job;
             setJobs((prev) => {
@@ -327,7 +381,7 @@ export function useAutoPostData(
               !syncedCompletedJobs.current.has(incoming.jobId)
             ) {
               syncedCompletedJobs.current.add(incoming.jobId);
-              onPlannerSync?.();
+              onPlannerSyncRef.current?.();
             }
           }
         } catch {
@@ -339,9 +393,9 @@ export function useAutoPostData(
     }
 
     return () => {
-      source?.close();
+      managed?.close();
     };
-  }, [isOpen, onPlannerSync]);
+  }, [isOpen]);
 
   const saveSettings = useCallback(
     async (patch: AutoPostSettingsPatch): Promise<boolean> => {
@@ -361,9 +415,17 @@ export function useAutoPostData(
             setBrowserSession(res.capabilities.browserSession);
           }
         }
+        if (patch.browser && typeof patch.browser.cdpUrl === 'string') {
+          onToastRef.current?.(
+            patch.browser.cdpUrl.trim()
+              ? 'URL CDP browser tersimpan.'
+              : 'URL CDP browser dikosongkan.',
+            'success'
+          );
+        }
         return true;
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error ? error.message : 'Gagal menyimpan pengaturan.',
           'error'
         );
@@ -372,7 +434,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast]
+    []
   );
 
   const triggerPost = useCallback(
@@ -415,7 +477,7 @@ export function useAutoPostData(
         }
         const aiSuffix =
           payload.aiGenerated === true ? ' (Label AI aktif)' : '';
-        onToast?.(
+        onToastRef.current?.(
           payload.scheduledAt
             ? `${platforms.length} jadwal Auto-Post (${payload.scheduledAt.replace('T', ' ')})${aiSuffix} dimasukkan ke antrean.`
             : `${platforms.length} proses Auto-Post${aiSuffix} dimasukkan ke antrean.`,
@@ -423,7 +485,7 @@ export function useAutoPostData(
         );
         return true;
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error ? error.message : 'Gagal memulai Auto-Post.',
           'error'
         );
@@ -432,7 +494,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast]
+    []
   );
 
   const cancelJob = useCallback(
@@ -442,9 +504,9 @@ export function useAutoPostData(
         await requestJson(`/api/autopost/jobs/${encodeURIComponent(jobId)}/cancel`, {
           method: 'POST',
         });
-        onToast?.('Proses Auto-Post dibatalkan.', 'info');
+        onToastRef.current?.('Proses Auto-Post dibatalkan.', 'info');
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error ? error.message : 'Gagal membatalkan proses.',
           'error'
         );
@@ -452,7 +514,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast]
+    []
   );
 
   const confirmJob = useCallback(
@@ -473,10 +535,10 @@ export function useAutoPostData(
             prev.map((job) => (job.jobId === updated.jobId ? updated : job))
           );
         }
-        onToast?.('Status publish dikonfirmasi.', 'success');
-        onPlannerSync?.();
+        onToastRef.current?.('Status publish dikonfirmasi.', 'success');
+        onPlannerSyncRef.current?.();
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error ? error.message : 'Gagal konfirmasi publish.',
           'error'
         );
@@ -484,7 +546,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast, onPlannerSync]
+    []
   );
 
   const openProfile = useCallback(
@@ -501,12 +563,12 @@ export function useAutoPostData(
         });
         if (res.browserSession) setBrowserSession(res.browserSession);
         if (res.capabilities) setCapabilities(res.capabilities);
-        onToast?.(
+        onToastRef.current?.(
           `Browser dibuka (${res.openedUrls?.length ?? platforms?.length ?? 4} tab studio).`,
           'info'
         );
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error ? error.message : 'Gagal membuka browser.',
           'error'
         );
@@ -514,7 +576,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast]
+    []
   );
 
   const closeProfile = useCallback(async () => {
@@ -526,19 +588,20 @@ export function useAutoPostData(
       }>('/api/autopost/close-profile', { method: 'POST' });
       setBrowserSession(res.browserSession ?? EMPTY_SESSION);
       if (res.capabilities) setCapabilities(res.capabilities);
-      onToast?.('Sesi browser ditutup.', 'info');
+      onToastRef.current?.('Sesi browser ditutup.', 'info');
     } catch (error) {
-      onToast?.(
+      onToastRef.current?.(
         error instanceof Error ? error.message : 'Gagal menutup browser.',
         'error'
       );
     } finally {
       setBusyKey(null);
     }
-  }, [onToast]);
+  }, []);
 
   const checkStudioSessions = useCallback(
     async (platforms?: PlatformKey[]) => {
+      const capturedWorkspaceKey = workspaceKeyRef.current;
       const isMetaPair =
         platforms &&
         platforms.length === 2 &&
@@ -561,25 +624,39 @@ export function useAutoPostData(
           body: JSON.stringify(platforms ? { platforms } : {}),
         });
 
-        if (res.browserSession) setBrowserSession(res.browserSession);
-        if (res.capabilities) setCapabilities(res.capabilities);
-
         const incoming = res.sessions ?? {};
         const targetList =
           platforms && platforms.length > 0
             ? platforms
             : (['yt_shorts', 'tiktok', 'ig_reels', 'fb_reels'] as PlatformKey[]);
 
-        setSessionChecks((prev) => {
-          const next = { ...prev };
+        const isSameWorkspace =
+          workspaceKeyRef.current === capturedWorkspaceKey;
+
+        if (isSameWorkspace) {
+          if (res.browserSession) setBrowserSession(res.browserSession);
+          if (res.capabilities) setCapabilities(res.capabilities);
+          setSessionChecks((prev) => {
+            const next = { ...prev };
+            for (const key of targetList) {
+              if (incoming[key]) {
+                next[key] = incoming[key];
+              }
+            }
+            persistSessionChecks(capturedWorkspaceKey, next);
+            return next;
+          });
+        } else {
+          const stored = loadStoredSessionChecks(capturedWorkspaceKey);
+          const merged = { ...stored };
           for (const key of targetList) {
             if (incoming[key]) {
-              next[key] = incoming[key];
+              merged[key] = incoming[key];
             }
           }
-          persistSessionChecks(next);
-          return next;
-        });
+          persistSessionChecks(capturedWorkspaceKey, merged);
+          return;
+        }
 
         const checkedEntries = targetList
           .map((key) => incoming[key])
@@ -594,22 +671,22 @@ export function useAutoPostData(
           const metaOk = checkedEntries.some(
             (entry) => entry.state === 'logged_in'
           );
-          onToast?.(
+          onToastRef.current?.(
             metaOk
               ? 'Sesi Meta Business Suite (FB & IG) aktif.'
               : 'Sesi Meta Business Suite (FB & IG) belum login.',
             metaOk ? 'success' : 'info'
           );
         } else if (checkedEntries.length > 0) {
-          onToast?.(
+          onToastRef.current?.(
             `Cek sesi selesai: ${loggedInCount} dari ${checkedEntries.length} platform sudah login.`,
             loggedInCount === checkedEntries.length ? 'success' : 'info'
           );
         } else {
-          onToast?.('Tidak ada sesi platform yang diperiksa.', 'info');
+          onToastRef.current?.('Tidak ada sesi platform yang diperiksa.', 'info');
         }
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error
             ? error.message
             : 'Gagal memeriksa sesi studio.',
@@ -619,7 +696,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast]
+    []
   );
 
   const discoverMeta = useCallback(
@@ -638,7 +715,7 @@ export function useAutoPostData(
           }),
         });
         const pages = Array.isArray(res.pages) ? res.pages : [];
-        onToast?.(
+        onToastRef.current?.(
           pages.length > 0
             ? `${pages.length} akun Meta ditemukan.`
             : 'Tidak ada akun Meta yang ditemukan.',
@@ -646,7 +723,7 @@ export function useAutoPostData(
         );
         return pages;
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error ? error.message : 'Gagal mendeteksi akun Meta.',
           'error'
         );
@@ -655,7 +732,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast, settings.metaApi.graphApiVersion]
+    [settings.metaApi.graphApiVersion]
   );
 
   const exchangeMetaToken = useCallback(
@@ -689,17 +766,17 @@ export function useAutoPostData(
 
         const pageCount = Array.isArray(res.pages) ? res.pages.length : 0;
         if (res.autoSelectedPage) {
-          onToast?.(
+          onToastRef.current?.(
             `Token ditukar ke Long-Lived dan Page "${res.autoSelectedPage.pageName}" siap dipakai.`,
             'success'
           );
         } else if (pageCount > 0) {
-          onToast?.(
+          onToastRef.current?.(
             `Token ditukar ke Long-Lived. ${pageCount} Page ditemukan, silakan pilih satu.`,
             'success'
           );
         } else {
-          onToast?.(
+          onToastRef.current?.(
             'Token ditukar ke Long-Lived, namun belum ada Facebook Page ditemukan.',
             'info'
           );
@@ -707,7 +784,7 @@ export function useAutoPostData(
 
         return res;
       } catch (error) {
-        onToast?.(
+        onToastRef.current?.(
           error instanceof Error
             ? error.message
             : 'Gagal menukar token ke Long-Lived.',
@@ -718,7 +795,7 @@ export function useAutoPostData(
         setBusyKey(null);
       }
     },
-    [onToast, settings.metaApi.graphApiVersion]
+    [settings.metaApi.graphApiVersion]
   );
 
   const testMetaConnection = useCallback(async (): Promise<MetaConnectionTestResult | null> => {
@@ -730,22 +807,22 @@ export function useAutoPostData(
       );
 
       if (res.fbPage.ok && res.igAccount.ok) {
-        onToast?.(
+        onToastRef.current?.(
           'Tes koneksi berhasil: Facebook Page dan Instagram Business aktif.',
           'success'
         );
       } else if (res.fbPage.ok) {
-        onToast?.(
+        onToastRef.current?.(
           'Facebook Page terhubung, namun Instagram Business belum siap.',
           'info'
         );
       } else if (res.igAccount.ok) {
-        onToast?.(
+        onToastRef.current?.(
           'Instagram Business terhubung, namun Facebook Page gagal diperiksa.',
           'info'
         );
       } else {
-        onToast?.(
+        onToastRef.current?.(
           'Tes koneksi Meta belum berhasil. Periksa detail diagnostik.',
           'error'
         );
@@ -753,7 +830,7 @@ export function useAutoPostData(
 
       return res;
     } catch (error) {
-      onToast?.(
+      onToastRef.current?.(
         error instanceof Error
           ? error.message
           : 'Gagal menjalankan tes koneksi Meta.',
@@ -763,7 +840,7 @@ export function useAutoPostData(
     } finally {
       setBusyKey(null);
     }
-  }, [onToast]);
+  }, []);
 
   const getMetaAuthUrl = useCallback(async (): Promise<string | null> => {
     setBusyKey('meta-auth');
@@ -775,7 +852,7 @@ export function useAutoPostData(
       if (!url) throw new Error('URL OAuth Meta tidak tersedia.');
       return url;
     } catch (error) {
-      onToast?.(
+      onToastRef.current?.(
         error instanceof Error ? error.message : 'Gagal membuka OAuth Meta.',
         'error'
       );
@@ -783,7 +860,7 @@ export function useAutoPostData(
     } finally {
       setBusyKey(null);
     }
-  }, [onToast]);
+  }, []);
 
   const disconnectMeta = useCallback(async () => {
     setBusyKey('meta-disconnect');
@@ -794,16 +871,16 @@ export function useAutoPostData(
       }>('/api/autopost/meta/disconnect', { method: 'POST' });
       if (res.settings) setSettings(res.settings);
       if (res.capabilities) setCapabilities(res.capabilities);
-      onToast?.('Token Meta dihapus.', 'info');
+      onToastRef.current?.('Token Meta dihapus.', 'info');
     } catch (error) {
-      onToast?.(
+      onToastRef.current?.(
         error instanceof Error ? error.message : 'Gagal memutuskan Meta API.',
         'error'
       );
     } finally {
       setBusyKey(null);
     }
-  }, [onToast]);
+  }, []);
 
   const getYouTubeAuthUrl = useCallback(async (): Promise<string | null> => {
     setBusyKey('youtube-auth');
@@ -815,7 +892,7 @@ export function useAutoPostData(
       if (!url) throw new Error('URL otorisasi YouTube tidak tersedia.');
       return url;
     } catch (error) {
-      onToast?.(
+      onToastRef.current?.(
         error instanceof Error ? error.message : 'Gagal membuka OAuth YouTube.',
         'error'
       );
@@ -823,7 +900,7 @@ export function useAutoPostData(
     } finally {
       setBusyKey(null);
     }
-  }, [onToast]);
+  }, []);
 
   const disconnectYouTube = useCallback(async () => {
     setBusyKey('youtube-disconnect');
@@ -834,42 +911,69 @@ export function useAutoPostData(
       }>('/api/autopost/youtube/disconnect', { method: 'POST' });
       if (res.settings) setSettings(res.settings);
       if (res.capabilities) setCapabilities(res.capabilities);
-      onToast?.('Koneksi YouTube diputuskan.', 'info');
+      onToastRef.current?.('Koneksi YouTube diputuskan.', 'info');
     } catch (error) {
-      onToast?.(
+      onToastRef.current?.(
         error instanceof Error ? error.message : 'Gagal memutus YouTube API.',
         'error'
       );
     } finally {
       setBusyKey(null);
     }
-  }, [onToast]);
+  }, []);
 
-  return {
-    capabilities,
-    settings,
-    jobs,
-    browserSession,
-    sessionChecks,
-    isLoading,
-    isRefreshing,
-    busyKey,
-    refresh,
-    saveSettings,
-    triggerPost,
-    cancelJob,
-    confirmJob,
-    openProfile,
-    closeProfile,
-    checkStudioSessions,
-    discoverMeta,
-    exchangeMetaToken,
-    testMetaConnection,
-    getMetaAuthUrl,
-    disconnectMeta,
-    getYouTubeAuthUrl,
-    disconnectYouTube,
-  };
+  return useMemo(
+    () => ({
+      capabilities,
+      settings,
+      jobs,
+      browserSession,
+      sessionChecks,
+      isLoading,
+      isRefreshing,
+      busyKey,
+      refresh,
+      saveSettings,
+      triggerPost,
+      cancelJob,
+      confirmJob,
+      openProfile,
+      closeProfile,
+      checkStudioSessions,
+      discoverMeta,
+      exchangeMetaToken,
+      testMetaConnection,
+      getMetaAuthUrl,
+      disconnectMeta,
+      getYouTubeAuthUrl,
+      disconnectYouTube,
+    }),
+    [
+      capabilities,
+      settings,
+      jobs,
+      browserSession,
+      sessionChecks,
+      isLoading,
+      isRefreshing,
+      busyKey,
+      refresh,
+      saveSettings,
+      triggerPost,
+      cancelJob,
+      confirmJob,
+      openProfile,
+      closeProfile,
+      checkStudioSessions,
+      discoverMeta,
+      exchangeMetaToken,
+      testMetaConnection,
+      getMetaAuthUrl,
+      disconnectMeta,
+      getYouTubeAuthUrl,
+      disconnectYouTube,
+    ]
+  );
 }
 
 export interface PlatformEngineInfo {

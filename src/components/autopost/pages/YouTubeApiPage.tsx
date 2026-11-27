@@ -79,6 +79,11 @@ export function YouTubeApiPage({ ctx }: AutoPostPageProps) {
     setRedirectUri(youtubeApi.redirectUri);
   }, [youtubeApi.redirectUri]);
 
+  // Reset transient secret draft when switching workspace
+  useEffect(() => {
+    setClientSecret('');
+  }, [settings.browser.profileDir]);
+
   useEffect(() => {
     return () => {
       if (pollIntervalRef.current !== null) {

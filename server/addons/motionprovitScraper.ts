@@ -22,7 +22,12 @@ import {
   createContentFolderOnDisk,
   suggestNextAvailableSlot,
 } from '../core/contentCreator.ts';
-import { getOrInitDatabase, syncDatabaseWithDisk } from '../storage.ts';
+import { scanSingleContentFolder } from '../scanner.ts';
+import {
+  getOrInitDatabase,
+  mergeUserProperties,
+  saveDatabaseToFile,
+} from '../storage.ts';
 import {
   APP_ROOT,
   getActiveWorkspace,
@@ -1578,13 +1583,86 @@ interface CachedThumbEntry {
 }
 
 const THUMB_CACHE_MAX = 200;
+const THUMB_CACHE_MAX_BYTES = 32 * 1024 * 1024; // 32 MB
 const THUMB_CACHE_TTL_MS = 30 * 60 * 1000;
+const THUMB_DISK_CACHE_MAX_FILES = 500;
 const thumbCache = new Map<string, CachedThumbEntry>();
+let thumbCacheTotalBytes = 0;
 const thumbFetchQueue = new PQueue({ concurrency: 2 });
 const inFlightThumbFetches = new Map<
   string,
   Promise<{ buffer: Buffer; contentType: string } | null>
 >();
+
+export function isAllowedMotionProvitUrl(targetUrl: string): boolean {
+  try {
+    const parsed = new URL(targetUrl);
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase() === 'motion.clipprovit.com'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function getThumbFromRamCache(
+  cacheKey: string
+): { buffer: Buffer; contentType: string } | null {
+  const entry = thumbCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt >= THUMB_CACHE_TTL_MS) {
+    thumbCache.delete(cacheKey);
+    thumbCacheTotalBytes = Math.max(
+      0,
+      thumbCacheTotalBytes - entry.buffer.length
+    );
+    return null;
+  }
+  // Refresh LRU recency
+  thumbCache.delete(cacheKey);
+  thumbCache.set(cacheKey, entry);
+  return { buffer: entry.buffer, contentType: entry.contentType };
+}
+
+function setThumbInRamCache(
+  cacheKey: string,
+  buffer: Buffer,
+  contentType: string
+): void {
+  if (buffer.length > THUMB_CACHE_MAX_BYTES) {
+    return;
+  }
+
+  const existing = thumbCache.get(cacheKey);
+  if (existing) {
+    thumbCache.delete(cacheKey);
+    thumbCacheTotalBytes = Math.max(
+      0,
+      thumbCacheTotalBytes - existing.buffer.length
+    );
+  }
+
+  while (
+    thumbCache.size >= THUMB_CACHE_MAX ||
+    (thumbCache.size > 0 &&
+      thumbCacheTotalBytes + buffer.length > THUMB_CACHE_MAX_BYTES)
+  ) {
+    const oldestKey = thumbCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldestEntry = thumbCache.get(oldestKey);
+    thumbCache.delete(oldestKey);
+    if (oldestEntry) {
+      thumbCacheTotalBytes = Math.max(
+        0,
+        thumbCacheTotalBytes - oldestEntry.buffer.length
+      );
+    }
+  }
+
+  thumbCache.set(cacheKey, { buffer, contentType, cachedAt: Date.now() });
+  thumbCacheTotalBytes += buffer.length;
+}
 
 function getWorkspaceThumbCacheDir(workspaceId: string): string {
   const safeWs = workspaceId.replace(/[^a-zA-Z0-9_-]/g, '_') || 'default';
@@ -1613,21 +1691,22 @@ function contentTypeForExt(ext: string): string {
   return 'image/jpeg';
 }
 
-function readThumbFromDisk(
+async function readThumbFromDisk(
   workspaceId: string,
   targetUrl: string
-): { buffer: Buffer; contentType: string } | null {
+): Promise<{ buffer: Buffer; contentType: string } | null> {
   try {
     const dir = getWorkspaceThumbCacheDir(workspaceId);
-    if (!fs.existsSync(dir)) return null;
     const baseName = resolveThumbDiskBaseName(targetUrl);
     for (const ext of ['.jpg', '.webp', '.png']) {
       const fullPath = path.join(dir, `${baseName}${ext}`);
-      if (fs.existsSync(fullPath)) {
-        const buffer = fs.readFileSync(fullPath);
+      try {
+        const buffer = await fs.promises.readFile(fullPath);
         if (buffer.length > 0) {
           return { buffer, contentType: contentTypeForExt(ext) };
         }
+      } catch {
+        // File does not exist for this extension
       }
     }
   } catch {
@@ -1636,20 +1715,57 @@ function readThumbFromDisk(
   return null;
 }
 
-function writeThumbToDisk(
+async function pruneDiskThumbCacheIfNeeded(dir: string): Promise<void> {
+  try {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    const fileNames = entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name);
+    if (fileNames.length <= THUMB_DISK_CACHE_MAX_FILES) {
+      return;
+    }
+
+    const withMtime = await Promise.all(
+      fileNames.map(async (name) => {
+        const fullPath = path.join(dir, name);
+        try {
+          const stat = await fs.promises.stat(fullPath);
+          return { fullPath, mtimeMs: stat.mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    const validFiles = withMtime
+      .filter((item): item is { fullPath: string; mtimeMs: number } =>
+        Boolean(item)
+      )
+      .sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+    const targetKeep = Math.floor(THUMB_DISK_CACHE_MAX_FILES * 0.85);
+    const toRemoveCount = Math.max(0, validFiles.length - targetKeep);
+    for (let i = 0; i < toRemoveCount; i += 1) {
+      await fs.promises.unlink(validFiles[i].fullPath).catch(() => {});
+    }
+  } catch {
+    // non-fatal pruning failure
+  }
+}
+
+async function writeThumbToDisk(
   workspaceId: string,
   targetUrl: string,
   buffer: Buffer,
   contentType: string
-): void {
+): Promise<void> {
   try {
     const dir = getWorkspaceThumbCacheDir(workspaceId);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    await fs.promises.mkdir(dir, { recursive: true });
     const baseName = resolveThumbDiskBaseName(targetUrl);
     const ext = extForImageContentType(contentType);
-    fs.writeFileSync(path.join(dir, `${baseName}${ext}`), buffer);
+    await fs.promises.writeFile(path.join(dir, `${baseName}${ext}`), buffer);
+    await pruneDiskThumbCacheIfNeeded(dir);
   } catch {
     // non-fatal disk cache write error
   }
@@ -1707,7 +1823,14 @@ export function clearMotionProvitThumbCache(
   const prefix = `${resolvedWsId}::`;
   for (const key of Array.from(thumbCache.keys())) {
     if (key.startsWith(prefix)) {
+      const entry = thumbCache.get(key);
       thumbCache.delete(key);
+      if (entry) {
+        thumbCacheTotalBytes = Math.max(
+          0,
+          thumbCacheTotalBytes - entry.buffer.length
+        );
+      }
     }
   }
 
@@ -1744,7 +1867,7 @@ export async function fetchMotionProvitImageBuffer(
   targetUrl: string,
   workspaceId?: string
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
-  if (!targetUrl || !targetUrl.startsWith('http')) return null;
+  if (!targetUrl || !isAllowedMotionProvitUrl(targetUrl)) return null;
 
   const resolvedWsId =
     workspaceId && workspaceId.trim()
@@ -1752,24 +1875,16 @@ export async function fetchMotionProvitImageBuffer(
       : getActiveWorkspace().id;
   const cacheKey = `${resolvedWsId}::${targetUrl}`;
 
-  // 1. RAM cache (instant 0ms)
-  const cached = thumbCache.get(cacheKey);
-  if (cached && Date.now() - cached.cachedAt < THUMB_CACHE_TTL_MS) {
-    return { buffer: cached.buffer, contentType: cached.contentType };
+  // 1. RAM LRU cache (instant 0ms)
+  const cached = getThumbFromRamCache(cacheKey);
+  if (cached) {
+    return cached;
   }
 
   // 2. Permanent Disk Cache in <project-root>/.cache/motionprovit-thumbs/<workspaceId>/
-  const diskHit = readThumbFromDisk(resolvedWsId, targetUrl);
+  const diskHit = await readThumbFromDisk(resolvedWsId, targetUrl);
   if (diskHit) {
-    if (thumbCache.size >= THUMB_CACHE_MAX) {
-      const oldestKey = thumbCache.keys().next().value;
-      if (oldestKey) thumbCache.delete(oldestKey);
-    }
-    thumbCache.set(cacheKey, {
-      buffer: diskHit.buffer,
-      contentType: diskHit.contentType,
-      cachedAt: Date.now(),
-    });
+    setThumbInRamCache(cacheKey, diskHit.buffer, diskHit.contentType);
     return diskHit;
   }
 
@@ -1809,12 +1924,8 @@ export async function fetchMotionProvitImageBuffer(
       const buffer = Buffer.from(arrayBuf);
       if (buffer.length === 0) return null;
 
-      writeThumbToDisk(resolvedWsId, targetUrl, buffer, contentType);
-      if (thumbCache.size >= THUMB_CACHE_MAX) {
-        const oldestKey = thumbCache.keys().next().value;
-        if (oldestKey) thumbCache.delete(oldestKey);
-      }
-      thumbCache.set(cacheKey, { buffer, contentType, cachedAt: Date.now() });
+      await writeThumbToDisk(resolvedWsId, targetUrl, buffer, contentType);
+      setThumbInRamCache(cacheKey, buffer, contentType);
 
       return { buffer, contentType };
     } catch {
@@ -1973,7 +2084,8 @@ export function cancelMotionProvitImport(workspaceId?: string): boolean {
 export async function startMotionProvitBatchImport(
   input: MotionProvitImportRequest,
   workspaceId: string | undefined,
-  onPlannerUpdated?: (reason: string, db: PlannerDatabase, wsId: string) => void
+  onPlannerUpdated?: (reason: string, db: PlannerDatabase, wsId: string) => void,
+  onBeforeDiskMutation?: () => void
 ): Promise<MotionProvitImportProgress> {
   const workspace = workspaceId
     ? getWorkspaceById(workspaceId) ?? getActiveWorkspace()
@@ -2173,6 +2285,7 @@ export async function startMotionProvitBatchImport(
           );
 
           // Create target slot folder on disk (assign/buat tanggal yang belum ada!)
+          onBeforeDiskMutation?.();
           const created = createContentFolderOnDisk(workspace, {
             monthFolder: slot.monthFolder,
             dayOfMonth: slot.dayOfMonth,
@@ -2259,13 +2372,35 @@ export async function startMotionProvitBatchImport(
             }
           }
 
-          // Sync planner DB right after each downloaded item so UI updates live!
-          const updatedDb = syncDatabaseWithDisk(
+          // Incremental single-folder scan + DB update so UI updates live without full disk rescan!
+          onBeforeDiskMutation?.();
+          const scannedItem = scanSingleContentFolder(
+            created.folderPath,
+            workspace.contentRootPath,
+            workspace.defaultYear,
+            workspace
+          );
+          const db = getOrInitDatabase(
             workspace.contentRootPath,
             workspace.defaultYear,
             paths.plannerFile,
             workspace
           );
+          const existingItem = db.items[scannedItem.id];
+          db.items[scannedItem.id] = {
+            id: scannedItem.id,
+            folderCode: scannedItem.folderCode,
+            monthFolder: scannedItem.monthFolder,
+            relativeFolderPath: scannedItem.relativeFolderPath,
+            absolutePath: scannedItem.absolutePath,
+            schedule: scannedItem.schedule,
+            autoMetadata: scannedItem.autoMetadata,
+            userProperties: mergeUserProperties(
+              scannedItem,
+              existingItem?.userProperties
+            ),
+          };
+          const updatedDb = saveDatabaseToFile(db, paths.plannerFile, wsId);
           onPlannerUpdated?.(
             `motionprovit-imported:${created.itemId}`,
             updatedDb,

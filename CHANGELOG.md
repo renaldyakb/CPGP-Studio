@@ -4,6 +4,39 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.12.0] - 2026-11-27 (Full-Stack Performance, Stability, Multi-Workspace Isolation & Anti-Bot Hardening)
+
+### Performa & Stabilitas Kritis (Fixed / Improved)
+- **Menghentikan Badai SSE ~130 req/detik & Socket Exhaustion Chrome (`src/components/autopost/useAutoPostData.ts`, `src/components/autopost/AutoPostLayout.tsx`, `src/hooks/usePlannerItems.ts`, `src/lib/managedEventSource.ts`, `server/api.ts`)**:
+  - Memindahkan callback `onToast` & `onPlannerSync` ke `useRef` agar `EventSource('/api/autopost/events')` hanya dibuka 1x per sesi (turun dari ~874 request/8 detik menjadi 1 request).
+  - Menghapus duplikat `EventSource('/api/events')` di `AutoPostLayout`, menormalkan format SSE menjadi 1 frame `data:` per event, serta menambahkan `openManagedEventSource()` untuk menutup koneksi `EventSource` secara deterministik saat `pagehide`/`beforeunload` agar pool 6 koneksi HTTP/1.1 Chrome tidak pernah hang saat navigasi berulang.
+  - Memperbaiki deadlock graceful shutdown (`Ctrl+C` / `SIGINT` / `SIGTERM`) di `server/index.ts` & `server/api.ts` dengan memutus stream SSE di awal `shutdownApiRouter()` (waktu berhenti ~19ms).
+- **Cache RAM `mtime`-Aware, Penulisan Atomik & Scanner Aman (`server/storage.ts`, `server/workspaces/registry.ts`, `server/watermark/presets.ts`, `server/watermark/fonts.ts`, `server/autopost/config.ts`, `server/scanner.ts`)**:
+  - Menambahkan cache in-memory berbasis `mtimeMs` + `size` pada database planner, registry workspace, preset/font watermark, konfigurasi/kapabilitas Auto-Post, dan pengecekan versi GitHub, serta eviksi penuh saat workspace dihapus (`DELETE /api/workspaces/:id`).
+  - Membatasi kedalaman & jumlah direktori `findContentFolderPaths()` (`maxDepth = 3`, `maxDirsVisited = 200` pada validasi path) agar mengetik path root seperti `D:\` selesai <60ms tanpa freeze.
+  - Mengabaikan seluruh dotfile & berkas sementara `.wm_tmp_*.tmp.mp4` / `.wm_staging_*.tmp` di `scanner.ts`, serta membatasi pengecualian nama direktori `isIgnoredWatchPath()` hanya pada segmen relatif di dalam `contentRootPath` (sehingga folder induk bernama `Data` tetap mendukung live-sync).
+- **FFmpeg Render Tanpa Freeze, `/media/*` ETag/304 & Cross-Platform (`server/watermark/renderer.ts`, `server/api.ts`, `server/index.ts`, `bin/cpgp-studio.mjs`)**:
+  - Memindahkan file output sementara FFmpeg ke direktori tujuan agar rename bersifat O(1) tanpa copy lintas drive, lengkap dengan retry backoff `EBUSY`/`EPERM`/`EACCES` untuk mode `overwrite_source` di Windows.
+  - Menambahkan `ETag` + `304 Not Modified`, clamping `Range` `206`, `res.on('close', () => stream.destroy())`, dan guard traversal `path.relative()` pada `/media/*` serta cache-bust `?v=<mtimeMs>`.
+  - Menambahkan fallback port otomatis `EADDRINUSE` (`PORT + 1..5`) di `server/index.ts` yang otomatis terdeteksi oleh `bin/cpgp-studio.mjs`, header `Cache-Control` produksi (`immutable` untuk `assets/*`, `no-cache` untuk `index.html`), dukungan font/browser/explorer lintas OS (Windows, macOS, Linux), dan pengikatan aman ke `127.0.0.1` + validasi CORS lokal (termasuk IPv6 `[::1]`) + validasi domain SSRF `motion.clipprovit.com`.
+
+### Anti-Bot Auto-Post & Meta Graph API (`server/autopost/*`, `src/components/autopost/pages/StudioPage.tsx`)
+- **Hardening Anti-Bot Mode Browser**:
+  - Menghapus 100% mutasi atribut DOM (`data-cpgp-*`) dan klik sintetik `el.click()`; mengganti dengan `humanClick()` berbasis gerakan pointer bertahap (`isTrusted: true`) lengkap dengan cek visibilitas, viewport, dan `elementFromPoint`.
+  - Memperbaiki klasifikasi input jadwal 2 baris Facebook + Instagram serta pemilihan target channel di Meta Business Suite, menambahkan jeda cooldown acak 45-75 detik antar upload browser, pemanasan navigasi natural, shortcut `Meta+A` di macOS, dan penutupan tab otomatis setelah publish selesai/dibatalkan.
+  - Menambahkan opsi **Sambung Chrome Harian (CDP URL)** (`chromium.connectOverCDP`) di halaman Studio agar pengguna dapat memakai profil Chrome sehari-hari tanpa checkpoint bot.
+- **Meta Graph API Reels**:
+  - Menggunakan streaming upload (`Readable.toWeb`) tanpa duplikasi buffer RAM, memperbaiki parameter penjadwalan Facebook Reels (`video_state=SCHEDULED` + batas 29 hari tanpa `published=false`), mengisolasi cache page token per workspace, dan memblokir penjadwalan palsu pada Instagram Graph API.
+
+### UI, Isolasi Multi-Workspace & Code-Splitting (`src/*`, `vite.config.ts`, `index.html`)
+- **Isolasi State Multi-Workspace & Deep-Link**:
+  - Memperbaiki reset state lintas workspace pada `WatermarkPage` (dengan tetap menjaga deep-link `/watermark?item=`), `MotionProvitPage`, `StudioPage`, `MetaApiPage`, `YouTubeApiPage`, `useAutoPostData`, dan `App.tsx` (rollback per-item).
+  - Menambahkan guard pra-onboarding zero-flash di `/auto-post`, dukungan deep-link `/auto-post?item=...&platform=...` dengan bar **Fokus platform**, persistensi cookie `sidebar_state`, pencegahan reset form modal saat SSE masuk, dan favicon inline SVG CPGP (0 error 404).
+- **Code-Splitting & Pembersihan Paket**:
+  - Memecah 13 rute halaman dengan `React.lazy` + `Suspense` dan `manualChunks` bebas circular dependency, serta menghapus 3 berkas mati dan 4 dependensi tidak terpakai (`recharts`, `react-resizable-panels`, `@radix-ui/react-dropdown-menu`, `@radix-ui/react-popover`).
+
+---
+
 ## [v2.11.2] - 2026-11-27 (Fix Infinite `/api/workspaces` + `/api/planner` SSE Fetch Loop in Release Bundle)
 
 ### Perbaikan (Fixed — Direproduksi & Diverifikasi Langsung pada Rilis GitHub)

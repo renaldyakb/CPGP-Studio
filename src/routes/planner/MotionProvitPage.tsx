@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   CheckCircle2,
@@ -113,49 +113,109 @@ export function MotionProvitPage() {
   const [startSlotCode, setStartSlotCode] = useState<string>('01');
 
   const workspaceYear = activeWorkspace?.defaultYear || new Date().getFullYear();
+  const activeWorkspaceIdRef = useRef<string | undefined>(activeWorkspace?.id);
+  activeWorkspaceIdRef.current = activeWorkspace?.id;
 
-  const loadStatus = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const res = await motionprovitApi.getStatus();
-      setConfig(res.config);
-      setJobs(res.jobs);
-      setNextSlot(res.nextSlot);
-      if (res.cacheStats) setCacheStats(res.cacheStats);
-      setImportProgress(res.importProgress);
-      setEmail((prev) => prev || res.config.email || '');
-      if (!res.config.connected) {
-        setShowAuthForm(true);
+  const loadStatus = useCallback(
+    async (options?: { resetWorkspaceFields?: boolean; isCancelled?: () => boolean }) => {
+      const resetFields = Boolean(options?.resetWorkspaceFields);
+      const isCancelled = options?.isCancelled;
+      const capturedWorkspaceId = activeWorkspaceIdRef.current;
+      const isStale = () =>
+        Boolean(isCancelled?.()) ||
+        activeWorkspaceIdRef.current !== capturedWorkspaceId;
+
+      setIsLoading(true);
+      try {
+        const res = await motionprovitApi.getStatus();
+        if (isStale()) return;
+        setConfig(res.config);
+        setJobs(res.jobs);
+        setNextSlot(res.nextSlot);
+        setCacheStats(res.cacheStats ?? null);
+        setImportProgress(res.importProgress);
+        setEmail(
+          resetFields
+            ? res.config.email || ''
+            : (prev) => prev || res.config.email || ''
+        );
+        setShowAuthForm(!res.config.connected);
+        if (res.nextSlot) {
+          const nextIso = slotToIsoDate(res.nextSlot, workspaceYear);
+          const nextCode = res.nextSlot.slotCode || '01';
+          if (resetFields) {
+            setStartDateIso(nextIso);
+            setStartSlotCode(nextCode);
+          } else {
+            setStartDateIso((prev) => prev || nextIso);
+            setStartSlotCode((prev) => prev || nextCode);
+          }
+        } else if (resetFields) {
+          setStartDateIso('');
+          setStartSlotCode('01');
+        }
+      } catch (error) {
+        if (isStale()) return;
+        showToast(
+          error instanceof Error
+            ? error.message
+            : 'Gagal memuat Add-on MotionProvit.',
+          'error'
+        );
+      } finally {
+        if (!isStale()) {
+          setIsLoading(false);
+        }
       }
-      if (res.nextSlot) {
-        setStartDateIso((prev) => prev || slotToIsoDate(res.nextSlot, workspaceYear));
-        setStartSlotCode((prev) => prev || res.nextSlot.slotCode || '01');
-      }
-    } catch (error) {
-      showToast(
-        error instanceof Error ? error.message : 'Gagal memuat Add-on MotionProvit.',
-        'error'
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  }, [showToast, workspaceYear]);
+    },
+    [showToast, workspaceYear]
+  );
 
   useEffect(() => {
-    void loadStatus();
+    let cancelled = false;
+    setEmail('');
+    setPassword('');
+    setSelectedIds([]);
+    setSearch('');
+    setStyleFilter('all');
+    setImportFilter('all');
+    setPage(1);
+    setStartDateIso('');
+    setStartSlotCode('01');
+    setShowAuthForm(false);
+    setConfig(null);
+    setJobs([]);
+    setNextSlot(null);
+    setCacheStats(null);
+    setImportProgress(null);
+
+    void loadStatus({
+      resetWorkspaceFields: true,
+      isCancelled: () => cancelled,
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [loadStatus, activeWorkspace?.id]);
 
   // Poll live progress while batch import is running
   useEffect(() => {
     if (!importProgress || importProgress.status !== 'running') return;
+    let cancelled = false;
+    let inFlight = false;
+
     const timer = window.setInterval(async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
       try {
         const res = await motionprovitApi.getImportStatus();
+        if (cancelled) return;
         if (res.importProgress) {
           setImportProgress(res.importProgress);
           if (res.importProgress.status !== 'running') {
             setSelectedIds([]);
-            void loadStatus();
+            void loadStatus({ isCancelled: () => cancelled });
             void rescan();
             showToast(
               res.importProgress.currentStep,
@@ -168,9 +228,14 @@ export function MotionProvitPage() {
         }
       } catch {
         // ignore transient poll errors
+      } finally {
+        inFlight = false;
       }
     }, 1500);
-    return () => window.clearInterval(timer);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [importProgress?.status, loadStatus, rescan, showToast]);
 
   const handleLoginSubmit = async (event: React.FormEvent) => {
@@ -1176,6 +1241,7 @@ export function MotionProvitPage() {
                             width={76}
                             height={135}
                             loading="lazy"
+                            decoding="async"
                             className="h-full w-full object-cover"
                           />
                         ) : (

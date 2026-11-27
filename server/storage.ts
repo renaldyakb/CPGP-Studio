@@ -351,17 +351,130 @@ export function createEmptyDatabase(
   };
 }
 
+interface CachedDatabaseEntry {
+  db: PlannerDatabase;
+  mtimeMs: number;
+  size: number;
+}
+
+const dbMemoryCache = new Map<string, CachedDatabaseEntry>();
+
+function normalizeDbCacheKey(dbFilePath: string): string {
+  const resolved = path.resolve(dbFilePath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+export function evictDatabaseMemoryCache(dbFilePath?: string): void {
+  if (dbFilePath) {
+    dbMemoryCache.delete(normalizeDbCacheKey(dbFilePath));
+    return;
+  }
+  dbMemoryCache.clear();
+}
+
+function getCachedDatabaseIfFresh(dbFilePath: string): PlannerDatabase | null {
+  const cacheKey = normalizeDbCacheKey(dbFilePath);
+  const entry = dbMemoryCache.get(cacheKey);
+  if (!entry) return null;
+  try {
+    const stat = fs.statSync(dbFilePath);
+    if (stat.mtimeMs !== entry.mtimeMs || stat.size !== entry.size) {
+      dbMemoryCache.delete(cacheKey);
+      return null;
+    }
+    return entry.db;
+  } catch {
+    dbMemoryCache.delete(cacheKey);
+    return null;
+  }
+}
+
+const SYNC_RENAME_RETRY_DELAYS_MS = [30, 80, 160];
+
+function sleepSync(ms: number): void {
+  try {
+    const arr = new Int32Array(new SharedArrayBuffer(4));
+    Atomics.wait(arr, 0, 0, ms);
+  } catch {
+    // Ignore if SharedArrayBuffer is unavailable
+  }
+}
+
+function writeFileAtomicallySync(destPath: string, content: string): void {
+  const dir = path.dirname(destPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = path.join(
+    dir,
+    `.${path.basename(destPath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`
+  );
+  try {
+    fs.writeFileSync(tmpPath, content, 'utf-8');
+    let lastRenameErr: unknown = null;
+    let renamed = false;
+    for (
+      let attempt = 0;
+      attempt <= SYNC_RENAME_RETRY_DELAYS_MS.length;
+      attempt += 1
+    ) {
+      try {
+        fs.renameSync(tmpPath, destPath);
+        renamed = true;
+        break;
+      } catch (renameErr) {
+        lastRenameErr = renameErr;
+        const code = (renameErr as NodeJS.ErrnoException)?.code;
+        if (
+          (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') &&
+          attempt < SYNC_RENAME_RETRY_DELAYS_MS.length
+        ) {
+          sleepSync(SYNC_RENAME_RETRY_DELAYS_MS[attempt]);
+          continue;
+        }
+        throw renameErr;
+      }
+    }
+    if (!renamed && lastRenameErr) {
+      throw lastRenameErr;
+    }
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch {
+      // Ignore temp cleanup failure
+    }
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
+      fs.writeFileSync(destPath, content, 'utf-8');
+    } else {
+      throw err;
+    }
+  }
+}
+
 export function loadDatabaseFromFile(
   dbFilePath?: string
 ): PlannerDatabase | null {
   const resolvedDbFile = dbFilePath ?? getWorkspacePaths().plannerFile;
-  if (!fs.existsSync(resolvedDbFile)) return null;
+  if (!fs.existsSync(resolvedDbFile)) {
+    evictDatabaseMemoryCache(resolvedDbFile);
+    return null;
+  }
   try {
+    const stat = fs.statSync(resolvedDbFile);
     const raw = fs.readFileSync(resolvedDbFile, 'utf-8');
     const parsed = JSON.parse(raw) as PlannerDatabase;
     if (!parsed || typeof parsed !== 'object' || !parsed.items) {
       return null;
     }
+    dbMemoryCache.set(normalizeDbCacheKey(resolvedDbFile), {
+      db: parsed,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    });
     return parsed;
   } catch {
     return null;
@@ -378,12 +491,19 @@ export function saveDatabaseToFile(
   const resolvedDbFile = dbFilePath ?? targetPaths.plannerFile;
 
   db.stats = computeWorkspaceStats(db.items);
-  const dir = path.dirname(resolvedDbFile);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
   const serialized = JSON.stringify(db, null, 2) + '\n';
-  fs.writeFileSync(resolvedDbFile, serialized, 'utf-8');
+  try {
+    writeFileAtomicallySync(resolvedDbFile, serialized);
+    const stat = fs.statSync(resolvedDbFile);
+    dbMemoryCache.set(normalizeDbCacheKey(resolvedDbFile), {
+      db,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    });
+  } catch (err) {
+    evictDatabaseMemoryCache(resolvedDbFile);
+    throw err;
+  }
 
   // Keep legacy data/planner-data.json synchronized when saving the default workspace
   if (
@@ -391,7 +511,7 @@ export function saveDatabaseToFile(
     path.resolve(resolvedDbFile) === path.resolve(targetPaths.plannerFile)
   ) {
     try {
-      fs.writeFileSync(LEGACY_PLANNER_FILE, serialized, 'utf-8');
+      writeFileAtomicallySync(LEGACY_PLANNER_FILE, serialized);
     } catch {
       // Ignore legacy sync failure
     }
@@ -492,8 +612,13 @@ export function getOrInitDatabase(
   const resolvedYear = defaultYear ?? targetWs.defaultYear;
   const resolvedDbFile = dbFilePath ?? getWorkspacePaths(targetWs.id).plannerFile;
 
+  const cached = getCachedDatabaseIfFresh(resolvedDbFile);
+  if (cached) {
+    return cached;
+  }
+
   const existing = loadDatabaseFromFile(resolvedDbFile);
-  if (existing && Object.keys(existing.items).length > 0) {
+  if (existing) {
     return existing;
   }
   return syncDatabaseWithDisk(
@@ -559,7 +684,12 @@ export function updateItemUserProperties(
     updatedAt: nowIso,
   };
 
-  saveDatabaseToFile(db, resolvedDbFile);
+  try {
+    saveDatabaseToFile(db, resolvedDbFile);
+  } catch (err) {
+    evictDatabaseMemoryCache(resolvedDbFile);
+    throw err;
+  }
   return { db, item };
 }
 
@@ -626,7 +756,12 @@ export function updateItemPlatformState(
   }
 
   item.userProperties.updatedAt = nowIso;
-  saveDatabaseToFile(db, resolvedDbFile, targetWs.id);
+  try {
+    saveDatabaseToFile(db, resolvedDbFile, targetWs.id);
+  } catch (err) {
+    evictDatabaseMemoryCache(resolvedDbFile);
+    throw err;
+  }
   return { db, item };
 }
 
@@ -676,7 +811,12 @@ export function batchUpdateItemPlatforms(
   }
 
   item.userProperties.updatedAt = nowIso;
-  saveDatabaseToFile(db, resolvedDbFile);
+  try {
+    saveDatabaseToFile(db, resolvedDbFile);
+  } catch (err) {
+    evictDatabaseMemoryCache(resolvedDbFile);
+    throw err;
+  }
   return { db, item };
 }
 
@@ -721,6 +861,11 @@ export function updateItemCaptionOnDisk(
   item.userProperties = mergeUserProperties(rescanned, item.userProperties);
   item.userProperties.updatedAt = new Date().toISOString();
 
-  saveDatabaseToFile(db, resolvedDbFile);
+  try {
+    saveDatabaseToFile(db, resolvedDbFile);
+  } catch (err) {
+    evictDatabaseMemoryCache(resolvedDbFile);
+    throw err;
+  }
   return { db, item };
 }

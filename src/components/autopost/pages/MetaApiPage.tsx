@@ -157,6 +157,15 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
     setShareToFeed(metaApi.shareToFeed);
   }, [metaApi.shareToFeed]);
 
+  // Reset transient drafts and discovered pages when switching workspace
+  useEffect(() => {
+    setPages([]);
+    setSelectedPageId(null);
+    setTestResult(null);
+    setAppSecretDraft('');
+    setTokenDraft('');
+  }, [settings.browser.profileDir]);
+
   useEffect(() => {
     return () => {
       if (pollIntervalRef.current !== null) {

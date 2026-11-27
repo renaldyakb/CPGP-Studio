@@ -43,6 +43,9 @@ interface ParsedScheduleParts {
   displayLabel: string;
 }
 
+const SELECT_ALL_SHORTCUT =
+  process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
+
 const EN_MONTHS_SHORT = [
   'Jan',
   'Feb',
@@ -420,11 +423,99 @@ async function findFirstVisibleLocator(
   return null;
 }
 
+interface HumanClickOptions {
+  timeout?: number;
+  force?: boolean;
+}
+
+function isPageScope(target: LocatorScope): target is Page {
+  return 'mouse' in target && 'keyboard' in target;
+}
+
+async function humanClick(
+  page: Page,
+  locator: Locator,
+  signal: AbortSignal,
+  options: HumanClickOptions = {}
+): Promise<void> {
+  throwIfAborted(signal);
+  const timeout = options.timeout ?? 8000;
+
+  try {
+    await locator.scrollIntoViewIfNeeded({ timeout: Math.min(timeout, 4000) });
+  } catch {
+    await locator.click({ timeout, force: options.force });
+    return;
+  }
+
+  const [visible, enabled] = await Promise.all([
+    locator.isVisible().catch(() => false),
+    locator.isEnabled().catch(() => false),
+  ]);
+  if (!visible || !enabled) {
+    await locator.click({ timeout, force: options.force });
+    return;
+  }
+
+  const box = await locator
+    .boundingBox({ timeout: Math.min(timeout, 3000) })
+    .catch(() => null);
+  const viewport =
+    page.viewportSize() ??
+    (await page
+      .evaluate(() => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      }))
+      .catch(() => null));
+
+  if (box && box.width > 2 && box.height > 2) {
+    const offsetX = box.width * (0.28 + Math.random() * 0.44);
+    const offsetY = box.height * (0.28 + Math.random() * 0.44);
+    const targetX = box.x + offsetX;
+    const targetY = box.y + offsetY;
+
+    const inViewport =
+      viewport !== null &&
+      targetX >= 1 &&
+      targetY >= 1 &&
+      targetX <= viewport.width - 1 &&
+      targetY <= viewport.height - 1;
+
+    if (inViewport) {
+      const hitOk = await locator
+        .evaluate(
+          (el, pt) => {
+            const doc = el.ownerDocument;
+            // For elements inside an iframe, pt is in top-level page coords; check top-level doc only if same window
+            if (doc.defaultView !== window.top) return false;
+            const topEl = doc.elementFromPoint(pt.x, pt.y);
+            if (!topEl) return false;
+            return el === topEl || el.contains(topEl) || topEl.contains(el);
+          },
+          { x: targetX, y: targetY }
+        )
+        .catch(() => false);
+
+      if (hitOk) {
+        const steps = 6 + Math.floor(Math.random() * 7);
+        await page.mouse.move(targetX, targetY, { steps });
+        await humanDelay(80, 160, signal);
+        await page.mouse.click(targetX, targetY);
+        return;
+      }
+    }
+  }
+
+  await locator.click({ timeout, force: options.force });
+}
+
 async function tryClickAny(
   target: LocatorScope,
   selectors: string[],
   timeoutMs = 6000,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  pageOverride?: Page
 ): Promise<boolean> {
   const locator = await findFirstVisibleLocator(
     target,
@@ -434,9 +525,15 @@ async function tryClickAny(
   );
   if (!locator) return false;
 
+  const clickPage = pageOverride ?? (isPageScope(target) ? target : null);
+
   try {
-    await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await locator.click({ timeout: 5000 });
+    if (clickPage && signal) {
+      await humanClick(clickPage, locator, signal, { timeout: 5000 });
+    } else {
+      await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+      await locator.click({ timeout: 5000 });
+    }
     return true;
   } catch {
     try {
@@ -521,15 +618,18 @@ async function fillTextWithInsertFallback(
 ): Promise<boolean> {
   throwIfAborted(signal);
   try {
-    await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await locator.click({ timeout: 6000 });
+    await humanClick(page, locator, signal, { timeout: 6000 });
     await humanDelay(180, 350, signal);
-    await locator.fill(text);
+    await page.keyboard.press(SELECT_ALL_SHORTCUT);
+    await humanDelay(80, 160, signal);
+    await page.keyboard.press('Backspace');
+    await humanDelay(100, 220, signal);
+    await page.keyboard.insertText(text);
     return true;
   } catch {
     try {
       await locator.click({ timeout: 4000 });
-      await page.keyboard.press('Control+A');
+      await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await humanDelay(100, 220, signal);
       await page.keyboard.press('Backspace');
       await humanDelay(100, 220, signal);
@@ -549,14 +649,13 @@ async function fillYouTubeTextbox(
 ): Promise<boolean> {
   throwIfAborted(signal);
   try {
-    await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await locator.click({ timeout: 6000 });
-    await page.keyboard.press('Control+A');
+    await humanClick(page, locator, signal, { timeout: 6000 });
+    await page.keyboard.press(SELECT_ALL_SHORTCUT);
     await page.keyboard.press('Delete');
     await humanDelay(120, 250, signal);
 
     try {
-      await locator.fill(text);
+      await page.keyboard.insertText(text);
     } catch {
       await page.keyboard.type(text);
     }
@@ -661,17 +760,55 @@ async function selectMetaBusinessPostTargets(
 ): Promise<MetaTargetSelectionResult> {
   const targetLabel = formatMetaTargetLabel(targets);
 
-  const cleanupTags = async () => {
-    await page
-      .evaluate(() => {
-        document
-          .querySelectorAll('[data-cpgp-meta-target], [data-cpgp-meta-row]')
-          .forEach((el) => {
-            el.removeAttribute('data-cpgp-meta-target');
-            el.removeAttribute('data-cpgp-meta-row');
-          });
+  const readOptionMetadata = async (
+    optionLocator: Locator
+  ): Promise<{ combinedText: string; checked: boolean }> =>
+    optionLocator
+      .evaluate((el) => {
+        const row =
+          el.closest('[role="option"], label, li') || el.parentElement || el;
+        const parts: string[] = [
+          el.getAttribute('aria-label') ?? '',
+          row.getAttribute('aria-label') ?? '',
+          row.textContent ?? '',
+        ];
+        row.querySelectorAll('img, svg, i, [aria-label], [alt], [title]').forEach(
+          (child) => {
+            parts.push(child.getAttribute('aria-label') ?? '');
+            parts.push(child.getAttribute('alt') ?? '');
+            parts.push(child.getAttribute('title') ?? '');
+            parts.push(child.getAttribute('src') ?? '');
+          }
+        );
+
+        let checked = false;
+        if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+          checked = el.checked;
+        } else if (el.getAttribute('aria-selected') !== null) {
+          checked = el.getAttribute('aria-selected') === 'true';
+        } else if (el.getAttribute('aria-checked') !== null) {
+          checked = el.getAttribute('aria-checked') === 'true';
+        } else if (row.getAttribute('aria-selected') !== null) {
+          checked = row.getAttribute('aria-selected') === 'true';
+        } else if (row.getAttribute('aria-checked') !== null) {
+          checked = row.getAttribute('aria-checked') === 'true';
+        } else {
+          const nested = row.querySelector<HTMLInputElement>(
+            'input[type="checkbox"]'
+          );
+          checked = nested ? nested.checked : false;
+        }
+
+        return {
+          combinedText: parts.join(' ').toLowerCase(),
+          checked,
+        };
       })
-      .catch(() => {});
+      .catch(() => ({ combinedText: '', checked: false }));
+
+  const readOptionChecked = async (optionLocator: Locator): Promise<boolean> => {
+    const meta = await readOptionMetadata(optionLocator);
+    return meta.checked;
   };
 
   try {
@@ -737,308 +874,189 @@ async function selectMetaBusinessPostTargets(
       };
     }
 
-    await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await trigger.click({ timeout: 8000 });
+    await humanClick(page, trigger, signal, { timeout: 8000 });
     await humanDelay(500, 800, signal);
 
-    // Inspect the opened popover and tag Facebook & Instagram targets.
-    // NOTE: Keep all logic inline (zero inner helper function declarations) so tsx/esbuild
-    // keepNames never injects __name() into the serialized browser function!
-    const inspectAndTag = async () =>
-      page.evaluate(() => {
-        document
-          .querySelectorAll('[data-cpgp-meta-target], [data-cpgp-meta-row]')
-          .forEach((el) => {
-            el.removeAttribute('data-cpgp-meta-target');
-            el.removeAttribute('data-cpgp-meta-row');
-          });
+    const headerRegex =
+      /post to facebook and instagram|posting ke facebook dan instagram|post to facebook|posting ke facebook/i;
 
-        const headerRegex =
-          /post to facebook and instagram|posting ke facebook dan instagram|post to facebook|posting ke facebook/i;
+    // Locate the opened multiselectable listbox popover purely via Playwright Locators
+    let activeListbox: Locator | null = null;
+    const allListboxes = page.locator(
+      '[role="listbox"][aria-multiselectable="true"], [role="listbox"]'
+    );
+    const listboxCount = await allListboxes.count().catch(() => 0);
 
-        // Primary: Meta's multiselectable listbox popover
-        let scope: Element | null = null;
-        const listboxes = Array.from(
-          document.querySelectorAll(
-            '[role="listbox"][aria-multiselectable="true"], [role="listbox"]'
+    for (let i = 0; i < listboxCount; i += 1) {
+      const lb = allListboxes.nth(i);
+      if (!(await lb.isVisible({ timeout: 250 }).catch(() => false))) {
+        continue;
+      }
+      const controlCount = await lb
+        .locator('[role="option"], input[type="checkbox"]')
+        .count()
+        .catch(() => 0);
+      if (controlCount < 1) continue;
+      const containerText = (
+        await lb
+          .evaluate(
+            (el) =>
+              el.closest('[role="dialog"], [role="menu"], [data-visualcompletion]')
+                ?.textContent ||
+              el.parentElement?.parentElement?.textContent ||
+              el.textContent ||
+              ''
           )
+          .catch(() => '')
+      ).trim();
+      if (headerRegex.test(containerText)) {
+        activeListbox = lb;
+        break;
+      }
+      if (!activeListbox) {
+        activeListbox = lb;
+      }
+    }
+
+    const collectVisibleBySelector = async (
+      container: Locator,
+      selector: string
+    ): Promise<Locator[]> => {
+      const found: Locator[] = [];
+      const items = container.locator(selector);
+      const count = await items.count().catch(() => 0);
+      for (let idx = 0; idx < count; idx += 1) {
+        const item = items.nth(idx);
+        if (await item.isVisible({ timeout: 250 }).catch(() => false)) {
+          found.push(item);
+        }
+      }
+      return found;
+    };
+
+    const optionLocators: Locator[] = [];
+    if (activeListbox) {
+      const visibleOptions = await collectVisibleBySelector(
+        activeListbox,
+        '[role="option"]'
+      );
+      if (visibleOptions.length > 0) {
+        optionLocators.push(...visibleOptions);
+      } else {
+        const visibleCheckboxes = await collectVisibleBySelector(
+          activeListbox,
+          'input[type="checkbox"]'
         );
-        for (const lb of listboxes) {
-          const rect = lb.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) continue;
-          const style = window.getComputedStyle(lb);
-          if (style.visibility === 'hidden' || style.display === 'none') continue;
-          const opts = lb.querySelectorAll('[role="option"]');
-          if (opts.length >= 1) {
-            const text = (lb.textContent ?? '').trim();
-            if (headerRegex.test(text) || !scope) {
-              scope = lb;
-              if (headerRegex.test(text)) break;
-            }
+        optionLocators.push(...visibleCheckboxes);
+      }
+    }
+
+    // Secondary fallback: visible dialog/menu popover containing option or checkbox controls
+    if (optionLocators.length === 0) {
+      const fallbackPopovers = page.locator(
+        '[role="dialog"]:visible, [role="menu"]:visible'
+      );
+      const popCount = await fallbackPopovers.count().catch(() => 0);
+      for (let i = 0; i < popCount; i += 1) {
+        const pop = fallbackPopovers.nth(i);
+        const popText = (await pop.innerText().catch(() => '')).trim();
+        if (!headerRegex.test(popText)) continue;
+        for (const fallbackSelector of [
+          '[role="option"]',
+          '[role="menuitemcheckbox"]',
+          '[role="checkbox"]',
+          'input[type="checkbox"]',
+        ]) {
+          const matched = await collectVisibleBySelector(pop, fallbackSelector);
+          if (matched.length > 0) {
+            optionLocators.push(...matched);
+            break;
           }
         }
+        if (optionLocators.length > 0) break;
+      }
+    }
 
-        // Secondary fallback: floating container with heading + options/checkboxes
-        if (!scope) {
-          const allNodes = Array.from(document.querySelectorAll('div, section, ul'));
-          let bestPopover: Element | null = null;
-          let bestArea = Number.POSITIVE_INFINITY;
+    let fbLocator: Locator | null = null;
+    let igLocator: Locator | null = null;
+    const unassigned: Locator[] = [];
 
-          for (const node of allNodes) {
-            const rect = node.getBoundingClientRect();
-            if (rect.width < 180 || rect.height < 60 || rect.width > 760) continue;
-            const style = window.getComputedStyle(node);
-            if (style.visibility === 'hidden' || style.display === 'none') continue;
-            const text = (node.textContent ?? '').trim();
-            if (!headerRegex.test(text)) continue;
+    for (const optionLoc of optionLocators) {
+      const meta = await readOptionMetadata(optionLoc);
+      if (meta.combinedText.includes('instagram') && !igLocator) {
+        igLocator = optionLoc;
+      } else if (meta.combinedText.includes('facebook') && !fbLocator) {
+        fbLocator = optionLoc;
+      } else {
+        unassigned.push(optionLoc);
+      }
+    }
 
-            const items = node.querySelectorAll(
-              '[role="option"], input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
-            );
-            if (items.length >= 1 && items.length <= 8) {
-              const area = rect.width * rect.height;
-              if (area < bestArea) {
-                bestArea = area;
-                bestPopover = node;
-              }
-            }
-          }
-          scope = bestPopover;
-        }
+    // Meta Business Suite lists Facebook Page first (index 0) and Instagram account second (index 1)
+    if (!fbLocator && unassigned.length > 0) {
+      fbLocator = unassigned.shift() ?? null;
+    }
+    if (!igLocator && unassigned.length > 0) {
+      igLocator = unassigned.shift() ?? null;
+    }
 
-        if (!scope) {
-          return {
-            foundFacebook: false,
-            foundInstagram: false,
-            facebookChecked: false,
-            instagramChecked: false,
-            totalBoxes: 0,
-          };
-        }
-
-        // Prefer [role="option"] inside listbox; fall back to checkbox elements
-        const rawItems: Element[] = [];
-        for (const el of Array.from(scope.querySelectorAll('[role="option"]'))) {
-          const rect = el.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) continue;
-          const style = window.getComputedStyle(el);
-          if (style.visibility === 'hidden' || style.display === 'none') continue;
-          rawItems.push(el);
-        }
-
-        if (rawItems.length === 0) {
-          for (const el of Array.from(
-            scope.querySelectorAll(
-              'input[type="checkbox"], [role="checkbox"], [role="menuitemcheckbox"]'
-            )
-          )) {
-            if (
-              el.tagName !== 'INPUT' &&
-              el.querySelector('input[type="checkbox"]')
-            ) {
-              continue;
-            }
-            const rect = el.getBoundingClientRect();
-            const parentRect = el.parentElement?.getBoundingClientRect();
-            if (
-              (rect.width > 0 && rect.height > 0) ||
-              (parentRect ? parentRect.width > 0 && parentRect.height > 0 : false)
-            ) {
-              rawItems.push(el);
-            }
-          }
-        }
-
-        let fbEl: Element | null = null;
-        let igEl: Element | null = null;
-        const unassigned: Element[] = [];
-
-        for (const item of rawItems) {
-          let row: Element = item;
-          if (item.getAttribute('role') !== 'option') {
-            const explicitRow = item.closest(
-              '[role="option"], [role="menuitemcheckbox"], label, li'
-            );
-            if (explicitRow && scope.contains(explicitRow)) {
-              row = explicitRow;
-            } else {
-              row = item.parentElement ?? item;
-            }
-          }
-
-          const parts: string[] = [
-            row.getAttribute('aria-label') ?? '',
-            row.textContent ?? '',
-          ];
-          row
-            .querySelectorAll('img, svg, i, [aria-label], [alt], [title]')
-            .forEach((child) => {
-              parts.push(child.getAttribute('aria-label') ?? '');
-              parts.push(child.getAttribute('alt') ?? '');
-              parts.push(child.getAttribute('title') ?? '');
-              parts.push(child.getAttribute('src') ?? '');
-            });
-          const combined = parts.join(' ').toLowerCase();
-          if (combined.includes('instagram') && !igEl) {
-            igEl = item;
-          } else if (combined.includes('facebook') && !fbEl) {
-            fbEl = item;
-          } else {
-            unassigned.push(item);
-          }
-        }
-
-        // Meta Business Suite lists Facebook Page first (index 0) and Instagram account second (index 1)
-        if (!fbEl && unassigned.length > 0) {
-          fbEl = unassigned.shift() ?? null;
-        }
-        if (!igEl && unassigned.length > 0) {
-          igEl = unassigned.shift() ?? null;
-        }
-
-        let facebookChecked = false;
-        let instagramChecked = false;
-
-        if (fbEl) {
-          fbEl.setAttribute('data-cpgp-meta-target', 'facebook');
-          const fbRow =
-            fbEl.getAttribute('role') === 'option'
-              ? fbEl
-              : (fbEl.closest('[role="option"], [role="menuitemcheckbox"], label, li') ??
-                fbEl.parentElement ??
-                fbEl);
-          fbRow.setAttribute('data-cpgp-meta-row', 'facebook');
-          if (fbEl instanceof HTMLInputElement && fbEl.type === 'checkbox') {
-            facebookChecked = fbEl.checked;
-          } else if (fbEl.getAttribute('aria-selected') !== null) {
-            facebookChecked = fbEl.getAttribute('aria-selected') === 'true';
-          } else if (fbEl.getAttribute('aria-checked') !== null) {
-            facebookChecked = fbEl.getAttribute('aria-checked') === 'true';
-          }
-        }
-
-        if (igEl) {
-          igEl.setAttribute('data-cpgp-meta-target', 'instagram');
-          const igRow =
-            igEl.getAttribute('role') === 'option'
-              ? igEl
-              : (igEl.closest('[role="option"], [role="menuitemcheckbox"], label, li') ??
-                igEl.parentElement ??
-                igEl);
-          igRow.setAttribute('data-cpgp-meta-row', 'instagram');
-          if (igEl instanceof HTMLInputElement && igEl.type === 'checkbox') {
-            instagramChecked = igEl.checked;
-          } else if (igEl.getAttribute('aria-selected') !== null) {
-            instagramChecked = igEl.getAttribute('aria-selected') === 'true';
-          } else if (igEl.getAttribute('aria-checked') !== null) {
-            instagramChecked = igEl.getAttribute('aria-checked') === 'true';
-          }
-        }
-
-        return {
-          foundFacebook: Boolean(fbEl),
-          foundInstagram: Boolean(igEl),
-          facebookChecked,
-          instagramChecked,
-          totalBoxes: rawItems.length,
-        };
-      });
-
-    let state = await inspectAndTag();
-
-    const readTargetChecked = async (
-      channel: 'facebook' | 'instagram'
-    ): Promise<boolean> =>
-      page
-        .evaluate((ch) => {
-          const el = document.querySelector(`[data-cpgp-meta-target="${ch}"]`);
-          if (!el) return false;
-          if (el instanceof HTMLInputElement && el.type === 'checkbox') {
-            return el.checked;
-          }
-          const ariaSelected = el.getAttribute('aria-selected');
-          if (ariaSelected === 'true') return true;
-          if (ariaSelected === 'false') return false;
-          const ariaChecked = el.getAttribute('aria-checked');
-          if (ariaChecked === 'true') return true;
-          if (ariaChecked === 'false') return false;
-          const nested = el.querySelector<HTMLInputElement>(
-            'input[type="checkbox"]'
-          );
-          return nested ? nested.checked : false;
-        }, channel)
-        .catch(() => false);
+    const foundFacebook = Boolean(fbLocator);
+    const foundInstagram = Boolean(igLocator);
 
     const setChannelState = async (
-      channel: 'facebook' | 'instagram',
+      targetLoc: Locator,
       desired: boolean
     ): Promise<boolean> => {
-      const current = await readTargetChecked(channel);
+      const current = await readOptionChecked(targetLoc);
       if (current === desired) {
         return current;
       }
 
-      const targetLoc = page
-        .locator(`[data-cpgp-meta-target="${channel}"]`)
-        .first();
-      if ((await targetLoc.count().catch(() => 0)) > 0) {
-        await targetLoc
-          .click({ timeout: 5000, force: true })
-          .catch(() => {});
-        await abortableWait(350, signal);
-      }
+      await humanClick(page, targetLoc, signal, { timeout: 5000 }).catch(
+        () => {}
+      );
+      await abortableWait(350, signal);
 
-      let after = await readTargetChecked(channel);
+      let after = await readOptionChecked(targetLoc);
       if (after === desired) {
         return after;
       }
 
-      // Fallback: click the row wrapper if the raw input is visually obscured
-      const rowLoc = page
-        .locator(`[data-cpgp-meta-row="${channel}"]`)
-        .first();
-      if ((await rowLoc.count().catch(() => 0)) > 0) {
-        await rowLoc.click({ timeout: 5000 }).catch(() => {});
-        await abortableWait(350, signal);
-        after = await readTargetChecked(channel);
-      }
+      // Fallback: standard Playwright locator click if pointer offset missed the hit region
+      await targetLoc.click({ timeout: 5000, force: true }).catch(() => {});
+      await abortableWait(350, signal);
+      after = await readOptionChecked(targetLoc);
       return after;
     };
 
     // CRITICAL: Always enable desired target(s) FIRST before disabling undesired target(s),
     // because Meta Business Suite does not allow unchecking the last active account!
-    const enableFirst: Array<{ channel: 'facebook' | 'instagram'; desired: boolean }> = [];
-    const disableAfter: Array<{ channel: 'facebook' | 'instagram'; desired: boolean }> = [];
+    const enableFirst: Array<{ locator: Locator; desired: boolean }> = [];
+    const disableAfter: Array<{ locator: Locator; desired: boolean }> = [];
 
-    if (state.foundFacebook) {
+    if (fbLocator) {
       if (targets.facebook) {
-        enableFirst.push({ channel: 'facebook', desired: true });
+        enableFirst.push({ locator: fbLocator, desired: true });
       } else {
-        disableAfter.push({ channel: 'facebook', desired: false });
+        disableAfter.push({ locator: fbLocator, desired: false });
       }
     }
-    if (state.foundInstagram) {
+    if (igLocator) {
       if (targets.instagram) {
-        enableFirst.push({ channel: 'instagram', desired: true });
+        enableFirst.push({ locator: igLocator, desired: true });
       } else {
-        disableAfter.push({ channel: 'instagram', desired: false });
+        disableAfter.push({ locator: igLocator, desired: false });
       }
     }
 
     for (const op of [...enableFirst, ...disableAfter]) {
       throwIfAborted(signal);
-      await setChannelState(op.channel, op.desired);
+      await setChannelState(op.locator, op.desired);
       await humanDelay(250, 450, signal);
     }
 
-    const finalFb = state.foundFacebook
-      ? await readTargetChecked('facebook')
-      : false;
-    const finalIg = state.foundInstagram
-      ? await readTargetChecked('instagram')
-      : false;
-
-    await cleanupTags();
+    const finalFb = fbLocator ? await readOptionChecked(fbLocator) : false;
+    const finalIg = igLocator ? await readOptionChecked(igLocator) : false;
 
     // Close the "Post to" dropdown cleanly so it doesn't obstruct Description/Cover
     await page.keyboard.press('Escape').catch(() => {});
@@ -1047,7 +1065,9 @@ async function selectMetaBusinessPostTargets(
       .getAttribute('aria-expanded')
       .catch(() => null);
     if (expanded === 'true') {
-      await trigger.click({ timeout: 3000 }).catch(() => {});
+      await humanClick(page, trigger, signal, { timeout: 3000 }).catch(
+        () => {}
+      );
       await abortableWait(250, signal);
     }
 
@@ -1070,13 +1090,12 @@ async function selectMetaBusinessPostTargets(
 
     return {
       applied,
-      foundFacebook: state.foundFacebook,
-      foundInstagram: state.foundInstagram,
+      foundFacebook,
+      foundInstagram,
       facebookChecked: finalFb,
       instagramChecked: finalIg,
     };
   } catch (err) {
-    await cleanupTags();
     if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
       throw createAbortError();
     }
@@ -1200,7 +1219,7 @@ async function uploadFacebookReelCover(
       .waitForEvent('filechooser', { timeout: 3500 })
       .catch(() => null);
 
-    await trigger.click({ timeout: 8000 });
+    await humanClick(page, trigger, signal, { timeout: 8000 });
     const immediateChooser = await raceWithAbort(immediateChooserPromise, signal);
 
     if (immediateChooser) {
@@ -1249,11 +1268,10 @@ async function uploadFacebookReelCover(
       if (!visible) continue;
 
       try {
-        await secondBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
         const secondChooserPromise = page
           .waitForEvent('filechooser', { timeout: 5500 })
           .catch(() => null);
-        await secondBtn.click({ timeout: 6000 });
+        await humanClick(page, secondBtn, signal, { timeout: 6000 });
         const secondChooser = await raceWithAbort(secondChooserPromise, signal);
 
         if (secondChooser) {
@@ -1321,24 +1339,6 @@ async function configureMetaBusinessSchedule(
   signal: AbortSignal,
   onProgress: (update: BrowserPublishProgressUpdate) => void
 ): Promise<boolean> {
-  const cleanupTags = async () => {
-    await page
-      .evaluate(() => {
-        document
-          .querySelectorAll(
-            '[data-cpgp-sched-date], [data-cpgp-sched-hour], [data-cpgp-sched-min], [data-cpgp-sched-ampm], [data-cpgp-sched-time]'
-          )
-          .forEach((el) => {
-            el.removeAttribute('data-cpgp-sched-date');
-            el.removeAttribute('data-cpgp-sched-hour');
-            el.removeAttribute('data-cpgp-sched-min');
-            el.removeAttribute('data-cpgp-sched-ampm');
-            el.removeAttribute('data-cpgp-sched-time');
-          });
-      })
-      .catch(() => {});
-  };
-
   try {
     onProgress({
       step: `Mengatur jadwal ${targetLabel} (${schedule.displayLabel})`,
@@ -1399,164 +1399,119 @@ async function configureMetaBusinessSchedule(
     await sweepGeoGuidanceCards(page);
     await abortableWait(300, signal);
 
-    await scheduleTab.click({ force: true, timeout: 8000 }).catch(() => {});
+    await humanClick(page, scheduleTab, signal, { timeout: 8000 }).catch(
+      () => {}
+    );
     await abortableWait(350, signal);
     const pressedAfterClick = await scheduleTab
       .getAttribute('aria-pressed')
       .catch(() => null);
     if (pressedAfterClick !== 'true') {
-      await scheduleTab
-        .evaluate((el) => {
-          (el as HTMLElement).click();
-        })
-        .catch(() => {});
+      await scheduleTab.click({ timeout: 5000 }).catch(() => {});
     }
     await humanDelay(650, 950, signal);
 
-    // Inspect and tag all visible date, hour, minute, meridiem, or combined time inputs
-    // inside the Scheduling options card (1 row for single-channel, 2 rows for FB + IG!).
-    // NOTE: Keep all logic inline (zero inner helper functions) so tsx/esbuild keepNames
-    // never injects __name() into the serialized browser callback!
-    const tagged = await page.evaluate(() => {
-      document
-        .querySelectorAll(
-          '[data-cpgp-sched-date], [data-cpgp-sched-hour], [data-cpgp-sched-min], [data-cpgp-sched-ampm], [data-cpgp-sched-time]'
-        )
-        .forEach((el) => {
-          el.removeAttribute('data-cpgp-sched-date');
-          el.removeAttribute('data-cpgp-sched-hour');
-          el.removeAttribute('data-cpgp-sched-min');
-          el.removeAttribute('data-cpgp-sched-ampm');
-          el.removeAttribute('data-cpgp-sched-time');
-        });
+    // Single read-only classification pass over all visible schedule inputs in exact DOM order.
+    // Guarantees mutual exclusion across buckets and captures both Row 1 (Facebook) and Row 2 (Instagram).
+    const dateRegex =
+      /^\d{1,2}\s+[A-Za-z]+\.?\s+\d{4}$|^[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}$|^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}$|^\d{4}-\d{2}-\d{2}$/;
+    const datePlaceholderRegex = /\bdd\b|dd[/.-]mm|mm[/.-]dd|yyyy/i;
+    const dateAriaRegex = /\b(?:date|tanggal)\b/i;
+    const ampmAriaRegex = /\b(?:meridiem|period)\b|am\/pm/i;
+    const hourAriaRegex = /\b(?:hour|hours|jam)\b/i;
+    const minAriaRegex = /\b(?:minute|minutes|menit)\b/i;
 
-      const footer = document.querySelector(
-        '[data-surface$="bizweb_create_reel:footer"]'
-      );
-      const root =
-        document.querySelector('[data-surface$="lib:bizweb_create_reel"]') ??
-        document.body;
+    const dateEntries: Array<{
+      locator: Locator;
+      value: string;
+      placeholder: string;
+    }> = [];
+    const hourInputs: Locator[] = [];
+    const minInputs: Locator[] = [];
+    const ampmInputs: Locator[] = [];
+    const timeEntries: Array<{ locator: Locator; sample: string }> = [];
+    const unlabeledSpinButtons: Locator[] = [];
 
-      const allInputs: HTMLInputElement[] = [];
-      for (const el of Array.from(
-        root.querySelectorAll<HTMLInputElement>(
-          'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])'
-        )
-      )) {
-        if (footer && footer.contains(el)) continue;
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) continue;
-        const st = window.getComputedStyle(el);
-        if (st.visibility === 'hidden' || st.display === 'none') continue;
-        allInputs.push(el);
+    const allSurfaceInputs = reelSurface.locator(
+      'input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]):not([type="radio"])'
+    );
+    const totalInputs = await allSurfaceInputs.count().catch(() => 0);
+
+    for (let i = 0; i < totalInputs; i += 1) {
+      throwIfAborted(signal);
+      const loc = allSurfaceInputs.nth(i);
+      if (!(await loc.isVisible({ timeout: 200 }).catch(() => false))) {
+        continue;
       }
 
-      const dateRegex =
-        /^\d{1,2}\s+[A-Za-z]+\.?\s+\d{4}$|^[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}$|^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}$|^\d{4}-\d{2}-\d{2}$/;
+      const meta = await loc
+        .evaluate((el) => {
+          const input = el as HTMLInputElement;
+          return {
+            inFooter: Boolean(
+              el.closest('[data-surface$="bizweb_create_reel:footer"]')
+            ),
+            aria: (el.getAttribute('aria-label') ?? '').trim().toLowerCase(),
+            placeholder: (el.getAttribute('placeholder') ?? '')
+              .trim()
+              .toLowerCase(),
+            value: (input.value ?? '').trim(),
+            role: (el.getAttribute('role') ?? '').trim().toLowerCase(),
+            type: (input.type ?? '').trim().toLowerCase(),
+          };
+        })
+        .catch(() => null);
 
-      const dateMeta: Array<{ value: string; placeholder: string }> = [];
-      const hourSamples: string[] = [];
-      const minSamples: string[] = [];
-      const ampmSamples: string[] = [];
-      const timeSamples: string[] = [];
-
-      const spinInputs: HTMLInputElement[] = [];
-
-      for (const input of allInputs) {
-        const val = (input.value ?? '').trim();
-        const aria = (input.getAttribute('aria-label') ?? '').toLowerCase();
-        const placeholder = (input.placeholder ?? '').toLowerCase();
-        const role = (input.getAttribute('role') ?? '').toLowerCase();
-
-        // Date input
-        if (
-          dateRegex.test(val) ||
-          aria.includes('date') ||
-          aria.includes('tanggal') ||
-          placeholder.includes('dd') ||
-          placeholder.includes('yyyy')
-        ) {
-          input.setAttribute('data-cpgp-sched-date', String(dateMeta.length));
-          dateMeta.push({ value: val, placeholder });
-          continue;
-        }
-
-        // Explicit hour / minute / meridiem spinbuttons
-        if (aria.includes('hour') || aria.includes('jam')) {
-          input.setAttribute('data-cpgp-sched-hour', String(hourSamples.length));
-          hourSamples.push(val || input.getAttribute('aria-valuenow') || '');
-          continue;
-        }
-        if (aria.includes('minute') || aria.includes('menit')) {
-          input.setAttribute('data-cpgp-sched-min', String(minSamples.length));
-          minSamples.push(val || input.getAttribute('aria-valuenow') || '');
-          continue;
-        }
-        if (
-          aria.includes('meridiem') ||
-          aria.includes('am/pm') ||
-          /^(am|pm)$/i.test(val)
-        ) {
-          input.setAttribute('data-cpgp-sched-ampm', String(ampmSamples.length));
-          ampmSamples.push(val);
-          continue;
-        }
-
-        // Combined time input (e.g. "19:12" or "7:12 PM")
-        if (/^\d{1,2}[:.]\d{2}(\s*[ap]m)?$/i.test(val)) {
-          input.setAttribute('data-cpgp-sched-time', String(timeSamples.length));
-          timeSamples.push(val);
-          continue;
-        }
-
-        if (role === 'spinbutton' || /^\d{1,2}$/.test(val)) {
-          spinInputs.push(input);
-        }
+      if (!meta || meta.inFooter) {
+        continue;
       }
 
-      // Positional pairing for unlabeled spinbutton pairs (hour, minute) per row
       if (
-        hourSamples.length === 0 &&
-        minSamples.length === 0 &&
-        spinInputs.length >= 2
+        meta.type === 'date' ||
+        datePlaceholderRegex.test(meta.placeholder) ||
+        dateAriaRegex.test(meta.aria) ||
+        dateRegex.test(meta.value)
       ) {
-        for (let i = 0; i + 1 < spinInputs.length; i += 2) {
-          spinInputs[i].setAttribute(
-            'data-cpgp-sched-hour',
-            String(hourSamples.length)
-          );
-          hourSamples.push(
-            (spinInputs[i].value ?? '').trim() ||
-              spinInputs[i].getAttribute('aria-valuenow') ||
-              ''
-          );
-          spinInputs[i + 1].setAttribute(
-            'data-cpgp-sched-min',
-            String(minSamples.length)
-          );
-          minSamples.push(
-            (spinInputs[i + 1].value ?? '').trim() ||
-              spinInputs[i + 1].getAttribute('aria-valuenow') ||
-              ''
-          );
-        }
+        dateEntries.push({
+          locator: loc,
+          value: meta.value,
+          placeholder: meta.placeholder,
+        });
+      } else if (
+        ampmAriaRegex.test(meta.aria) ||
+        /^(am|pm)$/i.test(meta.value)
+      ) {
+        ampmInputs.push(loc);
+      } else if (hourAriaRegex.test(meta.aria)) {
+        hourInputs.push(loc);
+      } else if (minAriaRegex.test(meta.aria)) {
+        minInputs.push(loc);
+      } else if (
+        meta.type === 'time' ||
+        /^\d{1,2}[:.]\d{2}(\s*[ap]m)?$/i.test(meta.value)
+      ) {
+        timeEntries.push({ locator: loc, sample: meta.value });
+      } else if (meta.role === 'spinbutton' || /^\d{1,2}$/.test(meta.value)) {
+        unlabeledSpinButtons.push(loc);
       }
-
-      return {
-        dateMeta,
-        hourSamples,
-        minSamples,
-        ampmSamples,
-        timeSamples,
-      };
-    });
+    }
 
     if (
-      tagged.dateMeta.length === 0 &&
-      tagged.hourSamples.length === 0 &&
-      tagged.timeSamples.length === 0
+      hourInputs.length === 0 &&
+      minInputs.length === 0 &&
+      unlabeledSpinButtons.length >= 2
     ) {
-      await cleanupTags();
+      for (let i = 0; i + 1 < unlabeledSpinButtons.length; i += 2) {
+        hourInputs.push(unlabeledSpinButtons[i]);
+        minInputs.push(unlabeledSpinButtons[i + 1]);
+      }
+    }
+
+    if (
+      dateEntries.length === 0 &&
+      hourInputs.length === 0 &&
+      timeEntries.length === 0
+    ) {
       onProgress({
         step: 'Input tanggal/jam Schedule Meta tidak terdeteksi',
         progressPercent: 84,
@@ -1578,12 +1533,9 @@ async function configureMetaBusinessSchedule(
       'i'
     );
 
-    for (let i = 0; i < tagged.dateMeta.length; i += 1) {
+    for (let i = 0; i < dateEntries.length; i += 1) {
       throwIfAborted(signal);
-      const { value: sampleVal, placeholder } = tagged.dateMeta[i];
-      const dateInput = page
-        .locator(`[data-cpgp-sched-date="${i}"]`)
-        .first();
+      const { locator: dateInput, value: sampleVal, placeholder } = dateEntries[i];
 
       await page
         .evaluate(() => {
@@ -1597,7 +1549,7 @@ async function configureMetaBusinessSchedule(
         .catch(() => {});
       await abortableWait(150, signal);
 
-      await dateInput.click({ force: true, timeout: 5000 });
+      await humanClick(page, dateInput, signal, { timeout: 5000, force: true });
       await abortableWait(450, signal);
 
       const calGrid = page.locator('[role="grid"]:visible').last();
@@ -1623,7 +1575,9 @@ async function configureMetaBusinessSchedule(
             )
             .last();
           if (await nextMonthBtn.isVisible({ timeout: 500 }).catch(() => false)) {
-            await nextMonthBtn.click({ timeout: 3000 }).catch(() => {});
+            await humanClick(page, nextMonthBtn, signal, {
+              timeout: 3000,
+            }).catch(() => {});
             await abortableWait(300, signal);
           } else {
             break;
@@ -1641,9 +1595,19 @@ async function configureMetaBusinessSchedule(
           // Days 16..31 of current month appear after previous month's trailing days -> last()
           const targetCell =
             schedule.day <= 15 ? dayCells.first() : dayCells.last();
-          await targetCell.click({ timeout: 4000 }).catch(() => {});
-          await abortableWait(400, signal);
-          dateSetViaCalendar = true;
+          try {
+            await humanClick(page, targetCell, signal, { timeout: 2500 });
+            await abortableWait(400, signal);
+            dateSetViaCalendar = true;
+          } catch (err) {
+            if (
+              signal.aborted ||
+              (err instanceof Error && err.name === 'AbortError')
+            ) {
+              throw createAbortError();
+            }
+            dateSetViaCalendar = false;
+          }
         }
       }
 
@@ -1658,9 +1622,12 @@ async function configureMetaBusinessSchedule(
         } else {
           formattedDate = formatDateMatchingSample(sampleVal, schedule);
         }
-        await dateInput.click({ force: true, timeout: 5000 });
+        await humanClick(page, dateInput, signal, {
+          timeout: 5000,
+          force: true,
+        });
         await abortableWait(200, signal);
-        await page.keyboard.press('Control+A');
+        await page.keyboard.press(SELECT_ALL_SHORTCUT);
         await page.keyboard.press('Backspace');
         await page.keyboard.type(formattedDate, { delay: 30 });
         await abortableWait(200, signal);
@@ -1669,62 +1636,50 @@ async function configureMetaBusinessSchedule(
       }
     }
 
-    const use12Hour = tagged.ampmSamples.length > 0;
+    const use12Hour = ampmInputs.length > 0;
     const hourValue = use12Hour
       ? String(schedule.hour % 12 === 0 ? 12 : schedule.hour % 12).padStart(2, '0')
       : String(schedule.hour).padStart(2, '0');
     const minValue = String(schedule.minute).padStart(2, '0');
     const meridiemValue = schedule.hour >= 12 ? 'PM' : 'AM';
 
-    for (let i = 0; i < tagged.hourSamples.length; i += 1) {
+    for (const hourInput of hourInputs) {
       throwIfAborted(signal);
-      const hourInput = page
-        .locator(`[data-cpgp-sched-hour="${i}"]`)
-        .first();
-      await hourInput.click({ force: true, timeout: 5000 });
+      await humanClick(page, hourInput, signal, { timeout: 5000, force: true });
       await abortableWait(150, signal);
-      await page.keyboard.press('Control+A');
+      await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await page.keyboard.type(hourValue, { delay: 35 });
       await abortableWait(200, signal);
     }
 
-    for (let i = 0; i < tagged.minSamples.length; i += 1) {
+    for (const minInput of minInputs) {
       throwIfAborted(signal);
-      const minInput = page
-        .locator(`[data-cpgp-sched-min="${i}"]`)
-        .first();
-      await minInput.click({ force: true, timeout: 5000 });
+      await humanClick(page, minInput, signal, { timeout: 5000, force: true });
       await abortableWait(150, signal);
-      await page.keyboard.press('Control+A');
+      await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await page.keyboard.type(minValue, { delay: 35 });
       await abortableWait(200, signal);
     }
 
-    for (let i = 0; i < tagged.ampmSamples.length; i += 1) {
+    for (const ampmInput of ampmInputs) {
       throwIfAborted(signal);
-      const ampmInput = page
-        .locator(`[data-cpgp-sched-ampm="${i}"]`)
-        .first();
-      await ampmInput.click({ force: true, timeout: 5000 });
+      await humanClick(page, ampmInput, signal, { timeout: 5000, force: true });
       await abortableWait(150, signal);
-      await page.keyboard.press('Control+A');
+      await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await page.keyboard.type(meridiemValue, { delay: 35 });
       await abortableWait(200, signal);
     }
 
-    for (let i = 0; i < tagged.timeSamples.length; i += 1) {
+    for (const { locator: timeInput, sample } of timeEntries) {
       throwIfAborted(signal);
       const formattedTime = formatTimeMatchingSample(
-        tagged.timeSamples[i],
+        sample,
         schedule.hour,
         schedule.minute
       );
-      const timeInput = page
-        .locator(`[data-cpgp-sched-time="${i}"]`)
-        .first();
-      await timeInput.click({ force: true, timeout: 5000 });
+      await humanClick(page, timeInput, signal, { timeout: 5000, force: true });
       await abortableWait(150, signal);
-      await page.keyboard.press('Control+A');
+      await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await page.keyboard.press('Backspace');
       await page.keyboard.type(formattedTime, { delay: 30 });
       await page.keyboard.press('Tab');
@@ -1732,18 +1687,16 @@ async function configureMetaBusinessSchedule(
     }
 
     await page.keyboard.press('Tab').catch(() => {});
-    await cleanupTags();
     await humanDelay(450, 750, signal);
 
     onProgress({
       step: `Jadwal ${targetLabel} disetel ke ${schedule.displayLabel}`,
       progressPercent: 85,
-      log: `Tanggal & jam jadwal (${schedule.displayLabel}) berhasil diisi di ${Math.max(tagged.dateMeta.length, 1)} baris Meta Business Suite.`,
+      log: `Tanggal & jam jadwal (${schedule.displayLabel}) berhasil diisi di ${Math.max(dateEntries.length, 1)} baris Meta Business Suite.`,
       level: 'success',
     });
     return true;
   } catch (err) {
-    await cleanupTags();
     if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
       throw createAbortError();
     }
@@ -1765,45 +1718,47 @@ async function configureMetaAiLabel(
   onProgress: (update: BrowserPublishProgressUpdate) => void
 ): Promise<boolean> {
   try {
-    const aiSwitch = reelSurface
-      .locator('[role="switch"], input[type="checkbox"]')
-      .filter({
-        has: page.locator('*'),
-      });
-    void aiSwitch;
+    const aiRegex =
+      /\b(?:ai info|ai label|generated with ai|made with ai|ai-generated|info ai|label ai|buatan ai)\b/i;
 
-    // Look for any switch/checkbox with an AI disclosure aria-label on Meta Business Suite
-    const toggled = await page.evaluate(() => {
-      const root =
-        document.querySelector('[data-surface$="lib:bizweb_create_reel"]') ??
-        document.body;
-      const aiRegex =
-        /\b(?:ai info|ai label|generated with ai|made with ai|ai-generated|info ai|label ai|buatan ai)\b/i;
-      const candidates = Array.from(
-        root.querySelectorAll('[role="switch"], input[type="checkbox"]')
-      );
-      for (const el of candidates) {
-        const label = (el.getAttribute('aria-label') ?? '').trim();
-        const nearby = (
-          el.closest('div')?.parentElement?.textContent ?? ''
-        ).trim();
-        if (!aiRegex.test(label) && !aiRegex.test(nearby)) continue;
-        if (el instanceof HTMLInputElement && el.type === 'checkbox') {
-          if (!el.checked) {
-            el.click();
-          }
-          return true;
-        }
-        if (el.getAttribute('aria-checked') !== 'true') {
-          (el as HTMLElement).click();
-        }
-        return true;
+    const candidates = reelSurface.locator(
+      '[role="switch"], input[type="checkbox"]'
+    );
+    const count = await candidates.count().catch(() => 0);
+
+    for (let i = 0; i < count; i += 1) {
+      throwIfAborted(signal);
+      const candidate = candidates.nth(i);
+      if (!(await candidate.isVisible({ timeout: 250 }).catch(() => false))) {
+        continue;
       }
-      return false;
-    });
 
-    if (toggled) {
-      await humanDelay(300, 500, signal);
+      const info = await candidate
+        .evaluate((el) => {
+          const label = (el.getAttribute('aria-label') ?? '').trim();
+          const nearby = (
+            el.closest('div')?.parentElement?.textContent ?? ''
+          ).trim();
+          let isChecked = false;
+          if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+            isChecked = el.checked;
+          } else {
+            isChecked = el.getAttribute('aria-checked') === 'true';
+          }
+          return { label, nearby, isChecked };
+        })
+        .catch(() => null);
+
+      if (!info) continue;
+      if (!aiRegex.test(info.label) && !aiRegex.test(info.nearby)) {
+        continue;
+      }
+
+      if (!info.isChecked) {
+        await humanClick(page, candidate, signal, { timeout: 5000 });
+        await humanDelay(300, 500, signal);
+      }
+
       onProgress({
         step: 'Label AI-Generated diaktifkan di Meta Business Suite',
         progressPercent: 84,
@@ -1875,14 +1830,34 @@ export async function publishMetaBusinessSuiteViaBrowser(
     level: 'info',
   });
 
-  await raceWithAbort(
-    page.goto(PLATFORM_STUDIO_URLS.fb_reels, {
-      waitUntil: 'domcontentloaded',
-      timeout: 120_000,
-    }),
-    signal
-  );
-  await humanDelay(2500, 3500, signal);
+  const initialUrl = page.url().toLowerCase();
+  if (!initialUrl.includes('business.facebook.com')) {
+    await raceWithAbort(
+      page.goto('https://business.facebook.com/latest/home', {
+        waitUntil: 'domcontentloaded',
+        timeout: 90_000,
+      }),
+      signal
+    );
+    await humanDelay(1800, 2800, signal);
+  }
+
+  const warmupUrl = page.url().toLowerCase();
+  const warmupNeedsAuth =
+    warmupUrl.includes('/login') ||
+    warmupUrl.includes('checkpoint') ||
+    warmupUrl.includes('two_step_verification');
+
+  if (!warmupNeedsAuth) {
+    await raceWithAbort(
+      page.goto(PLATFORM_STUDIO_URLS.fb_reels, {
+        waitUntil: 'domcontentloaded',
+        timeout: 120_000,
+      }),
+      signal
+    );
+    await humanDelay(2500, 3500, signal);
+  }
 
   const currentUrl = page.url().toLowerCase();
   const emailVisible = await page
@@ -1942,7 +1917,9 @@ export async function publishMetaBusinessSuiteViaBrowser(
       const [chooser] = await raceWithAbort(
         Promise.all([
           page.waitForEvent('filechooser', { timeout: 15_000 }),
-          mediaSurface.getByRole('button').first().click({ timeout: 10_000 }),
+          humanClick(page, mediaSurface.getByRole('button').first(), signal, {
+            timeout: 10_000,
+          }),
         ]),
         signal
       );
@@ -2204,7 +2181,7 @@ export async function publishMetaBusinessSuiteViaBrowser(
     });
 
     const prevStepMarker = await readFacebookActiveStepMarker(page);
-    await nextBtn.click({ timeout: 10_000 });
+    await humanClick(page, nextBtn, signal, { timeout: 10_000 });
 
     const stepDeadline = Date.now() + 45_000;
     while (Date.now() < stepDeadline) {
@@ -2311,7 +2288,7 @@ export async function publishMetaBusinessSuiteViaBrowser(
     { timeout: 90_000 }
   );
 
-  await shareBtn.click({ timeout: 10_000 });
+  await humanClick(page, shareBtn, signal, { timeout: 10_000 });
   await raceWithAbort(graphqlPromise, signal);
 
   const doneDialog = page
@@ -2326,7 +2303,9 @@ export async function publishMetaBusinessSuiteViaBrowser(
       .locator('[role="button"][aria-label], button')
       .last();
     if (await closeBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-      await closeBtn.click({ timeout: 3000 }).catch(() => {});
+      await humanClick(page, closeBtn, signal, { timeout: 3000 }).catch(
+        () => {}
+      );
     } else {
       await page.keyboard.press('Escape').catch(() => {});
     }
@@ -2425,7 +2404,7 @@ async function configureYouTubeSchedule(
     ).trim();
     const formattedDate = formatDateMatchingSample(currentDateSample, snapped);
 
-    await dateTrigger.click({ timeout: 6000 });
+    await humanClick(page, dateTrigger, signal, { timeout: 6000 });
     await abortableWait(400, signal);
 
     const dateInput = page
@@ -2434,9 +2413,9 @@ async function configureYouTubeSchedule(
       )
       .first();
     if (await dateInput.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await dateInput.click({ timeout: 4000 });
+      await humanClick(page, dateInput, signal, { timeout: 4000 });
       await abortableWait(120, signal);
-      await page.keyboard.press('Control+A');
+      await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await page.keyboard.press('Backspace');
       await page.keyboard.type(formattedDate, { delay: 25 });
       await page.keyboard.press('Enter');
@@ -2467,9 +2446,9 @@ async function configureYouTubeSchedule(
         snapped.minute
       );
 
-      await timeInput.click({ timeout: 5000 });
+      await humanClick(page, timeInput, signal, { timeout: 5000 });
       await abortableWait(200, signal);
-      await page.keyboard.press('Control+A');
+      await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await page.keyboard.press('Backspace');
       await page.keyboard.type(formattedTime, { delay: 25 });
       await abortableWait(300, signal);
@@ -2486,7 +2465,9 @@ async function configureYouTubeSchedule(
         })
         .first();
       if (await matchingOption.isVisible({ timeout: 800 }).catch(() => false)) {
-        await matchingOption.click({ timeout: 4000 }).catch(() => {});
+        await humanClick(page, matchingOption, signal, { timeout: 4000 }).catch(
+          () => {}
+        );
       } else {
         await page.keyboard.press('Enter');
       }
@@ -2544,15 +2525,13 @@ async function configureYouTubeAiDisclosure(
         .locator('#toggle-button, ytcp-button#toggle-button')
         .first();
       if (await showMoreBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await showMoreBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-        await showMoreBtn.click({ timeout: 5000 });
+        await humanClick(page, showMoreBtn, signal, { timeout: 5000 });
         await humanDelay(600, 900, signal);
       }
     }
 
     if (await targetRadio.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await targetRadio.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-      await targetRadio.click({ timeout: 5000 });
+      await humanClick(page, targetRadio, signal, { timeout: 5000 });
       await humanDelay(300, 500, signal);
 
       // Verify Polymer tp-yt-paper-radio-button actually toggled aria-checked="true"
@@ -2562,7 +2541,10 @@ async function configureYouTubeAiDisclosure(
       if (!isNowChecked) {
         const innerRadio = targetRadio.locator('#radioContainer').first();
         if (await innerRadio.isVisible({ timeout: 1000 }).catch(() => false)) {
-          await innerRadio.click({ force: true, timeout: 3000 }).catch(() => {});
+          await humanClick(page, innerRadio, signal, {
+            timeout: 3000,
+            force: true,
+          }).catch(() => {});
           await humanDelay(250, 400, signal);
         } else {
           await targetRadio.click({ force: true, timeout: 3000 }).catch(() => {});
@@ -3013,8 +2995,10 @@ async function configureTikTokSchedule(
       return false;
     }
 
-    await scheduleRadio.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
-    await scheduleRadio.click({ force: true, timeout: 6000 });
+    await humanClick(page, scheduleRadio, signal, {
+      timeout: 6000,
+      force: true,
+    });
     await humanDelay(600, 950, signal);
 
     // 2. Handle first-time confirmation modal: "Allow your video to be saved for scheduled posting?" -> [Allow]
@@ -3027,7 +3011,8 @@ async function configureTikTokSchedule(
         'button:has-text("Izinkan")',
       ],
       2500,
-      signal
+      signal,
+      page
     );
     if (!allowClickedInRoot) {
       await tryClickAny(
@@ -3071,7 +3056,7 @@ async function configureTikTokSchedule(
     }
 
     // 4. Set Date (right box: nth(1), e.g., "2026-11-25")
-    await inputBoxes.nth(1).click({ timeout: 6000 });
+    await humanClick(page, inputBoxes.nth(1), signal, { timeout: 6000 });
     await abortableWait(450, signal);
 
     const calendarWrapper = root.locator('div.calendar-wrapper').first();
@@ -3120,7 +3105,7 @@ async function configureTikTokSchedule(
         const dayEl = validDays.nth(i);
         const text = (await dayEl.innerText().catch(() => '')).trim();
         if (text === String(snapped.day)) {
-          await dayEl.click({ timeout: 4000 });
+          await humanClick(page, dayEl, signal, { timeout: 4000 });
           dayClicked = true;
           break;
         }
@@ -3138,7 +3123,7 @@ async function configureTikTokSchedule(
     }
 
     // 5. Set Time (left box: nth(0), e.g., "18:25")
-    await inputBoxes.nth(0).click({ timeout: 6000 });
+    await humanClick(page, inputBoxes.nth(0), signal, { timeout: 6000 });
     await abortableWait(500, signal);
 
     const hourStr = String(snapped.hour).padStart(2, '0');
@@ -3149,8 +3134,7 @@ async function configureTikTokSchedule(
       .filter({ hasText: new RegExp(`^${hourStr}$`) })
       .first();
     if (await hourOption.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await hourOption.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-      await hourOption.click({ timeout: 5000 });
+      await humanClick(page, hourOption, signal, { timeout: 5000 });
       await abortableWait(450, signal);
     } else {
       onProgress({
@@ -3167,8 +3151,7 @@ async function configureTikTokSchedule(
       .filter({ hasText: new RegExp(`^${minStr}$`) })
       .first();
     if (await minOption.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await minOption.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-      await minOption.click({ timeout: 5000 });
+      await humanClick(page, minOption, signal, { timeout: 5000 });
       await abortableWait(400, signal);
     } else {
       onProgress({
@@ -3233,8 +3216,7 @@ async function configureTikTokAiLabel(
         .filter({ hasText: /^(?:Show more|Tampilkan lebih banyak)$/i })
         .first();
       if (await showMoreBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await showMoreBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-        await showMoreBtn.click({ timeout: 5000 });
+        await humanClick(page, showMoreBtn, signal, { timeout: 5000 });
         await humanDelay(650, 950, signal);
       }
     }
@@ -3259,8 +3241,10 @@ async function configureTikTokAiLabel(
           'checked';
 
       if (!alreadyOn) {
-        await switchTarget.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-        await switchTarget.click({ force: true, timeout: 5000 });
+        await humanClick(page, switchTarget, signal, {
+          timeout: 5000,
+          force: true,
+        });
         await humanDelay(500, 800, signal);
 
         // Handle optional TikTok disclosure confirmation modal if shown
@@ -3276,7 +3260,8 @@ async function configureTikTokAiLabel(
           root,
           confirmSelectors,
           1500,
-          signal
+          signal,
+          page
         );
         if (!clickedInRoot) {
           await tryClickAny(page, confirmSelectors, 1000, signal);
@@ -3458,9 +3443,9 @@ export async function publishTikTokViaBrowser(
     level: 'info',
   });
 
-  await captionEditor.click({ timeout: 8000 });
+  await humanClick(page, captionEditor, signal, { timeout: 8000 });
   await humanDelay(200, 400, signal);
-  await page.keyboard.press('Control+A');
+  await page.keyboard.press(SELECT_ALL_SHORTCUT);
   await page.keyboard.press('Delete');
   await humanDelay(150, 300, signal);
   await page.keyboard.insertText(caption);
@@ -3551,7 +3536,7 @@ export async function publishTikTokViaBrowser(
     level: 'info',
   });
 
-  await postButton.click({ timeout: 10_000 });
+  await humanClick(page, postButton, signal, { timeout: 10_000 });
   await humanDelay(1200, 2000, signal);
 
   // Handle optional confirmation dialog ("Post now" / "Schedule" / "Posting sekarang")
@@ -3565,7 +3550,8 @@ export async function publishTikTokViaBrowser(
     root,
     confirmSelectors,
     2500,
-    signal
+    signal,
+    page
   );
   if (!confirmedInRoot) {
     await tryClickAny(page, confirmSelectors, 2000, signal);
@@ -3658,9 +3644,12 @@ export async function publishViaBrowser(
   const page = await context.newPage();
   await safeBringToFront(page);
 
+  let shouldClosePage = false;
+
   try {
+    let result: BrowserPublishResult;
     if (platform === 'yt_shorts') {
-      return await publishYouTubeViaBrowser(
+      result = await publishYouTubeViaBrowser(
         page,
         item,
         videoPath,
@@ -3671,9 +3660,8 @@ export async function publishViaBrowser(
         scheduledAt,
         aiGenerated
       );
-    }
-    if (platform === 'tiktok') {
-      return await publishTikTokViaBrowser(
+    } else if (platform === 'tiktok') {
+      result = await publishTikTokViaBrowser(
         page,
         item,
         videoPath,
@@ -3684,13 +3672,12 @@ export async function publishViaBrowser(
         scheduledAt,
         aiGenerated
       );
-    }
-    if (platform === 'ig_reels' || platform === 'fb_reels') {
+    } else if (platform === 'ig_reels' || platform === 'fb_reels') {
       const resolvedMetaTargets: MetaBusinessTargets = metaTargets ?? {
         facebook: platform === 'fb_reels',
         instagram: platform === 'ig_reels',
       };
-      return await publishMetaBusinessSuiteViaBrowser(
+      result = await publishMetaBusinessSuiteViaBrowser(
         page,
         item,
         videoPath,
@@ -3702,24 +3689,32 @@ export async function publishViaBrowser(
         scheduledAt,
         aiGenerated
       );
+    } else {
+      result = await publishMetaBusinessSuiteViaBrowser(
+        page,
+        item,
+        videoPath,
+        videoFileName,
+        mode,
+        signal,
+        onProgress,
+        { facebook: true, instagram: false },
+        scheduledAt,
+        aiGenerated
+      );
     }
-    return await publishMetaBusinessSuiteViaBrowser(
-      page,
-      item,
-      videoPath,
-      videoFileName,
-      mode,
-      signal,
-      onProgress,
-      { facebook: true, instagram: false },
-      scheduledAt,
-      aiGenerated
-    );
+
+    if (mode === 'publish' && result.status === 'completed') {
+      shouldClosePage = true;
+    }
+
+    return result;
   } catch (error) {
     if (
       signal.aborted ||
       (error instanceof Error && error.name === 'AbortError')
     ) {
+      shouldClosePage = true;
       throw createAbortError();
     }
 
@@ -3737,5 +3732,9 @@ export async function publishViaBrowser(
       publishedUrl: null,
       summary: `Otomatisasi menemui kendala (${message}). Tab browser dibiarkan terbuka untuk review manual.`,
     };
+  } finally {
+    if ((shouldClosePage || signal.aborted) && !page.isClosed()) {
+      await page.close().catch(() => {});
+    }
   }
 }

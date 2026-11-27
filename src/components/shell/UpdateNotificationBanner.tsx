@@ -17,6 +17,66 @@ export interface GitHubUpdateStatus {
 }
 
 const DISMISS_STORAGE_KEY = 'cpgp-dismissed-update-version';
+const UPDATE_CACHE_OK_TTL_MS = 30 * 60 * 1000;
+const UPDATE_CACHE_ERROR_TTL_MS = 60 * 1000;
+
+let cachedUpdateInfo: GitHubUpdateStatus | null = null;
+let cachedUpdateAt = 0;
+let inFlightUpdatePromise: Promise<GitHubUpdateStatus | null> | null = null;
+
+function isCachedUpdateFresh(): boolean {
+  if (!cachedUpdateInfo || cachedUpdateAt <= 0) return false;
+  const ttl =
+    !cachedUpdateInfo.error && cachedUpdateInfo.latestVersion !== null
+      ? UPDATE_CACHE_OK_TTL_MS
+      : UPDATE_CACHE_ERROR_TTL_MS;
+  return Date.now() - cachedUpdateAt < ttl;
+}
+
+function isVersionDismissed(version: string | null): boolean {
+  if (!version || typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(DISMISS_STORAGE_KEY) === version;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchSystemVersion(
+  force: boolean
+): Promise<GitHubUpdateStatus | null> {
+  if (!force && isCachedUpdateFresh() && cachedUpdateInfo) {
+    return cachedUpdateInfo;
+  }
+  if (!force && inFlightUpdatePromise) {
+    return inFlightUpdatePromise;
+  }
+
+  let request: Promise<GitHubUpdateStatus | null> | null = null;
+  request = (async () => {
+    try {
+      const res = await fetch(
+        `/api/system/version${force ? '?refresh=true' : ''}`
+      );
+      if (!res.ok) return null;
+      const data = (await res.json()) as GitHubUpdateStatus;
+      cachedUpdateInfo = data;
+      cachedUpdateAt = Date.now();
+      return data;
+    } catch {
+      return null;
+    } finally {
+      if (inFlightUpdatePromise === request) {
+        inFlightUpdatePromise = null;
+      }
+    }
+  })();
+
+  if (!force) {
+    inFlightUpdatePromise = request;
+  }
+  return request;
+}
 
 export function useUpdateChecker(): {
   updateInfo: GitHubUpdateStatus | null;
@@ -24,35 +84,34 @@ export function useUpdateChecker(): {
   dismissUpdate: () => void;
   recheckUpdate: () => Promise<void>;
 } {
-  const [updateInfo, setUpdateInfo] = useState<GitHubUpdateStatus | null>(null);
-  const [dismissed, setDismissed] = useState<boolean>(false);
+  const [updateInfo, setUpdateInfo] = useState<GitHubUpdateStatus | null>(
+    () => cachedUpdateInfo
+  );
+  const [dismissed, setDismissed] = useState<boolean>(() =>
+    isVersionDismissed(cachedUpdateInfo?.latestVersion ?? null)
+  );
 
   const fetchStatus = async (force = false) => {
-    try {
-      const res = await fetch(
-        `/api/system/version${force ? '?refresh=true' : ''}`
-      );
-      if (!res.ok) return;
-      const data = (await res.json()) as GitHubUpdateStatus;
-      setUpdateInfo(data);
-      if (data.latestVersion) {
-        try {
-          const prevDismissed = window.localStorage.getItem(DISMISS_STORAGE_KEY);
-          if (prevDismissed === data.latestVersion && !force) {
-            setDismissed(true);
-          } else if (force) {
-            setDismissed(false);
-          }
-        } catch {
-          // ignore storage errors
-        }
+    const data = await fetchSystemVersion(force);
+    if (!data) return;
+    setUpdateInfo(data);
+    if (data.latestVersion) {
+      if (force) {
+        setDismissed(false);
+      } else if (isVersionDismissed(data.latestVersion)) {
+        setDismissed(true);
       }
-    } catch {
-      // silent fallback when offline
     }
   };
 
   useEffect(() => {
+    if (isCachedUpdateFresh() && cachedUpdateInfo) {
+      setUpdateInfo(cachedUpdateInfo);
+      if (isVersionDismissed(cachedUpdateInfo.latestVersion)) {
+        setDismissed(true);
+      }
+      return;
+    }
     void fetchStatus(false);
   }, []);
 

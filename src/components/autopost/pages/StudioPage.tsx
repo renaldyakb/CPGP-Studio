@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
 import {
   Accordion,
@@ -8,7 +9,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { NativeSelect } from '@/components/ui/input';
+import { Input, NativeSelect } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import {
   Tooltip,
@@ -99,10 +100,32 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
   const { capabilities, settings, browserSession, sessionChecks, busyKey } =
     ctx.data;
   const browser = settings.browser;
+  const savedCdpUrl = browser.cdpUrl ?? '';
+  const [cdpUrlDraft, setCdpUrlDraft] = useState<string>(savedCdpUrl);
+  const [isSavingCdp, setIsSavingCdp] = useState<boolean>(false);
+
+  useEffect(() => {
+    setCdpUrlDraft(savedCdpUrl);
+  }, [savedCdpUrl, browser.profileDir]);
+
+  const isCdpDirty = cdpUrlDraft.trim() !== savedCdpUrl.trim();
+
+  const handleSaveCdpUrl = async () => {
+    setIsSavingCdp(true);
+    try {
+      await ctx.data.saveSettings({
+        browser: { cdpUrl: cdpUrlDraft.trim() },
+      });
+    } finally {
+      setIsSavingCdp(false);
+    }
+  };
 
   const isOpen = browserSession.isOpen;
   const anyBrowserAvailable =
-    capabilities.chromeAvailable || capabilities.edgeAvailable;
+    capabilities.chromeAvailable ||
+    capabilities.edgeAvailable ||
+    Boolean(savedCdpUrl.trim());
   const isOpeningProfile = busyKey === 'open-profile';
   const isClosingProfile = busyKey === 'close-profile';
   const isCheckingAllSessions = busyKey === 'check-sessions';
@@ -178,6 +201,51 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                 {browser.profileDir}
               </code>
             </div>
+          </div>
+
+          <div className="space-y-1.5 rounded-md border border-border bg-muted/60 px-3.5 py-2.5">
+            <label
+              htmlFor="autopost-browser-cdp-url"
+              className="block text-xs font-medium text-foreground"
+            >
+              Sambung Chrome Harian (CDP URL)
+            </label>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <Input
+                id="autopost-browser-cdp-url"
+                type="url"
+                value={cdpUrlDraft}
+                disabled={isSavingCdp}
+                onChange={(event) => setCdpUrlDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && isCdpDirty && !isSavingCdp) {
+                    event.preventDefault();
+                    void handleSaveCdpUrl();
+                  }
+                }}
+                placeholder="http://127.0.0.1:9222"
+                className="flex-1 bg-card font-mono text-xs"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isSavingCdp || !isCdpDirty}
+                onClick={() => void handleSaveCdpUrl()}
+              >
+                {isSavingCdp ? (
+                  <Loader2
+                    className="h-3.5 w-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                ) : null}
+                Simpan
+              </Button>
+            </div>
+            <p className="text-[11px] font-light text-muted-foreground/75">
+              Opsional: sambungkan profil Chrome harian agar terhindar dari
+              checkpoint bot. Kosongkan untuk memakai profil terisolasi.
+            </p>
           </div>
 
           <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted px-3.5 py-2.5">

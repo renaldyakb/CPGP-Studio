@@ -145,7 +145,10 @@ export function validateContentRootPath(rawPath: string): PathValidationResult {
     // Ignore read error
   }
 
-  const slotFolders = findContentFolderPaths(normalizedPath);
+  const slotFolders = findContentFolderPaths(normalizedPath, [], {
+    maxDepth: 3,
+    maxDirsVisited: 200,
+  });
   const sampleCodes = slotFolders
     .slice(0, 6)
     .map((p) => path.basename(p));

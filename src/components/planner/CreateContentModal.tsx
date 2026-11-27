@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DateRange } from 'react-day-picker';
 import {
   AlertCircle,
@@ -187,8 +187,20 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     [defaultYear]
   );
 
+  const defaultMonthFolder = availableMonths[availableMonths.length - 1];
+  const lastInitKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (!isOpen) return;
+    const initKey = isOpen
+      ? `${initialTab}:${defaultMonthFolder ?? ''}`
+      : null;
+    if (!initKey) {
+      lastInitKeyRef.current = null;
+      return;
+    }
+    if (initKey === lastInitKeyRef.current) return;
+    lastInitKeyRef.current = initKey;
+
     setActiveTab(initialTab);
     setErrorMsg(null);
     setHookTitle('');
@@ -206,8 +218,7 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
     }
 
     const fallbackMonth =
-      availableMonths[availableMonths.length - 1] ||
-      formatYearMonthFolder(new Date());
+      defaultMonthFolder || formatYearMonthFolder(new Date());
     const initialDate = buildDateFromFolder(fallbackMonth, 1, defaultYear);
     setSelectedDate(initialDate);
     setMonthFolder(formatYearMonthFolder(initialDate));
@@ -219,8 +230,8 @@ export const CreateContentModal: React.FC<CreateContentModalProps> = ({
   }, [
     isOpen,
     initialTab,
+    defaultMonthFolder,
     activeWorkspace,
-    availableMonths,
     timeSlots,
     defaultYear,
     fetchSuggestedSlot,

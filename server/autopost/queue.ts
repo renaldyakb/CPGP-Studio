@@ -35,6 +35,8 @@ import { publishToYouTubeApi } from './youtubeApi.ts';
 const MAX_RETAINED_JOBS = 40;
 const MAX_LOGS_PER_JOB = 60;
 const PROGRESS_EMIT_INTERVAL_MS = 180;
+const BROWSER_COOLDOWN_MIN_MS = 45_000;
+const BROWSER_COOLDOWN_MAX_MS = 75_000;
 
 export interface AutoPostQueueEvent {
   type: 'job-updated';
@@ -100,6 +102,7 @@ export class AutoPostQueueManager {
   private readonly pendingIgContainers = new Map<string, string>();
   private readonly combinedMetaPartners = new Map<string, string>();
   private readonly jobWorkspaces = new Map<string, CapturedWorkspaceContext>();
+  private readonly lastBrowserPublishByPlatform = new Map<string, number>();
   private readonly listeners = new Set<AutoPostQueueListener>();
   private readonly lastEmitAt = new Map<string, number>();
   private readonly onPlannerUpdated?: (
@@ -188,14 +191,108 @@ export class AutoPostQueueManager {
       i >= 0 && this.jobs.length > MAX_RETAINED_JOBS;
       i -= 1
     ) {
-      const status = this.jobs[i].status;
-      if (status !== 'queued' && status !== 'running') {
-        const removed = this.jobs.splice(i, 1)[0];
-        if (removed) {
-          this.lastEmitAt.delete(removed.jobId);
-          this.pendingIgContainers.delete(removed.jobId);
-          this.jobWorkspaces.delete(removed.jobId);
-        }
+      const candidate = this.jobs[i];
+      const status = candidate.status;
+      if (status === 'queued' || status === 'running') {
+        continue;
+      }
+      if (
+        status === 'awaiting_review' &&
+        this.pendingIgContainers.has(candidate.jobId)
+      ) {
+        continue;
+      }
+      const removed = this.jobs.splice(i, 1)[0];
+      if (removed) {
+        this.lastEmitAt.delete(removed.jobId);
+        this.pendingIgContainers.delete(removed.jobId);
+        this.combinedMetaPartners.delete(removed.jobId);
+        this.jobWorkspaces.delete(removed.jobId);
+      }
+    }
+  }
+
+  private getBrowserCooldownKey(platform: PlatformKey): string {
+    if (platform === 'fb_reels' || platform === 'ig_reels') {
+      return 'meta_browser';
+    }
+    return platform;
+  }
+
+  private async abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+      const err = new Error('Proses auto-post dibatalkan.');
+      err.name = 'AbortError';
+      throw err;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        const err = new Error('Proses auto-post dibatalkan.');
+        err.name = 'AbortError';
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, Math.max(0, ms));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private async waitForBrowserCooldownIfNeeded(
+    platform: PlatformKey,
+    signal: AbortSignal,
+    onProgress: (update: {
+      step: string;
+      progressPercent: number;
+      log?: string;
+      level?: 'info' | 'success' | 'warning' | 'error';
+    }) => void
+  ): Promise<void> {
+    const key = this.getBrowserCooldownKey(platform);
+    const lastCompletedAt = this.lastBrowserPublishByPlatform.get(key);
+    if (!lastCompletedAt) {
+      return;
+    }
+
+    const elapsedMs = Date.now() - lastCompletedAt;
+    if (elapsedMs >= BROWSER_COOLDOWN_MIN_MS) {
+      return;
+    }
+
+    const targetCooldownMs =
+      BROWSER_COOLDOWN_MIN_MS +
+      Math.floor(
+        Math.random() * (BROWSER_COOLDOWN_MAX_MS - BROWSER_COOLDOWN_MIN_MS + 1)
+      );
+    const totalWaitMs = Math.max(0, targetCooldownMs - elapsedMs);
+    if (totalWaitMs <= 0) {
+      return;
+    }
+
+    const totalSeconds = Math.max(1, Math.ceil(totalWaitMs / 1000));
+    onProgress({
+      step: `Menunggu jeda aman anti-bot (${totalSeconds}s) sebelum upload berikutnya...`,
+      progressPercent: 4,
+      log: `Menunggu jeda aman anti-bot (${totalSeconds}s) sebelum upload browser berikutnya pada platform yang sama.`,
+      level: 'info',
+    });
+
+    const deadline = Date.now() + totalWaitMs;
+    while (true) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+      const chunkMs = Math.min(remainingMs, 5000);
+      await this.abortableSleep(chunkMs, signal);
+      const nextRemainingSec = Math.ceil((deadline - Date.now()) / 1000);
+      if (nextRemainingSec > 0) {
+        onProgress({
+          step: `Menunggu jeda aman anti-bot (${nextRemainingSec}s) sebelum upload berikutnya...`,
+          progressPercent: 4,
+        });
       }
     }
   }
@@ -539,6 +636,12 @@ export class AutoPostQueueManager {
               };
 
               try {
+                await this.waitForBrowserCooldownIfNeeded(
+                  'fb_reels',
+                  combinedController.signal,
+                  handleCombinedProgress
+                );
+
                 const result = await publishViaBrowser({
                   platform: 'fb_reels',
                   metaTargets: { facebook: true, instagram: true },
@@ -551,6 +654,13 @@ export class AutoPostQueueManager {
                   workspace: capturedContext.workspace,
                 });
 
+                if (result.status === 'completed') {
+                  this.lastBrowserPublishByPlatform.set(
+                    this.getBrowserCooldownKey('fb_reels'),
+                    Date.now()
+                  );
+                }
+
                 if (
                   combinedController.signal.aborted ||
                   metaJobs.some(
@@ -559,10 +669,12 @@ export class AutoPostQueueManager {
                 ) {
                   const finishedAt = new Date().toISOString();
                   for (const metaJob of metaJobs) {
-                    metaJob.status = 'cancelled';
-                    metaJob.step = 'Dibatalkan';
-                    metaJob.finishedAt = finishedAt;
-                    this.emitJobUpdate(metaJob, true);
+                    if ((metaJob.status as AutoPostJobStatus) !== 'cancelled') {
+                      metaJob.status = 'cancelled';
+                      metaJob.step = 'Dibatalkan';
+                      metaJob.finishedAt = metaJob.finishedAt ?? finishedAt;
+                      this.emitJobUpdate(metaJob, true);
+                    }
                   }
                   return;
                 }
@@ -614,24 +726,28 @@ export class AutoPostQueueManager {
 
                 for (const metaJob of metaJobs) {
                   if (isAbort) {
-                    metaJob.status = 'cancelled';
-                    metaJob.step = 'Dibatalkan';
-                    metaJob.error = null;
-                    this.appendLog(
-                      metaJob,
-                      'Job dibatalkan oleh pengguna.',
-                      'warning'
-                    );
+                    if ((metaJob.status as AutoPostJobStatus) !== 'cancelled') {
+                      metaJob.status = 'cancelled';
+                      metaJob.step = 'Dibatalkan';
+                      metaJob.error = null;
+                      metaJob.finishedAt = metaJob.finishedAt ?? finishedAt;
+                      this.appendLog(
+                        metaJob,
+                        'Job dibatalkan oleh pengguna.',
+                        'warning'
+                      );
+                      this.emitJobUpdate(metaJob, true);
+                    }
                   } else {
                     const message =
                       err instanceof Error ? err.message : String(err);
                     metaJob.status = 'failed';
                     metaJob.step = 'Gagal';
                     metaJob.error = message;
+                    metaJob.finishedAt = finishedAt;
                     this.appendLog(metaJob, `Gagal: ${message}`, 'error');
+                    this.emitJobUpdate(metaJob, true);
                   }
-                  metaJob.finishedAt = finishedAt;
-                  this.emitJobUpdate(metaJob, true);
                 }
               } finally {
                 this.controllers.delete(fbJobId);
@@ -769,11 +885,17 @@ export class AutoPostQueueManager {
                   result = await publishFacebookReelViaMetaApi({
                     item: input.item,
                     mode: resolvedMode,
+                    scheduledAt: resolvedScheduledAt,
                     signal: controller.signal,
                     onProgress: handleProgress,
                     workspace: capturedContext.workspace,
                   });
                 } else if (platform === 'ig_reels') {
+                  if (resolvedScheduledAt) {
+                    throw new Error(
+                      'Instagram Graph API belum mendukung penjadwalan native. Gunakan engine Browser (Meta Business Suite) untuk menjadwalkan Instagram Reels, atau pilih "Upload Sekarang".'
+                    );
+                  }
                   result = await publishInstagramReelViaMetaApi({
                     item: input.item,
                     mode: resolvedMode,
@@ -787,6 +909,12 @@ export class AutoPostQueueManager {
                   );
                 }
               } else {
+                await this.waitForBrowserCooldownIfNeeded(
+                  platform,
+                  controller.signal,
+                  handleProgress
+                );
+
                 result = await publishViaBrowser({
                   platform,
                   item: input.item,
@@ -797,17 +925,26 @@ export class AutoPostQueueManager {
                   onProgress: handleProgress,
                   workspace: capturedContext.workspace,
                 });
+
+                if (result.status === 'completed') {
+                  this.lastBrowserPublishByPlatform.set(
+                    this.getBrowserCooldownKey(platform),
+                    Date.now()
+                  );
+                }
               }
 
               if (
                 controller.signal.aborted ||
                 (job.status as AutoPostJobStatus) === 'cancelled'
               ) {
-                job.status = 'cancelled';
-                job.step = 'Dibatalkan';
-                job.finishedAt = new Date().toISOString();
                 this.pendingIgContainers.delete(jobId);
-                this.emitJobUpdate(job, true);
+                if ((job.status as AutoPostJobStatus) !== 'cancelled') {
+                  job.status = 'cancelled';
+                  job.step = 'Dibatalkan';
+                  job.finishedAt = job.finishedAt ?? new Date().toISOString();
+                  this.emitJobUpdate(job, true);
+                }
                 return;
               }
 
@@ -857,20 +994,24 @@ export class AutoPostQueueManager {
                 (err instanceof Error && err.name === 'AbortError');
 
               if (isAbort) {
-                job.status = 'cancelled';
-                job.step = 'Dibatalkan';
-                job.error = null;
-                this.appendLog(job, 'Job dibatalkan oleh pengguna.', 'warning');
+                if ((job.status as AutoPostJobStatus) !== 'cancelled') {
+                  job.status = 'cancelled';
+                  job.step = 'Dibatalkan';
+                  job.error = null;
+                  job.finishedAt = job.finishedAt ?? new Date().toISOString();
+                  this.appendLog(job, 'Job dibatalkan oleh pengguna.', 'warning');
+                  this.emitJobUpdate(job, true);
+                }
               } else {
                 const message =
                   err instanceof Error ? err.message : String(err);
                 job.status = 'failed';
                 job.step = 'Gagal';
                 job.error = message;
+                job.finishedAt = new Date().toISOString();
                 this.appendLog(job, `Gagal: ${message}`, 'error');
+                this.emitJobUpdate(job, true);
               }
-              job.finishedAt = new Date().toISOString();
-              this.emitJobUpdate(job, true);
             } finally {
               this.controllers.delete(jobId);
             }

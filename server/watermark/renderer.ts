@@ -71,14 +71,21 @@ function runShortCommand(
   });
 }
 
+const FAILED_CAPABILITIES_TTL_MS = 30_000;
 let cachedCapabilities: WatermarkCapabilities | null = null;
+let cachedCapabilitiesAt = 0;
 let capabilitiesInFlight: Promise<WatermarkCapabilities> | null = null;
 
 export async function detectWatermarkCapabilities(
   forceRefresh = false
 ): Promise<WatermarkCapabilities> {
   if (!forceRefresh && cachedCapabilities) {
-    return cachedCapabilities;
+    if (
+      cachedCapabilities.ffmpegAvailable ||
+      Date.now() - cachedCapabilitiesAt < FAILED_CAPABILITIES_TTL_MS
+    ) {
+      return cachedCapabilities;
+    }
   }
 
   if (!forceRefresh && capabilitiesInFlight) {
@@ -201,6 +208,7 @@ export async function detectWatermarkCapabilities(
     };
 
     cachedCapabilities = result;
+    cachedCapabilitiesAt = Date.now();
     return result;
   })();
 
@@ -350,35 +358,62 @@ function safeUnlink(filePath: string): void {
   }
 }
 
-function moveFileAtomically(srcPath: string, destPath: string): void {
+const RENAME_RETRY_DELAYS_MS = [80, 160, 320, 640, 1000];
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function moveFileAtomically(
+  srcPath: string,
+  destPath: string
+): Promise<void> {
   const destDir = path.dirname(destPath);
   if (!fs.existsSync(destDir)) {
     fs.mkdirSync(destDir, { recursive: true });
   }
 
-  try {
-    fs.renameSync(srcPath, destPath);
-    return;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (code !== 'EXDEV' && code !== 'EPERM' && code !== 'EACCES') {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      await fs.promises.rename(srcPath, destPath);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'EXDEV') {
+        lastErr = err;
+        break;
+      }
+      if (
+        (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') &&
+        attempt < RENAME_RETRY_DELAYS_MS.length
+      ) {
+        lastErr = err;
+        await sleepMs(RENAME_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
       throw err;
     }
   }
 
-  // Cross-device safe atomic replacement (e.g. C:\Temp -> D:\RENAL\JURNAL DUNIA\KONTEN)
-  const stagingPath = path.join(
-    destDir,
-    `.wm_staging_${randomUUID().slice(0, 8)}.tmp`
-  );
-  try {
-    fs.copyFileSync(srcPath, stagingPath);
-    fs.renameSync(stagingPath, destPath);
-    safeUnlink(srcPath);
-  } catch (err) {
-    safeUnlink(stagingPath);
-    throw err;
+  // Only fall back to copy + rename when moving across different volumes (EXDEV)
+  if ((lastErr as NodeJS.ErrnoException)?.code === 'EXDEV') {
+    const stagingPath = path.join(
+      destDir,
+      `.wm_staging_${randomUUID().slice(0, 8)}.tmp`
+    );
+    try {
+      await fs.promises.copyFile(srcPath, stagingPath);
+      await fs.promises.rename(stagingPath, destPath);
+      safeUnlink(srcPath);
+      return;
+    } catch (err) {
+      safeUnlink(stagingPath);
+      throw err;
+    }
   }
+
+  throw lastErr ?? new Error(`Gagal memindahkan file ke ${destPath}`);
 }
 
 function createAbortError(): Error {
@@ -595,9 +630,13 @@ export async function renderWatermarkedVideo(
     throw createAbortError();
   }
 
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
   const runId = randomUUID();
   const tempPngPath = path.join(os.tmpdir(), `jd-wm-${runId}.png`);
-  const tempOutputPath = path.join(os.tmpdir(), `jd-wm-${runId}.mp4`);
+  const tempOutputPath = path.join(outputDir, `.wm_tmp_${runId}.tmp.mp4`);
   const finalOutputPath = path.join(outputDir, outputFileName);
 
   try {
@@ -806,7 +845,7 @@ export async function renderWatermarkedVideo(
       throw new Error('File output sementara FFmpeg tidak ditemukan setelah render');
     }
 
-    moveFileAtomically(tempOutputPath, finalOutputPath);
+    await moveFileAtomically(tempOutputPath, finalOutputPath);
 
     return {
       outputPath: finalOutputPath,

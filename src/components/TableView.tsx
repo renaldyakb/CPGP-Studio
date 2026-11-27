@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   ContentPlannerItem,
   KANBAN_COLUMNS,
@@ -138,24 +138,24 @@ export const TableView: React.FC<TableViewProps> = ({
     );
   };
 
-  const handleOpenExplorerSafe = async (
-    targetPath: string,
-    selectFile = true
-  ) => {
-    if (onOpenExplorer) {
-      onOpenExplorer(targetPath, selectFile);
-      return;
-    }
-    try {
-      await fetch('/api/system/open-explorer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: targetPath, targetPath, selectFile }),
-      });
-    } catch {
-      // ignore explorer errors
-    }
-  };
+  const handleOpenExplorerSafe = useCallback(
+    async (targetPath: string, selectFile = true) => {
+      if (onOpenExplorer) {
+        onOpenExplorer(targetPath, selectFile);
+        return;
+      }
+      try {
+        await fetch('/api/system/open-explorer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: targetPath, targetPath, selectFile }),
+        });
+      } catch {
+        // ignore explorer errors
+      }
+    },
+    [onOpenExplorer]
+  );
 
   const getPlatformProgressScore = (item: ContentPlannerItem) => {
     const p = item.userProperties.platforms;
@@ -351,6 +351,7 @@ export const TableView: React.FC<TableViewProps> = ({
                         width={36}
                         height={64}
                         loading="lazy"
+                        decoding="async"
                         className="h-full w-full aspect-[9/16] object-cover"
                       />
                     ) : (

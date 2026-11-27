@@ -57,6 +57,18 @@ const ACCENT_PALETTE = [
   '#06b6d4',
 ];
 
+let cachedRegistry: WorkspacesRegistry | null = null;
+let cachedRegistryMtimeMs: number | null = null;
+let cachedRegistrySize: number | null = null;
+const ensuredWorkspaceDirs = new Set<string>();
+let dataDirEnsured = false;
+
+function invalidateCachedRegistry(): void {
+  cachedRegistry = null;
+  cachedRegistryMtimeMs = null;
+  cachedRegistrySize = null;
+}
+
 export interface WorkspacePaths {
   dir: string;
   plannerFile: string;
@@ -86,8 +98,11 @@ export function getWorkspacePaths(workspaceId?: string): WorkspacePaths {
 
 function ensureWorkspaceDataDirectory(workspaceId: string): WorkspacePaths {
   const dir = path.join(WORKSPACES_DATA_ROOT, workspaceId);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!ensuredWorkspaceDirs.has(workspaceId)) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    ensuredWorkspaceDirs.add(workspaceId);
   }
   return {
     dir,
@@ -147,14 +162,47 @@ function buildDefaultJurnalDuniaWorkspace(): WorkspaceMetadata {
 }
 
 function saveRegistryToDisk(registry: WorkspacesRegistry): WorkspacesRegistry {
-  if (!fs.existsSync(DATA_DIR)) {
+  if (!dataDirEnsured || !fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
+    dataDirEnsured = true;
   }
-  fs.writeFileSync(
-    WORKSPACES_REGISTRY_FILE,
-    JSON.stringify(registry, null, 2) + '\n',
-    'utf-8'
+  const serialized = JSON.stringify(registry, null, 2) + '\n';
+  const tmpPath = path.join(
+    DATA_DIR,
+    `.workspaces.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`
   );
+  try {
+    fs.writeFileSync(tmpPath, serialized, 'utf-8');
+    fs.renameSync(tmpPath, WORKSPACES_REGISTRY_FILE);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch {
+      // Ignore cleanup error
+    }
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
+      try {
+        fs.writeFileSync(WORKSPACES_REGISTRY_FILE, serialized, 'utf-8');
+      } catch (fallbackErr) {
+        invalidateCachedRegistry();
+        throw fallbackErr;
+      }
+    } else {
+      invalidateCachedRegistry();
+      throw err;
+    }
+  }
+  try {
+    const stat = fs.statSync(WORKSPACES_REGISTRY_FILE);
+    cachedRegistry = registry;
+    cachedRegistryMtimeMs = stat.mtimeMs;
+    cachedRegistrySize = stat.size;
+  } catch {
+    invalidateCachedRegistry();
+  }
   return registry;
 }
 
@@ -253,11 +301,27 @@ function migrateLegacyFilesToDefaultWorkspace(): WorkspacesRegistry {
 }
 
 export function getWorkspacesRegistry(): WorkspacesRegistry {
+  if (cachedRegistry) {
+    try {
+      const stat = fs.statSync(WORKSPACES_REGISTRY_FILE);
+      if (
+        stat.mtimeMs === cachedRegistryMtimeMs &&
+        stat.size === cachedRegistrySize
+      ) {
+        return cachedRegistry;
+      }
+    } catch {
+      // File missing or unreadable; invalidate cache and reload
+    }
+    invalidateCachedRegistry();
+  }
+
   if (!fs.existsSync(WORKSPACES_REGISTRY_FILE)) {
     return migrateLegacyFilesToDefaultWorkspace();
   }
 
   try {
+    const stat = fs.statSync(WORKSPACES_REGISTRY_FILE);
     const raw = fs.readFileSync(WORKSPACES_REGISTRY_FILE, 'utf-8');
     const parsed = JSON.parse(raw) as WorkspacesRegistry;
 
@@ -269,6 +333,9 @@ export function getWorkspacesRegistry(): WorkspacesRegistry {
     if (workspaceKeys.length === 0) {
       // Keep clean empty state when awaiting first-run onboarding
       if (parsed.onboardingCompleted === false) {
+        cachedRegistry = parsed;
+        cachedRegistryMtimeMs = stat.mtimeMs;
+        cachedRegistrySize = stat.size;
         return parsed;
       }
       return migrateLegacyFilesToDefaultWorkspace();
@@ -297,9 +364,12 @@ export function getWorkspacesRegistry(): WorkspacesRegistry {
     }
 
     if (dirty) {
-      saveRegistryToDisk(parsed);
+      return saveRegistryToDisk(parsed);
     }
 
+    cachedRegistry = parsed;
+    cachedRegistryMtimeMs = stat.mtimeMs;
+    cachedRegistrySize = stat.size;
     return parsed;
   } catch {
     return migrateLegacyFilesToDefaultWorkspace();
@@ -395,6 +465,9 @@ function copyWatermarkPresetsWithHandleSubstitution(
       presets: copiedPresets,
     };
 
+    if (!fs.existsSync(targetPaths.dir)) {
+      fs.mkdirSync(targetPaths.dir, { recursive: true });
+    }
     fs.writeFileSync(
       targetPaths.watermarkPresetsFile,
       JSON.stringify(nextStore, null, 2) + '\n',
@@ -631,6 +704,7 @@ export function deleteWorkspace(id: string): WorkspacesRegistry {
   }
 
   delete registry.workspaces[id];
+  ensuredWorkspaceDirs.delete(id);
 
   if (registry.activeWorkspaceId === id) {
     const nextActiveId = Object.keys(registry.workspaces)[0];

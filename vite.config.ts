@@ -42,6 +42,41 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalized = id.replace(/\\/g, '/');
+          if (!normalized.includes('/node_modules/')) return undefined;
+          if (
+            normalized.includes('/node_modules/react/') ||
+            normalized.includes('/node_modules/react-dom/') ||
+            normalized.includes('/node_modules/scheduler/') ||
+            normalized.includes('/node_modules/use-sync-external-store/')
+          ) {
+            return 'vendor-react';
+          }
+          if (normalized.includes('/node_modules/@tanstack/')) {
+            return 'vendor-router';
+          }
+          if (
+            normalized.includes('/node_modules/react-day-picker/') ||
+            normalized.includes('/node_modules/date-fns/') ||
+            normalized.includes('/node_modules/@date-fns/')
+          ) {
+            return 'vendor-calendar';
+          }
+          if (
+            normalized.includes('/node_modules/lucide-react/') ||
+            normalized.includes('/node_modules/react-icons/')
+          ) {
+            return 'vendor-icons';
+          }
+          return undefined;
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     strictPort: false,

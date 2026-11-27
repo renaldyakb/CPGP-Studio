@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Outlet,
   useLocation,
@@ -89,10 +89,10 @@ export function AutoPostLayout() {
   const location = useLocation();
   const search = useSearch({ from: '/auto-post' });
   const { theme, toggleTheme } = useAppTheme();
-  const { database, items, refresh: refreshItems } = usePlannerItems();
 
   const [workspacesRegistry, setWorkspacesRegistry] =
     useState<WorkspacesRegistry | null>(null);
+  const [workspacesLoaded, setWorkspacesLoaded] = useState<boolean>(false);
   const [workspaceModalState, setWorkspaceModalState] = useState<{
     open: boolean;
     mode: WorkspaceModalMode;
@@ -121,13 +121,19 @@ export function AutoPostLayout() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const data = useAutoPostData({
-    isOpen: true,
-    onToast: showToast,
-    onPlannerSync: () => {
-      void refreshItems();
-    },
-  });
+  const dataRefreshRef = useRef<(() => Promise<void>) | null>(null);
+
+  const clearFocusSearchParams = useCallback(() => {
+    if (!search.item && !search.platform) return;
+    void navigate({
+      to: normalizePath(location.pathname),
+      search: {},
+      replace: true,
+    });
+  }, [location.pathname, navigate, search.item, search.platform]);
+
+  const clearFocusSearchParamsRef = useRef(clearFocusSearchParams);
+  clearFocusSearchParamsRef.current = clearFocusSearchParams;
 
   const fetchWorkspaces = useCallback(async () => {
     try {
@@ -142,42 +148,46 @@ export function AutoPostLayout() {
           : (raw as WorkspacesRegistry);
       if (reg && reg.workspaces && typeof reg.workspaces === 'object') {
         setWorkspacesRegistry(reg);
+        if (
+          !reg.onboardingCompleted ||
+          Object.keys(reg.workspaces).length === 0
+        ) {
+          void navigate({ to: '/', replace: true });
+        }
       }
     } catch {
       // ignore if workspace endpoint is unavailable
+    } finally {
+      setWorkspacesLoaded(true);
     }
-  }, []);
+  }, [navigate]);
 
   useEffect(() => {
     void fetchWorkspaces();
   }, [fetchWorkspaces]);
 
-  useEffect(() => {
-    let source: EventSource | null = null;
-    try {
-      source = new EventSource('/api/events');
-      source.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data) as { type?: string };
-          if (
-            payload.type === 'workspace-switched' ||
-            payload.type === 'workspace-activated'
-          ) {
-            void fetchWorkspaces();
-            void refreshItems();
-            void data.refresh();
-          }
-        } catch {
-          // ignore heartbeat
-        }
-      };
-    } catch {
-      // EventSource unavailable
-    }
-    return () => {
-      source?.close();
-    };
-  }, [fetchWorkspaces, refreshItems, data.refresh]);
+  const needsOnboarding =
+    workspacesLoaded &&
+    workspacesRegistry !== null &&
+    (!workspacesRegistry.onboardingCompleted ||
+      Object.keys(workspacesRegistry.workspaces).length === 0);
+  const isAutoPostReady = workspacesLoaded && !needsOnboarding;
+
+  const handleWorkspaceSwitchFromSse = useCallback(() => {
+    clearFocusSearchParamsRef.current();
+    void fetchWorkspaces();
+    void dataRefreshRef.current?.();
+  }, [fetchWorkspaces]);
+
+  const {
+    database,
+    items,
+    isLiveSyncActive,
+    refresh: refreshItems,
+  } = usePlannerItems({
+    enabled: isAutoPostReady,
+    onWorkspaceSwitch: handleWorkspaceSwitchFromSse,
+  });
 
   const activeWorkspace = useMemo<WorkspaceMetadata | null>(() => {
     if (!workspacesRegistry || !workspacesRegistry.workspaces) return null;
@@ -188,6 +198,21 @@ export function AutoPostLayout() {
       null
     );
   }, [workspacesRegistry]);
+
+  const handlePlannerSync = useCallback(() => {
+    void refreshItems();
+  }, [refreshItems]);
+
+  const data = useAutoPostData({
+    isOpen: isAutoPostReady,
+    workspaceId: activeWorkspace?.id,
+    onToast: showToast,
+    onPlannerSync: handlePlannerSync,
+  });
+
+  useEffect(() => {
+    dataRefreshRef.current = data.refresh;
+  }, [data.refresh]);
 
   const contentRootPath =
     activeWorkspace?.contentRootPath ??
@@ -225,6 +250,7 @@ export function AutoPostLayout() {
         if (payload.registry) {
           setWorkspacesRegistry(payload.registry);
         }
+        clearFocusSearchParams();
         await Promise.all([refreshItems(), data.refresh()]);
         showToast(
           `Workspace aktif: ${payload.workspace.name} (${payload.workspace.handle})`
@@ -236,7 +262,13 @@ export function AutoPostLayout() {
         );
       }
     },
-    [activeWorkspace?.id, refreshItems, data.refresh, showToast]
+    [
+      activeWorkspace?.id,
+      clearFocusSearchParams,
+      refreshItems,
+      data.refresh,
+      showToast,
+    ]
   );
 
   const handleOpenExplorerRoot = useCallback(async () => {
@@ -279,6 +311,8 @@ export function AutoPostLayout() {
     () => ({
       items,
       data,
+      initialItemId: search.item ?? null,
+      initialPlatform: search.platform ?? null,
       onNavigate: (page) => {
         void navigate({ to: toRoute(page) });
       },
@@ -289,7 +323,16 @@ export function AutoPostLayout() {
         void navigate({ to: '/' });
       },
     }),
-    [items, data, navigate, openContentDetail, editCaption, openWatermark]
+    [
+      items,
+      data,
+      search.item,
+      search.platform,
+      navigate,
+      openContentDetail,
+      editCaption,
+      openWatermark,
+    ]
   );
 
   const runningCount = data.jobs.filter(
@@ -323,8 +366,24 @@ export function AutoPostLayout() {
   const headerMeta = ROUTE_HEADER_META[activeRoute];
 
   const focusCode = search.item
-    ? items.find((entry) => entry.id === search.item)?.folderCode ?? search.item
+    ? items.find((entry) => entry.id === search.item)?.folderCode ??
+      (items.length === 0 ? search.item : null)
     : null;
+
+  if (!workspacesLoaded || needsOnboarding) {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex min-h-screen items-center justify-center bg-background p-6"
+      >
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+          <span>Memuat workspace Auto-Post...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <AutoPostProvider value={ctx}>
@@ -333,7 +392,7 @@ export function AutoPostLayout() {
         subtitle={headerMeta.subtitle}
         theme={theme}
         onToggleTheme={toggleTheme}
-        isLiveSyncActive
+        isLiveSyncActive={isLiveSyncActive}
         counts={counts}
         workspacesRegistry={workspacesRegistry}
         activeWorkspace={activeWorkspace}
@@ -398,53 +457,59 @@ export function AutoPostLayout() {
         )}
       </AppShell>
 
-      <WorkspaceModal
-        isOpen={workspaceModalState.open}
-        mode={workspaceModalState.mode}
-        registry={workspacesRegistry}
-        activeWorkspace={activeWorkspace}
-        onClose={() =>
-          setWorkspaceModalState((prev) => ({ ...prev, open: false }))
-        }
-        onSaved={(payload) => {
-          setWorkspacesRegistry(payload.registry);
-          void refreshItems();
-          void data.refresh();
-        }}
-        onToast={showToast}
-      />
+      {workspaceModalState.open ? (
+        <WorkspaceModal
+          isOpen={workspaceModalState.open}
+          mode={workspaceModalState.mode}
+          registry={workspacesRegistry}
+          activeWorkspace={activeWorkspace}
+          onClose={() =>
+            setWorkspaceModalState((prev) => ({ ...prev, open: false }))
+          }
+          onSaved={(payload) => {
+            setWorkspacesRegistry(payload.registry);
+            void refreshItems();
+            void data.refresh();
+          }}
+          onToast={showToast}
+        />
+      ) : null}
 
-      <CreateContentModal
-        isOpen={createContentState.open}
-        initialTab={createContentState.tab}
-        activeWorkspace={activeWorkspace}
-        contentRootPath={contentRootPath}
-        availableMonths={availableMonths}
-        onClose={() =>
-          setCreateContentState((prev) => ({ ...prev, open: false }))
-        }
-        onCreatedSingle={() => {
-          void refreshItems();
-        }}
-        onCreatedBatch={() => {
-          void refreshItems();
-        }}
-        onToast={showToast}
-      />
+      {createContentState.open ? (
+        <CreateContentModal
+          isOpen={createContentState.open}
+          initialTab={createContentState.tab}
+          activeWorkspace={activeWorkspace}
+          contentRootPath={contentRootPath}
+          availableMonths={availableMonths}
+          onClose={() =>
+            setCreateContentState((prev) => ({ ...prev, open: false }))
+          }
+          onCreatedSingle={() => {
+            void refreshItems();
+          }}
+          onCreatedBatch={() => {
+            void refreshItems();
+          }}
+          onToast={showToast}
+        />
+      ) : null}
 
-      <QuickGuideModal
-        isOpen={isQuickGuideOpen}
-        activeWorkspace={activeWorkspace}
-        contentRootPath={contentRootPath}
-        onClose={() => setIsQuickGuideOpen(false)}
-        onOpenCreateContent={() =>
-          setCreateContentState({ open: true, tab: 'single' })
-        }
-        onOpenExplorerRoot={() => void handleOpenExplorerRoot()}
-        onOpenWorkspaceSettings={() =>
-          setWorkspaceModalState({ open: true, mode: 'edit' })
-        }
-      />
+      {isQuickGuideOpen ? (
+        <QuickGuideModal
+          isOpen={isQuickGuideOpen}
+          activeWorkspace={activeWorkspace}
+          contentRootPath={contentRootPath}
+          onClose={() => setIsQuickGuideOpen(false)}
+          onOpenCreateContent={() =>
+            setCreateContentState({ open: true, tab: 'single' })
+          }
+          onOpenExplorerRoot={() => void handleOpenExplorerRoot()}
+          onOpenWorkspaceSettings={() =>
+            setWorkspaceModalState({ open: true, mode: 'edit' })
+          }
+        />
+      ) : null}
 
       {toast ? (
         <div

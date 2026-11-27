@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import {
   ContentPlannerItem,
   PlatformKey,
@@ -66,24 +66,24 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
   onResetFilters,
   onRescan,
 }) => {
-  const handleOpenExplorerSafe = async (
-    targetPath: string,
-    selectFile = true
-  ) => {
-    if (onOpenExplorer) {
-      onOpenExplorer(targetPath, selectFile);
-      return;
-    }
-    try {
-      await fetch('/api/system/open-explorer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: targetPath, targetPath, selectFile }),
-      });
-    } catch {
-      // ignore explorer errors
-    }
-  };
+  const handleOpenExplorerSafe = useCallback(
+    async (targetPath: string, selectFile = true) => {
+      if (onOpenExplorer) {
+        onOpenExplorer(targetPath, selectFile);
+        return;
+      }
+      try {
+        await fetch('/api/system/open-explorer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: targetPath, targetPath, selectFile }),
+        });
+      } catch {
+        // ignore explorer errors
+      }
+    },
+    [onOpenExplorer]
+  );
 
   const activeSlots = useMemo<SlotColumnDef[]>(() => {
     const map = new Map<string, SlotColumnDef>();
@@ -281,6 +281,7 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
                 width={44}
                 height={78}
                 loading="lazy"
+                decoding="async"
                 className="h-full w-full aspect-[9/16] object-cover"
               />
             ) : (

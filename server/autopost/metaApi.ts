@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { Readable } from 'node:stream';
 import type { WorkspaceMetadata } from '../../shared/types/workspace.ts';
 import type {
   AutoPostMode,
@@ -7,9 +8,11 @@ import type {
   MetaTokenExchangeResult,
 } from '../../src/types/autopost.ts';
 import type { ContentPlannerItem } from '../../src/types/planner.ts';
+import { getActiveWorkspace } from '../workspaces/registry.ts';
 import {
   detectAutoPostCapabilities,
   getInternalAutoPostConfig,
+  onMetaConfigCleared,
   updateAutoPostSettings,
   type UpdateAutoPostSettingsPatch,
 } from './config.ts';
@@ -46,6 +49,29 @@ export const META_OAUTH_SCOPES = [
 
 const discoveredPageTokens = new Map<string, string>();
 
+function resolveMetaWorkspaceId(workspaceId?: string): string {
+  const trimmed = workspaceId?.trim();
+  if (trimmed) return trimmed;
+  return getActiveWorkspace().id;
+}
+
+function buildPageTokenCacheKey(pageId: string, workspaceId?: string): string {
+  return `${resolveMetaWorkspaceId(workspaceId)}::${pageId.trim()}`;
+}
+
+export function clearCachedPageTokens(workspaceId?: string): void {
+  const prefix = `${resolveMetaWorkspaceId(workspaceId)}::`;
+  for (const key of Array.from(discoveredPageTokens.keys())) {
+    if (key.startsWith(prefix)) {
+      discoveredPageTokens.delete(key);
+    }
+  }
+}
+
+onMetaConfigCleared((workspaceId) => {
+  clearCachedPageTokens(workspaceId);
+});
+
 export interface MetaApiProgressUpdate {
   step: string;
   progressPercent: number;
@@ -56,6 +82,7 @@ export interface MetaApiProgressUpdate {
 export interface MetaApiPublishParams {
   item: ContentPlannerItem;
   mode: AutoPostMode;
+  scheduledAt?: string | null;
   signal: AbortSignal;
   onProgress: (update: MetaApiProgressUpdate) => void;
   workspace?: WorkspaceMetadata;
@@ -95,10 +122,13 @@ interface RawMetaPageNode {
   } | null;
 }
 
-export function getCachedPageToken(pageId: string): string | null {
+export function getCachedPageToken(
+  pageId: string,
+  workspaceId?: string
+): string | null {
   const key = pageId.trim();
   if (!key) return null;
-  return discoveredPageTokens.get(key) ?? null;
+  return discoveredPageTokens.get(buildPageTokenCacheKey(key, workspaceId)) ?? null;
 }
 
 function normalizeGraphVersion(raw?: string | null): string {
@@ -265,9 +295,11 @@ async function fetchPageInstagramBusinessAccount(
 
 export async function discoverMetaAccounts(
   inputToken?: string,
-  graphVersion?: string
+  graphVersion?: string,
+  workspaceId?: string
 ): Promise<DiscoverMetaAccountsResult> {
-  const config = getInternalAutoPostConfig();
+  const config = getInternalAutoPostConfig(workspaceId);
+  const resolvedWorkspaceId = resolveMetaWorkspaceId(workspaceId);
   const token =
     inputToken?.trim() ||
     config.metaApi.accessToken.trim() ||
@@ -313,7 +345,10 @@ export async function discoverMetaAccounts(
                 ? node.access_token.trim()
                 : token;
             if (typeof node.access_token === 'string' && node.access_token.trim()) {
-              discoveredPageTokens.set(pageId, node.access_token.trim());
+              discoveredPageTokens.set(
+                buildPageTokenCacheKey(pageId, resolvedWorkspaceId),
+                node.access_token.trim()
+              );
             }
 
             if (!node.instagram_business_account?.id) {
@@ -369,7 +404,10 @@ export async function discoverMetaAccounts(
 
   if (meRes.ok && mePayload && typeof mePayload.id === 'string' && mePayload.id.trim()) {
     const pageId = mePayload.id.trim();
-    discoveredPageTokens.set(pageId, token);
+    discoveredPageTokens.set(
+      buildPageTokenCacheKey(pageId, resolvedWorkspaceId),
+      token
+    );
 
     let enrichedMeNode: RawMetaPageNode = mePayload;
     if (!mePayload.instagram_business_account?.id) {
@@ -908,10 +946,112 @@ export async function testMetaConnection(): Promise<MetaConnectionTestResult> {
   };
 }
 
+const META_REELS_MIN_SCHEDULE_MS = 10 * 60 * 1000;
+const META_REELS_MAX_SCHEDULE_MS = 29 * 24 * 60 * 60 * 1000;
+
+interface ParsedMetaSchedule {
+  unixSeconds: number;
+  displayLabel: string;
+}
+
+function parseMetaScheduledPublishTime(
+  scheduledAt?: string | null
+): ParsedMetaSchedule | null {
+  if (typeof scheduledAt !== 'string' || !scheduledAt.trim()) {
+    return null;
+  }
+
+  const cleaned = scheduledAt.trim();
+  let date: Date;
+
+  // Prefer wall-clock YYYY-MM-DDTHH:mm in local timezone so UI schedules don't shift by UTC offset
+  const localMatch = cleaned.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?$/
+  );
+  if (localMatch) {
+    const year = Number(localMatch[1]);
+    const month = Number(localMatch[2]);
+    const day = Number(localMatch[3]);
+    const hour = Number(localMatch[4]);
+    const minute = Number(localMatch[5]);
+    const second = localMatch[6] ? Number(localMatch[6]) : 0;
+    date = new Date(year, month - 1, day, hour, minute, second, 0);
+  } else {
+    date = new Date(cleaned);
+  }
+
+  if (!Number.isFinite(date.getTime())) {
+    throw new Error(
+      `Format waktu jadwal Facebook Reels tidak valid: "${cleaned}".`
+    );
+  }
+
+  const diffMs = date.getTime() - Date.now();
+  if (
+    diffMs < META_REELS_MIN_SCHEDULE_MS ||
+    diffMs > META_REELS_MAX_SCHEDULE_MS
+  ) {
+    throw new Error(
+      'Waktu jadwal Facebook Reels via Meta Graph API harus antara 10 menit hingga 29 hari dari sekarang.'
+    );
+  }
+
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+
+  return {
+    unixSeconds: Math.floor(date.getTime() / 1000),
+    displayLabel: `${yyyy}-${mm}-${dd} ${hh}:${min}`,
+  };
+}
+
+async function uploadVideoFileToMetaRupload(params: {
+  uploadUrl: string;
+  videoPath: string;
+  fileSize: number;
+  token: string;
+  signal: AbortSignal;
+}): Promise<Response> {
+  const { uploadUrl, videoPath, fileSize, token, signal } = params;
+  const fileStream = fs.createReadStream(videoPath);
+
+  const onAbort = () => {
+    fileStream.destroy();
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+
+  try {
+    const webStream = Readable.toWeb(fileStream) as unknown as BodyInit;
+    const requestInit: RequestInit & { duplex: 'half' } = {
+      method: 'POST',
+      headers: {
+        Authorization: `OAuth ${token}`,
+        offset: '0',
+        file_size: String(fileSize),
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(fileSize),
+      },
+      body: webStream,
+      duplex: 'half',
+      signal,
+    };
+
+    return await fetch(uploadUrl, requestInit);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    if (!fileStream.destroyed) {
+      fileStream.destroy();
+    }
+  }
+}
+
 export async function publishFacebookReelViaMetaApi(
   params: MetaApiPublishParams
 ): Promise<MetaApiPublishResult> {
-  const { item, mode, signal, onProgress, workspace } = params;
+  const { item, mode, scheduledAt, signal, onProgress, workspace } = params;
   throwIfAborted(signal, 'Upload Facebook Reels via Meta API dibatalkan.');
 
   const resolvedVideo = resolveUploadVideoForItem(item, workspace);
@@ -938,6 +1078,9 @@ export async function publishFacebookReelViaMetaApi(
       'Meta Graph API untuk Facebook Reels belum siap. Aktifkan Meta API, isi Access Token, dan pilih Facebook Page terlebih dahulu.'
     );
   }
+
+  const parsedSchedule =
+    mode === 'publish' ? parseMetaScheduledPublishTime(scheduledAt) : null;
 
   const captionRawText = getItemCaption(item);
   const hookTitle = getItemTitle(item);
@@ -995,34 +1138,31 @@ export async function publishFacebookReelViaMetaApi(
       ? startPayload.upload_url.trim()
       : `${META_RUPLOAD_BASE}/video-upload/${ver}/${encodeURIComponent(videoId)}`;
 
-  // Step 2: Upload binary video to rupload.facebook.com
+  // Step 2: Stream binary video to rupload.facebook.com without buffering full video in RAM
   throwIfAborted(signal, 'Upload Facebook Reels via Meta API dibatalkan.');
   onProgress({
-    step: `Membaca file video ${fileName}`,
+    step: `Menyiapkan stream file video ${fileName}`,
     progressPercent: 25,
-    log: `Membaca file ${fileName} dari disk untuk diunggah ke server Meta.`,
+    log: `Menyiapkan stream file ${fileName} dari disk untuk diunggah ke server Meta.`,
     level: 'info',
   });
 
-  const videoBuffer = await fs.promises.readFile(videoPath);
+  const fileStat = await fs.promises.stat(videoPath);
+  const fileSize = fileStat.size;
   throwIfAborted(signal, 'Upload Facebook Reels via Meta API dibatalkan.');
 
   onProgress({
     step: 'Mengunggah video ke server Meta (rupload)',
     progressPercent: 45,
-    log: `Mengirim biner video (${videoBuffer.length} byte) ke server rupload Meta.`,
+    log: `Mengirim stream biner video (${fileSize} byte) ke server rupload Meta.`,
     level: 'info',
   });
 
-  const uploadRes = await fetch(uploadUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `OAuth ${token}`,
-      offset: '0',
-      file_size: String(videoBuffer.length),
-      'Content-Type': 'application/octet-stream',
-    },
-    body: new Uint8Array(videoBuffer),
+  const uploadRes = await uploadVideoFileToMetaRupload({
+    uploadUrl,
+    videoPath,
+    fileSize,
+    token,
     signal,
   });
 
@@ -1047,17 +1187,22 @@ export async function publishFacebookReelViaMetaApi(
     level: 'info',
   });
 
-  // Step 3: Finish upload & set state (PUBLISHED or DRAFT)
+  // Step 3: Finish upload & set state (PUBLISHED, SCHEDULED, or DRAFT)
   throwIfAborted(signal, 'Upload Facebook Reels via Meta API dibatalkan.');
-  const videoState = mode === 'publish' ? 'PUBLISHED' : 'DRAFT';
+  const isScheduled = Boolean(mode === 'publish' && parsedSchedule);
+  const videoState =
+    mode !== 'publish' ? 'DRAFT' : isScheduled ? 'SCHEDULED' : 'PUBLISHED';
 
   onProgress({
-    step:
-      mode === 'publish'
+    step: isScheduled
+      ? `Menjadwalkan Facebook Reels (${parsedSchedule!.displayLabel})`
+      : mode === 'publish'
         ? 'Menerbitkan Facebook Reels'
         : 'Menyimpan draft Facebook Reels',
     progressPercent: 85,
-    log: `Menyelesaikan publikasi Facebook Reels dengan status ${videoState}.`,
+    log: isScheduled
+      ? `Menyelesaikan penjadwalan Facebook Reels untuk ${parsedSchedule!.displayLabel} (status ${videoState}).`
+      : `Menyelesaikan publikasi Facebook Reels dengan status ${videoState}.`,
     level: 'info',
   });
 
@@ -1069,6 +1214,10 @@ export async function publishFacebookReelViaMetaApi(
     title: hookTitle,
     access_token: token,
   });
+
+  if (isScheduled && parsedSchedule) {
+    finishBody.set('scheduled_publish_time', String(parsedSchedule.unixSeconds));
+  }
 
   const finishRes = await fetch(
     `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(pageId)}/video_reels`,
@@ -1097,13 +1246,15 @@ export async function publishFacebookReelViaMetaApi(
   const publishedUrl = `https://www.facebook.com/reel/${videoId}`;
 
   onProgress({
-    step:
-      mode === 'publish'
+    step: isScheduled
+      ? `Facebook Reels dijadwalkan (${parsedSchedule!.displayLabel})`
+      : mode === 'publish'
         ? 'Facebook Reels berhasil diterbitkan'
         : 'Draft Facebook Reels berhasil disimpan',
     progressPercent: mode === 'publish' ? 100 : 95,
-    log:
-      mode === 'publish'
+    log: isScheduled
+      ? `Facebook Reels berhasil dijadwalkan untuk ${parsedSchedule!.displayLabel} (${publishedUrl}).`
+      : mode === 'publish'
         ? `Facebook Reels telah tayang di ${publishedUrl}.`
         : `Draft Facebook Reels tersimpan (${publishedUrl}).`,
     level: 'success',
@@ -1112,8 +1263,9 @@ export async function publishFacebookReelViaMetaApi(
   return {
     status: mode === 'publish' ? 'completed' : 'awaiting_review',
     publishedUrl,
-    summary:
-      mode === 'publish'
+    summary: isScheduled
+      ? `Berhasil menjadwalkan Facebook Reels (${parsedSchedule!.displayLabel}) via Meta Graph API: ${publishedUrl}`
+      : mode === 'publish'
         ? `Berhasil publish Facebook Reels via Meta Graph API: ${publishedUrl}`
         : `Draft Facebook Reels berhasil diunggah via Meta Graph API (${publishedUrl}). Periksa di Meta Business Suite lalu klik Tandai Sudah Publish.`,
   };
@@ -1299,34 +1451,31 @@ export async function publishInstagramReelViaMetaApi(
     );
   }
 
-  // Step 2: Upload binary video to rupload.facebook.com
+  // Step 2: Stream binary video to rupload.facebook.com without buffering full video in RAM
   throwIfAborted(signal, 'Upload Instagram Reels via Meta API dibatalkan.');
   onProgress({
-    step: `Membaca file video ${fileName}`,
+    step: `Menyiapkan stream file video ${fileName}`,
     progressPercent: 25,
-    log: `Membaca file ${fileName} dari disk untuk diunggah ke container Instagram (${containerId}).`,
+    log: `Menyiapkan stream file ${fileName} dari disk untuk diunggah ke container Instagram (${containerId}).`,
     level: 'info',
   });
 
-  const videoBuffer = await fs.promises.readFile(videoPath);
+  const fileStat = await fs.promises.stat(videoPath);
+  const fileSize = fileStat.size;
   throwIfAborted(signal, 'Upload Instagram Reels via Meta API dibatalkan.');
 
   onProgress({
     step: 'Mengunggah video ke server Meta (rupload)',
     progressPercent: 40,
-    log: `Mengirim biner video (${videoBuffer.length} byte) ke server rupload Instagram.`,
+    log: `Mengirim stream biner video (${fileSize} byte) ke server rupload Instagram.`,
     level: 'info',
   });
 
-  const uploadRes = await fetch(uploadUri, {
-    method: 'POST',
-    headers: {
-      Authorization: `OAuth ${token}`,
-      offset: '0',
-      file_size: String(videoBuffer.length),
-      'Content-Type': 'application/octet-stream',
-    },
-    body: new Uint8Array(videoBuffer),
+  const uploadRes = await uploadVideoFileToMetaRupload({
+    uploadUrl: uploadUri,
+    videoPath,
+    fileSize,
+    token,
     signal,
   });
 

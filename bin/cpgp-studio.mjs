@@ -11,7 +11,6 @@ const APP_DIR = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
 const isWindows = process.platform === 'win32';
 const npmBin = isWindows ? 'npm.cmd' : 'npm';
-const npxBin = isWindows ? 'npx.cmd' : 'npx';
 
 function readVersion() {
   try {
@@ -24,29 +23,35 @@ function readVersion() {
   }
 }
 
-function openBrowser(url) {
-  setTimeout(() => {
+const LISTENING_URL_REGEX = /http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/;
+
+function openBrowser(url, delayMs = 300) {
+  const timer = setTimeout(() => {
     try {
+      let child;
       if (process.platform === 'win32') {
-        const child = spawn('explorer.exe', [url], {
+        child = spawn('explorer.exe', [url], {
           detached: true,
           stdio: 'ignore',
         });
-        child.unref();
       } else if (process.platform === 'darwin') {
-        const child = spawn('open', [url], { detached: true, stdio: 'ignore' });
-        child.unref();
+        child = spawn('open', [url], { detached: true, stdio: 'ignore' });
       } else {
-        const child = spawn('xdg-open', [url], {
+        child = spawn('xdg-open', [url], {
           detached: true,
           stdio: 'ignore',
         });
-        child.unref();
       }
+      child.on('error', () => {
+        // ignore auto-open binary errors
+      });
+      child.unref();
     } catch {
       // ignore auto-open errors
     }
-  }, 1800);
+  }, delayMs);
+  timer.unref();
+  return timer;
 }
 
 function runCommand(cmd, cmdArgs) {
@@ -58,6 +63,70 @@ function runCommand(cmd, cmdArgs) {
       shell: needsShell,
     });
     child.on('exit', (code) => resolve(code ?? 0));
+  });
+}
+
+function runServerCommand(cmd, cmdArgs, fallbackUrl, shouldOpenBrowser) {
+  return new Promise((resolve) => {
+    const needsShell = isWindows && /\.(cmd|bat)$/i.test(cmd);
+    const child = spawn(cmd, cmdArgs, {
+      cwd: APP_DIR,
+      stdio: ['inherit', 'pipe', 'inherit'],
+      shell: needsShell,
+    });
+
+    let browserOpened = false;
+    let fallbackTimer = null;
+    let stdoutBuffer = '';
+
+    const triggerOpenOnce = (targetUrl, delayMs) => {
+      if (!shouldOpenBrowser || browserOpened) return;
+      browserOpened = true;
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+      openBrowser(targetUrl, delayMs);
+    };
+
+    if (shouldOpenBrowser) {
+      fallbackTimer = setTimeout(() => {
+        triggerOpenOnce(fallbackUrl, 0);
+      }, 4000);
+      fallbackTimer.unref();
+    }
+
+    if (child.stdout) {
+      child.stdout.on('data', (chunk) => {
+        process.stdout.write(chunk);
+        if (!shouldOpenBrowser || browserOpened) return;
+        stdoutBuffer += chunk.toString('utf-8');
+        if (stdoutBuffer.length > 4096) {
+          stdoutBuffer = stdoutBuffer.slice(-2048);
+        }
+        const cleanText = stdoutBuffer.replace(/\x1b\[[0-9;]*m/g, '');
+        const match = cleanText.match(LISTENING_URL_REGEX);
+        if (match) {
+          triggerOpenOnce(match[0], 300);
+        }
+      });
+    }
+
+    child.on('error', () => {
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+      resolve(1);
+    });
+
+    child.on('exit', (code) => {
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+      resolve(code ?? 0);
+    });
   });
 }
 
@@ -91,7 +160,13 @@ Penggunaan:
     try {
       const res = await fetch(
         'https://api.github.com/repos/renaldyakb/CPGP-Studio/releases/latest',
-        { headers: { Accept: 'application/vnd.github+json', 'User-Agent': `CPGP-Studio/${version}` } }
+        {
+          headers: {
+            Accept: 'application/vnd.github+json',
+            'User-Agent': `CPGP-Studio/${version}`,
+          },
+          signal: AbortSignal.timeout(8000),
+        }
       );
       if (res.ok) {
         const data = await res.json();
@@ -167,13 +242,6 @@ Penggunaan:
     process.exit(code);
   }
 
-  // Run initial scan before starting server (instant native Node.js in standalone mode!)
-  if (hasStandaloneServer && fs.existsSync(bundledScanPath)) {
-    await runCommand(process.execPath, [bundledScanPath]);
-  } else {
-    await runCommand(npmBin, ['run', 'scan']);
-  }
-
   const port = customPort || 5173;
   const url = `http://localhost:${port}`;
   console.log(
@@ -188,29 +256,36 @@ Penggunaan:
   console.log(`  Web UI : ${url}`);
   console.log('  Tekan Ctrl + C untuk menghentikan server.\n');
 
-  if (!args.includes('--no-browser')) {
-    openBrowser(url);
-  }
+  const shouldOpenBrowser = !args.includes('--no-browser');
 
   if (hasStandaloneServer) {
     process.env.PORT = String(port);
     process.env.CPGP_APP_ROOT = APP_DIR;
-    const code = await runCommand(process.execPath, [bundledServerPath]);
+    const code = await runServerCommand(
+      process.execPath,
+      [bundledServerPath],
+      url,
+      shouldOpenBrowser
+    );
     process.exit(code);
   } else if (hasProdBuild) {
     // Legacy production bundle serving dist/ via tsx
     process.env.PORT = String(port);
-    const code = await runCommand(npmBin, ['run', 'server']);
+    const code = await runServerCommand(
+      npmBin,
+      ['run', 'server'],
+      url,
+      shouldOpenBrowser
+    );
     process.exit(code);
   } else {
     // Run Vite dev middleware server
-    const code = await runCommand(npmBin, [
-      'run',
-      'dev',
-      '--',
-      '--port',
-      String(port),
-    ]);
+    const code = await runServerCommand(
+      npmBin,
+      ['run', 'dev', '--', '--port', String(port)],
+      url,
+      shouldOpenBrowser
+    );
     process.exit(code);
   }
 }

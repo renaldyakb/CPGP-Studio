@@ -157,50 +157,72 @@ export interface SaveYouTubeTokensInput {
 
 function getChromeCandidatePaths(): string[] {
   const candidates = new Set<string>();
-  const envRoots = [
-    process.env.PROGRAMFILES,
-    process.env['PROGRAMFILES(X86)'],
-    process.env.LOCALAPPDATA,
-  ];
 
-  for (const root of envRoots) {
-    if (root) {
-      candidates.add(
-        path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe')
-      );
+  if (process.platform === 'win32') {
+    const envRoots = [
+      process.env.PROGRAMFILES,
+      process.env['PROGRAMFILES(X86)'],
+      process.env.LOCALAPPDATA,
+    ];
+
+    for (const root of envRoots) {
+      if (root) {
+        candidates.add(
+          path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe')
+        );
+      }
     }
-  }
 
-  candidates.add('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
-  candidates.add(
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
-  );
+    candidates.add('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+    candidates.add(
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+    );
+  } else if (process.platform === 'darwin') {
+    candidates.add(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+    );
+  } else {
+    candidates.add('/usr/bin/google-chrome');
+    candidates.add('/usr/bin/google-chrome-stable');
+    candidates.add('/usr/bin/chromium');
+    candidates.add('/usr/bin/chromium-browser');
+  }
 
   return Array.from(candidates);
 }
 
 function getEdgeCandidatePaths(): string[] {
   const candidates = new Set<string>();
-  const envRoots = [
-    process.env.PROGRAMFILES,
-    process.env['PROGRAMFILES(X86)'],
-    process.env.LOCALAPPDATA,
-  ];
 
-  for (const root of envRoots) {
-    if (root) {
-      candidates.add(
-        path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
-      );
+  if (process.platform === 'win32') {
+    const envRoots = [
+      process.env.PROGRAMFILES,
+      process.env['PROGRAMFILES(X86)'],
+      process.env.LOCALAPPDATA,
+    ];
+
+    for (const root of envRoots) {
+      if (root) {
+        candidates.add(
+          path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+        );
+      }
     }
-  }
 
-  candidates.add(
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
-  );
-  candidates.add(
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'
-  );
+    candidates.add(
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
+    );
+    candidates.add(
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'
+    );
+  } else if (process.platform === 'darwin') {
+    candidates.add(
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+    );
+  } else {
+    candidates.add('/usr/bin/microsoft-edge');
+    candidates.add('/usr/bin/microsoft-edge-stable');
+  }
 
   return Array.from(candidates);
 }
@@ -213,6 +235,122 @@ function hasAnyExistingPath(paths: string[]): boolean {
       return false;
     }
   });
+}
+
+let cachedBrowserAvailability: {
+  chromeAvailable: boolean;
+  edgeAvailable: boolean;
+} | null = null;
+
+function getBrowserAvailability(): {
+  chromeAvailable: boolean;
+  edgeAvailable: boolean;
+} {
+  if (!cachedBrowserAvailability) {
+    cachedBrowserAvailability = {
+      chromeAvailable: hasAnyExistingPath(getChromeCandidatePaths()),
+      edgeAvailable: hasAnyExistingPath(getEdgeCandidatePaths()),
+    };
+  }
+  return cachedBrowserAvailability;
+}
+
+const CDP_URL_SCHEME_REGEX = /^(?:https?|wss?):\/\//i;
+
+function isValidCdpUrl(value: string): boolean {
+  if (value === '') return true;
+  if (!CDP_URL_SCHEME_REGEX.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return Boolean(parsed.host);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCdpUrl(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  return isValidCdpUrl(trimmed) ? trimmed : '';
+}
+
+function cloneInternalConfig(
+  config: InternalAutoPostConfig
+): InternalAutoPostConfig {
+  return {
+    ...config,
+    browser: { ...config.browser },
+    youtubeApi: { ...config.youtubeApi },
+    metaApi: { ...config.metaApi },
+  };
+}
+
+function resolveWorkspaceCacheKey(workspaceId?: string): string {
+  const ws = workspaceId
+    ? getWorkspaceById(workspaceId) ?? getActiveWorkspace()
+    : getActiveWorkspace();
+  return ws.id;
+}
+
+const internalConfigCache = new Map<
+  string,
+  {
+    filePath: string;
+    expectedProfileDir: string;
+    config: InternalAutoPostConfig;
+    mtimeMs: number;
+    size: number;
+  }
+>();
+
+function readFileStatSignature(filePath: string): {
+  mtimeMs: number;
+  size: number;
+} {
+  try {
+    const stat = fs.statSync(filePath);
+    return { mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch {
+    return { mtimeMs: 0, size: 0 };
+  }
+}
+
+const CAPABILITIES_CACHE_TTL_MS = 15_000;
+const capabilitiesCache = new Map<
+  string,
+  { capabilities: AutoPostCapabilities; expiresAt: number }
+>();
+
+const metaConfigClearListeners = new Set<(workspaceId: string) => void>();
+
+export function onMetaConfigCleared(
+  listener: (workspaceId: string) => void
+): () => void {
+  metaConfigClearListeners.add(listener);
+  return () => {
+    metaConfigClearListeners.delete(listener);
+  };
+}
+
+export function invalidateAutoPostCapabilitiesCache(
+  workspaceId?: string
+): void {
+  if (workspaceId) {
+    capabilitiesCache.delete(workspaceId);
+    return;
+  }
+  capabilitiesCache.clear();
+}
+
+export function evictAutoPostConfigCache(workspaceId?: string): void {
+  if (workspaceId) {
+    internalConfigCache.delete(workspaceId);
+    invalidateAutoPostCapabilitiesCache(workspaceId);
+    return;
+  }
+  internalConfigCache.clear();
+  invalidateAutoPostCapabilitiesCache();
 }
 
 function normalizeMetaTokenType(
@@ -233,8 +371,7 @@ function normalizeMetaTokenType(
 function createDefaultInternalConfig(
   workspaceId?: string
 ): InternalAutoPostConfig {
-  const chromeAvailable = hasAnyExistingPath(getChromeCandidatePaths());
-  const edgeAvailable = hasAnyExistingPath(getEdgeCandidatePaths());
+  const { chromeAvailable, edgeAvailable } = getBrowserAvailability();
   const defaultChannel: 'chrome' | 'msedge' = chromeAvailable
     ? 'chrome'
     : edgeAvailable
@@ -249,12 +386,13 @@ function createDefaultInternalConfig(
       channel: defaultChannel,
       profileDir: getExpectedBrowserProfileDir(workspaceId),
       keepTabOpenOnReview: true,
+      cdpUrl: '',
     },
     youtubeApi: {
       enabled: false,
       clientId: '',
       clientSecret: '',
-      redirectUri: 'http://localhost:5173/api/autopost/youtube/callback',
+      redirectUri: '',
       refreshToken: null,
       accessToken: null,
       expiryDate: null,
@@ -265,7 +403,7 @@ function createDefaultInternalConfig(
       enabled: false,
       appId: '',
       appSecret: '',
-      redirectUri: 'http://localhost:5173/api/autopost/meta/callback',
+      redirectUri: '',
       graphApiVersion: 'v25.0',
       accessToken: '',
       pageAccessToken: '',
@@ -318,6 +456,7 @@ function normalizeInternalConfig(
     typeof rawBrowser.keepTabOpenOnReview === 'boolean'
       ? rawBrowser.keepTabOpenOnReview
       : defaults.browser.keepTabOpenOnReview;
+  const cdpUrl = normalizeCdpUrl(rawBrowser.cdpUrl);
 
   const rawYt: Partial<InternalAutoPostYouTubeApiConfig> =
     raw.youtubeApi && typeof raw.youtubeApi === 'object' ? raw.youtubeApi : {};
@@ -333,6 +472,7 @@ function normalizeInternalConfig(
       channel,
       profileDir,
       keepTabOpenOnReview,
+      cdpUrl,
     },
     youtubeApi: {
       enabled: Boolean(rawYt.enabled),
@@ -340,7 +480,7 @@ function normalizeInternalConfig(
       clientSecret:
         typeof rawYt.clientSecret === 'string' ? rawYt.clientSecret.trim() : '',
       redirectUri:
-        typeof rawYt.redirectUri === 'string' && rawYt.redirectUri.trim()
+        typeof rawYt.redirectUri === 'string'
           ? rawYt.redirectUri.trim()
           : defaults.youtubeApi.redirectUri,
       refreshToken:
@@ -370,7 +510,7 @@ function normalizeInternalConfig(
       appSecret:
         typeof rawMeta.appSecret === 'string' ? rawMeta.appSecret.trim() : '',
       redirectUri:
-        typeof rawMeta.redirectUri === 'string' && rawMeta.redirectUri.trim()
+        typeof rawMeta.redirectUri === 'string'
           ? rawMeta.redirectUri.trim()
           : defaults.metaApi.redirectUri,
       graphApiVersion:
@@ -427,7 +567,9 @@ function saveInternalConfig(
   config: InternalAutoPostConfig,
   workspaceId?: string
 ): InternalAutoPostConfig {
+  const wsKey = resolveWorkspaceCacheKey(workspaceId);
   const filePath = getActiveAutoPostFilePath(workspaceId);
+  const expectedProfileDir = getExpectedBrowserProfileDir(workspaceId);
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -437,30 +579,62 @@ function saveInternalConfig(
     JSON.stringify(config, null, 2) + '\n',
     'utf-8'
   );
+  const sig = readFileStatSignature(filePath);
+  internalConfigCache.set(wsKey, {
+    filePath,
+    expectedProfileDir,
+    config: cloneInternalConfig(config),
+    mtimeMs: sig.mtimeMs,
+    size: sig.size,
+  });
+  invalidateAutoPostCapabilitiesCache(wsKey);
   return config;
 }
 
 export function getInternalAutoPostConfig(
   workspaceId?: string
 ): InternalAutoPostConfig {
+  const wsKey = resolveWorkspaceCacheKey(workspaceId);
   const filePath = getActiveAutoPostFilePath(workspaceId);
-  if (!fs.existsSync(filePath)) {
-    return saveInternalConfig(
-      createDefaultInternalConfig(workspaceId),
-      workspaceId
-    );
+  const expectedProfileDir = getExpectedBrowserProfileDir(workspaceId);
+  const sig = readFileStatSignature(filePath);
+
+  const cached = internalConfigCache.get(wsKey);
+  if (
+    cached &&
+    cached.filePath === filePath &&
+    cached.expectedProfileDir === expectedProfileDir &&
+    cached.mtimeMs === sig.mtimeMs &&
+    cached.size === sig.size
+  ) {
+    return cloneInternalConfig(cached.config);
   }
 
-  try {
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<InternalAutoPostConfig>;
-    return normalizeInternalConfig(parsed, workspaceId);
-  } catch {
-    return saveInternalConfig(
-      createDefaultInternalConfig(workspaceId),
-      workspaceId
-    );
+  let resolved: InternalAutoPostConfig;
+  if (sig.mtimeMs === 0 && sig.size === 0 && !fs.existsSync(filePath)) {
+    resolved = createDefaultInternalConfig(workspaceId);
+  } else {
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(raw) as Partial<InternalAutoPostConfig>;
+      resolved = normalizeInternalConfig(parsed, workspaceId);
+    } catch {
+      resolved = createDefaultInternalConfig(workspaceId);
+    }
   }
+
+  if (cached) {
+    invalidateAutoPostCapabilitiesCache(wsKey);
+  }
+
+  internalConfigCache.set(wsKey, {
+    filePath,
+    expectedProfileDir,
+    config: cloneInternalConfig(resolved),
+    mtimeMs: sig.mtimeMs,
+    size: sig.size,
+  });
+  return cloneInternalConfig(resolved);
 }
 
 export function toPublicAutoPostSettings(
@@ -474,6 +648,7 @@ export function toPublicAutoPostSettings(
       channel: config.browser.channel,
       profileDir: config.browser.profileDir,
       keepTabOpenOnReview: config.browser.keepTabOpenOnReview,
+      cdpUrl: config.browser.cdpUrl ?? '',
     },
     youtubeApi: {
       enabled: config.youtubeApi.enabled,
@@ -530,6 +705,19 @@ export function updateAutoPostSettings(
       : current.aiContentDisclosure;
 
   const expectedProfileDir = getExpectedBrowserProfileDir();
+  let nextCdpUrl = current.browser.cdpUrl ?? '';
+  if (typeof patch.browser?.cdpUrl === 'string') {
+    const trimmedCdp = patch.browser.cdpUrl.trim();
+    if (trimmedCdp && !isValidCdpUrl(trimmedCdp)) {
+      const err = new Error(
+        'URL CDP browser harus kosong atau diawali dengan http://, https://, ws://, atau wss://.'
+      );
+      err.name = 'ValidationError';
+      throw err;
+    }
+    nextCdpUrl = trimmedCdp;
+  }
+
   const nextBrowser: AutoPostBrowserConfig = {
     channel:
       patch.browser?.channel === 'chrome' || patch.browser?.channel === 'msedge'
@@ -547,6 +735,7 @@ export function updateAutoPostSettings(
       typeof patch.browser?.keepTabOpenOnReview === 'boolean'
         ? patch.browser.keepTabOpenOnReview
         : current.browser.keepTabOpenOnReview,
+    cdpUrl: nextCdpUrl,
   };
 
   let nextClientSecret = current.youtubeApi.clientSecret;
@@ -571,8 +760,7 @@ export function updateAutoPostSettings(
         : current.youtubeApi.clientId,
     clientSecret: nextClientSecret,
     redirectUri:
-      typeof patch.youtubeApi?.redirectUri === 'string' &&
-      patch.youtubeApi.redirectUri.trim()
+      typeof patch.youtubeApi?.redirectUri === 'string'
         ? patch.youtubeApi.redirectUri.trim()
         : current.youtubeApi.redirectUri,
   };
@@ -659,8 +847,7 @@ export function updateAutoPostSettings(
         : current.metaApi.appId,
     appSecret: nextMetaAppSecret,
     redirectUri:
-      typeof patch.metaApi?.redirectUri === 'string' &&
-      patch.metaApi.redirectUri.trim()
+      typeof patch.metaApi?.redirectUri === 'string'
         ? patch.metaApi.redirectUri.trim()
         : current.metaApi.redirectUri,
     graphApiVersion:
@@ -765,6 +952,7 @@ export function clearYouTubeTokens(): AutoPostSettings {
 }
 
 export function clearMetaConfig(): AutoPostSettings {
+  const wsKey = resolveWorkspaceCacheKey();
   const current = getInternalAutoPostConfig();
   const saved = saveInternalConfig({
     ...current,
@@ -782,15 +970,28 @@ export function clearMetaConfig(): AutoPostSettings {
       connectedAt: null,
     },
   });
+  for (const listener of metaConfigClearListeners) {
+    try {
+      listener(wsKey);
+    } catch {
+      // ignore listener errors
+    }
+  }
   return toPublicAutoPostSettings(saved);
 }
 
 export function detectAutoPostCapabilities(
   workspaceId?: string
 ): AutoPostCapabilities {
+  const wsKey = resolveWorkspaceCacheKey(workspaceId);
+  const now = Date.now();
+  const cached = capabilitiesCache.get(wsKey);
+  if (cached && cached.expiresAt > now) {
+    return { ...cached.capabilities };
+  }
+
   const config = getInternalAutoPostConfig(workspaceId);
-  const chromeAvailable = hasAnyExistingPath(getChromeCandidatePaths());
-  const edgeAvailable = hasAnyExistingPath(getEdgeCandidatePaths());
+  const { chromeAvailable, edgeAvailable } = getBrowserAvailability();
 
   let preferredChannel: 'chrome' | 'msedge' | null = null;
   if (config.browser.channel === 'chrome' && chromeAvailable) {
@@ -834,7 +1035,7 @@ export function detectAutoPostCapabilities(
       config.metaApi.igUserId.trim()
   );
 
-  return {
+  const capabilities: AutoPostCapabilities = {
     chromeAvailable,
     edgeAvailable,
     preferredChannel,
@@ -843,4 +1044,11 @@ export function detectAutoPostCapabilities(
     metaFbApiReady,
     metaIgApiReady,
   };
+
+  capabilitiesCache.set(wsKey, {
+    capabilities,
+    expiresAt: now + CAPABILITIES_CACHE_TTL_MS,
+  });
+
+  return { ...capabilities };
 }

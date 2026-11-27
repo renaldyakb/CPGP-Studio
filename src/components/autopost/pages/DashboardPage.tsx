@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from '@tanstack/react-router';
 import {
   CalendarClock,
   Check,
@@ -9,8 +10,10 @@ import {
   LoaderCircle,
   Play,
   Send,
+  X,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import {
   Table,
   TableBody,
@@ -89,7 +92,14 @@ function deriveDefaultScheduleForItem(item: ContentPlannerItem | null): {
   return { date, time };
 }
 
+function isValidPlatformKey(
+  value: string | null | undefined
+): value is PlatformKey {
+  return Boolean(value && PLATFORM_ORDER.includes(value as PlatformKey));
+}
+
 export function DashboardPage({ ctx }: AutoPostPageProps) {
+  const navigate = useNavigate();
   const stats = useDerivedStats(ctx.items, ctx.data.jobs);
 
   const queue = [...ctx.items]
@@ -102,9 +112,15 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
 
   const selectedItem = queue[0] ?? null;
 
-  const [selectedId, setSelectedId] = useState<string>(
-    () => pickNextContent(ctx.items)?.id ?? ''
-  );
+  const [selectedId, setSelectedId] = useState<string>(() => {
+    if (
+      ctx.initialItemId &&
+      ctx.items.some((item) => item.id === ctx.initialItemId)
+    ) {
+      return ctx.initialItemId;
+    }
+    return pickNextContent(ctx.items)?.id ?? '';
+  });
   const [mode, setMode] = useState<AutoPostMode>(
     () => ctx.data.settings.defaultMode
   );
@@ -187,6 +203,71 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
     );
   };
 
+  const appliedInitialItemRef = useRef<string | null>(null);
+  const appliedInitialPlatformRef = useRef<string | null>(null);
+  const [selectedPlatforms, setSelectedPlatforms] = useState<PlatformKey[]>(
+    () => (isValidPlatformKey(ctx.initialPlatform) ? [ctx.initialPlatform] : [])
+  );
+
+  useEffect(() => {
+    if (!ctx.initialPlatform) {
+      appliedInitialPlatformRef.current = null;
+      return;
+    }
+    if (
+      appliedInitialPlatformRef.current !== ctx.initialPlatform &&
+      isValidPlatformKey(ctx.initialPlatform)
+    ) {
+      appliedInitialPlatformRef.current = ctx.initialPlatform;
+      setSelectedPlatforms([ctx.initialPlatform]);
+    }
+  }, [ctx.initialPlatform]);
+
+  const handleManualSelectItem = (nextId: string) => {
+    setSelectedId(nextId);
+    if (ctx.initialItemId && nextId !== ctx.initialItemId) {
+      void navigate({
+        to: '/auto-post',
+        search: (prev) => ({
+          ...prev,
+          item: undefined,
+        }),
+        replace: true,
+      });
+    }
+  };
+
+  const handleClearFocusedPlatform = () => {
+    setSelectedPlatforms([]);
+    if (ctx.initialPlatform) {
+      void navigate({
+        to: '/auto-post',
+        search: (prev) => ({
+          ...prev,
+          platform: undefined,
+        }),
+        replace: true,
+      });
+    }
+  };
+
+  const focusedPlatform =
+    selectedPlatforms.length === 1 ? selectedPlatforms[0] : null;
+
+  useEffect(() => {
+    if (!ctx.initialItemId) {
+      appliedInitialItemRef.current = null;
+      return;
+    }
+    if (
+      appliedInitialItemRef.current !== ctx.initialItemId &&
+      ctx.items.some((item) => item.id === ctx.initialItemId)
+    ) {
+      appliedInitialItemRef.current = ctx.initialItemId;
+      setSelectedId(ctx.initialItemId);
+    }
+  }, [ctx.initialItemId, ctx.items]);
+
   useEffect(() => {
     if (
       selectedId &&
@@ -194,8 +275,15 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
     ) {
       return;
     }
+    if (
+      ctx.initialItemId &&
+      ctx.items.some((item) => item.id === ctx.initialItemId)
+    ) {
+      setSelectedId(ctx.initialItemId);
+      return;
+    }
     setSelectedId(pickNextContent(ctx.items)?.id ?? '');
-  }, [ctx.items, selectedId]);
+  }, [ctx.items, ctx.initialItemId, selectedId]);
 
   const activeItem =
     ctx.items.find((item) => item.id === selectedId) ?? selectedItem;
@@ -254,6 +342,64 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
         />
       </div>
 
+      {focusedPlatform && activeItem ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card px-3.5 py-2.5">
+          <div className="flex min-w-0 items-center gap-2 text-xs">
+            <PlatformIcon platform={focusedPlatform} size={15} />
+            <span className="font-medium text-foreground">
+              Fokus platform: {PLATFORM_META[focusedPlatform].label}
+            </span>
+            <Badge variant="outline" size="xs" className="font-mono">
+              {activeItem.folderCode}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              size="xs"
+              variant="editorial"
+              disabled={
+                !activeItem.autoMetadata.readiness.hasWmFinal ||
+                ctx.data.busyKey === `trigger:${activeItem.id}` ||
+                (scheduleEnabled && !activeScheduledAt)
+              }
+              onClick={() =>
+                requestTriggerPost(
+                  activeItem,
+                  [focusedPlatform],
+                  mode,
+                  activeScheduledAt
+                )
+              }
+            >
+              {scheduleEnabled ? (
+                <CalendarClock className="size-3" aria-hidden="true" />
+              ) : mode === 'publish' ? (
+                <Send className="size-3" aria-hidden="true" />
+              ) : (
+                <Play className="size-3" aria-hidden="true" />
+              )}
+              {scheduleEnabled
+                ? mode === 'publish'
+                  ? `Jadwalkan ${PLATFORM_META[focusedPlatform].label}`
+                  : `Tinjau Jadwal ${PLATFORM_META[focusedPlatform].label}`
+                : mode === 'publish'
+                  ? `Publish ${PLATFORM_META[focusedPlatform].label}`
+                  : `Tinjau ${PLATFORM_META[focusedPlatform].label}`}
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={handleClearFocusedPlatform}
+            >
+              <X className="size-3" aria-hidden="true" />
+              Semua Platform
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
         <div className="xl:col-span-7">
           <NextContentCard
@@ -272,7 +418,7 @@ export function DashboardPage({ ctx }: AutoPostPageProps) {
             onScheduleTimeChange={setScheduleTime}
             onResetScheduleToSlot={handleResetScheduleToSlot}
             onTriggerRequest={requestTriggerPost}
-            onSelectChange={setSelectedId}
+            onSelectChange={handleManualSelectItem}
             onEditCaption={ctx.onEditCaption}
             onOpenWatermark={ctx.onOpenWatermark}
             onOpenContentDetail={ctx.onOpenContentDetail}

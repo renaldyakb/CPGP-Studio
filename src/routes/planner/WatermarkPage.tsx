@@ -163,6 +163,7 @@ export function WatermarkPage() {
   const [presetStore, setPresetStore] = useState<WatermarkPresetStore | null>(
     null
   );
+  const [presetLoadError, setPresetLoadError] = useState<boolean>(false);
   const [selectedPresetId, setSelectedPresetId] = useState<string>('');
   const [encoder, setEncoder] = useState<WatermarkEncoderMode>('auto');
   const [speedMode, setSpeedMode] = useState<WatermarkRenderSpeedMode>('fast');
@@ -200,6 +201,8 @@ export function WatermarkPage() {
 
   // Track already-handled terminal jobs so callbacks fire once per completion
   const handledTerminalJobsRef = useRef<Set<string>>(new Set());
+  const prevWorkspaceIdRef = useRef<string | undefined>(activeWorkspace?.id);
+  const lastTimeUpdateRef = useRef<number>(0);
   const refreshRef = useRef(refresh);
   const showToastRef = useRef(showToast);
 
@@ -230,16 +233,14 @@ export function WatermarkPage() {
     });
   }, [initialItemId, items]);
 
-  // Load fonts, capabilities, presets, and active jobs on mount
+  // Load system fonts and FFmpeg capabilities once on mount
   useEffect(() => {
     let cancelled = false;
 
-    const loadStudioData = async () => {
-      const [fontsRes, capRes, presetsRes, jobsRes] = await Promise.allSettled([
+    const loadStaticCapabilities = async () => {
+      const [fontsRes, capRes] = await Promise.allSettled([
         watermarkApi.getFonts(),
         watermarkApi.getCapabilities(),
-        watermarkApi.getPresets(),
-        watermarkApi.getJobs(),
       ]);
 
       if (cancelled) return;
@@ -250,13 +251,48 @@ export function WatermarkPage() {
 
       if (capRes.status === 'fulfilled' && capRes.value) {
         setCapabilities(capRes.value);
-        setCapabilitiesLoaded(true);
-      } else {
-        setCapabilitiesLoaded(true);
       }
+      setCapabilitiesLoaded(true);
+    };
+
+    void loadStaticCapabilities();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Reload workspace-scoped presets and render jobs whenever active workspace changes
+  useEffect(() => {
+    let cancelled = false;
+    const prevWorkspaceId = prevWorkspaceIdRef.current;
+    const nextWorkspaceId = activeWorkspace?.id;
+    const isWorkspaceSwitch = Boolean(
+      prevWorkspaceId && nextWorkspaceId && prevWorkspaceId !== nextWorkspaceId
+    );
+
+    if (isWorkspaceSwitch) {
+      handledTerminalJobsRef.current.clear();
+      setSelectedItemId('');
+    }
+    setIsCreatingPreset(false);
+    setNewPresetName('');
+    setPresetStore(null);
+    setPresetLoadError(false);
+    setSelectedPresetId('');
+    setJobs([]);
+
+    const loadWorkspaceStudioData = async () => {
+      const [presetsRes, jobsRes] = await Promise.allSettled([
+        watermarkApi.getPresets(),
+        watermarkApi.getJobs(),
+      ]);
+
+      if (cancelled) return;
 
       if (presetsRes.status === 'fulfilled' && presetsRes.value) {
         const store = presetsRes.value;
+        setPresetLoadError(false);
         setPresetStore(store);
         const defaultPreset =
           store.presets.find((p) => p.id === store.defaultPresetId) ??
@@ -266,10 +302,14 @@ export function WatermarkPage() {
         if (defaultPreset) {
           setSelectedPresetId(defaultPreset.id);
           setConfig({ ...DEFAULT_WATERMARK_CONFIG, ...defaultPreset.config });
+        } else {
+          setConfig({ ...DEFAULT_WATERMARK_CONFIG });
         }
-        if (store.defaultEncoder) {
-          setEncoder(store.defaultEncoder);
-        }
+        setEncoder(store.defaultEncoder || 'auto');
+      } else {
+        setPresetLoadError(true);
+        setConfig({ ...DEFAULT_WATERMARK_CONFIG });
+        setEncoder('auto');
       }
 
       if (jobsRes.status === 'fulfilled' && Array.isArray(jobsRes.value)) {
@@ -287,12 +327,13 @@ export function WatermarkPage() {
       }
     };
 
-    void loadStudioData();
+    void loadWorkspaceStudioData();
+    prevWorkspaceIdRef.current = nextWorkspaceId;
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeWorkspace?.id]);
 
   // Subscribe to SSE render progress stream
   useEffect(() => {
@@ -364,6 +405,7 @@ export function WatermarkPage() {
 
   useEffect(() => {
     setIsPlaying(false);
+    lastTimeUpdateRef.current = 0;
     setCurrentTime(0);
     setDuration(0);
   }, [activeRawVideoUrl]);
@@ -494,6 +536,7 @@ export function WatermarkPage() {
   const handleSeek = (val: number | readonly number[]) => {
     const nextTime = getSliderScalar(val);
     const vid = videoRef.current;
+    lastTimeUpdateRef.current = nextTime;
     setCurrentTime(nextTime);
     if (vid && Number.isFinite(nextTime)) {
       vid.currentTime = nextTime;
@@ -522,6 +565,7 @@ export function WatermarkPage() {
         config,
         isDefault: false,
       });
+      setPresetLoadError(false);
       setPresetStore(data.store);
       setSelectedPresetId(data.preset.id);
       setNewPresetName('');
@@ -733,10 +777,11 @@ export function WatermarkPage() {
       : 'File wm_final.mp4';
 
   const presetLabel = useMemo(() => {
+    if (presetLoadError) return 'Gagal memuat preset';
     if (!selectedPreset) return 'Memuat preset...';
     const suffix = selectedPreset.isDefault ? ' (Default)' : '';
     return `${selectedPreset.name}${suffix}`;
-  }, [selectedPreset]);
+  }, [presetLoadError, selectedPreset]);
 
   const fontLabel = useMemo(() => {
     if (!activeFont) return 'Arial Black (Bawaan)';
@@ -840,6 +885,7 @@ export function WatermarkPage() {
                     poster={coverUrl}
                     width={360}
                     height={640}
+                    preload="metadata"
                     playsInline
                     loop
                     muted={isMuted}
@@ -848,10 +894,30 @@ export function WatermarkPage() {
                       setDuration(Number.isFinite(d) ? d : 0);
                     }}
                     onTimeUpdate={(e) => {
-                      setCurrentTime(e.currentTarget.currentTime || 0);
+                      const nextTime = e.currentTarget.currentTime || 0;
+                      if (Math.abs(nextTime - lastTimeUpdateRef.current) >= 0.5) {
+                        lastTimeUpdateRef.current = nextTime;
+                        setCurrentTime(nextTime);
+                      }
+                    }}
+                    onSeeked={(e) => {
+                      const nextTime = e.currentTarget.currentTime || 0;
+                      lastTimeUpdateRef.current = nextTime;
+                      setCurrentTime(nextTime);
                     }}
                     onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
+                    onPause={(e) => {
+                      const nextTime = e.currentTarget.currentTime || 0;
+                      lastTimeUpdateRef.current = nextTime;
+                      setCurrentTime(nextTime);
+                      setIsPlaying(false);
+                    }}
+                    onEnded={(e) => {
+                      const nextTime = e.currentTarget.currentTime || 0;
+                      lastTimeUpdateRef.current = nextTime;
+                      setCurrentTime(nextTime);
+                      setIsPlaying(false);
+                    }}
                     className="pointer-events-none h-full w-full aspect-[9/16] object-contain"
                   />
                 ) : coverUrl ? (
@@ -860,6 +926,7 @@ export function WatermarkPage() {
                     alt={`Cover ${activeItem?.folderCode ?? ''}`}
                     width={360}
                     height={640}
+                    decoding="async"
                     className="pointer-events-none h-full w-full aspect-[9/16] object-contain"
                   />
                 ) : (

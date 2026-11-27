@@ -411,6 +411,7 @@ export const KanbanView: React.FC<KanbanViewProps> = ({
                 width={44}
                 height={78}
                 loading="lazy"
+                decoding="async"
                 className="h-full w-full aspect-[9/16] object-cover"
               />
             ) : (

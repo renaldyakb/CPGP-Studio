@@ -42,7 +42,7 @@ const DEFAULT_COVER_REGEX =
   /^cover-([a-z0-9_-]+?)(?:-(\d+x\d+))?\.(jpg|jpeg|png|webp)$/i;
 const DEFAULT_WM_VIDEO_REGEX =
   /^wm_final(?:\s*\(\d+\))?\.(mp4|mov|mkv|webm)$/i;
-const ANY_VIDEO_REGEX = /^(?!wm_final).+\.(mp4|mov|mkv|webm)$/i;
+const ANY_VIDEO_REGEX = /^(?!wm_final|\.)(?!.*\.tmp\.).+\.(mp4|mov|mkv|webm)$/i;
 const ANY_IMAGE_REGEX = /^.+\.(jpg|jpeg|png|webp)$/i;
 
 const MONTH_MAP: Record<string, { number: number; display: string }> = {
@@ -109,12 +109,19 @@ export function toPosixPath(p: string): string {
   return p.replace(/\\/g, '/');
 }
 
-export function buildMediaUrl(relativePath: string): string {
+export function buildMediaUrl(
+  relativePath: string,
+  mtimeMs?: number | null
+): string {
   const normalized = toPosixPath(relativePath).replace(/^\/+/, '');
   const encodedSegments = normalized
     .split('/')
     .map((seg) => encodeURIComponent(seg));
-  return `/media/${encodedSegments.join('/')}`;
+  const baseUrl = `/media/${encodedSegments.join('/')}`;
+  if (typeof mtimeMs === 'number' && Number.isFinite(mtimeMs) && mtimeMs > 0) {
+    return `${baseUrl}?v=${Math.floor(mtimeMs)}`;
+  }
+  return baseUrl;
 }
 
 export function createEmptyAssetInfo(
@@ -501,6 +508,14 @@ export function scanSingleContentFolder(
       continue;
     }
 
+    if (
+      fileName.startsWith('.') ||
+      fileName.toLowerCase().endsWith('.tmp') ||
+      /\.tmp\.[^.]+$/i.test(fileName)
+    ) {
+      continue;
+    }
+
     const fileAbsPath = path.join(folderAbsPath, fileName);
     const fileRelPath = toPosixPath(path.relative(contentRootPath, fileAbsPath));
 
@@ -531,7 +546,7 @@ export function scanSingleContentFolder(
           fileName,
           relativePath: fileRelPath,
           absolutePath: fileAbsPath,
-          mediaUrl: buildMediaUrl(fileRelPath),
+          mediaUrl: buildMediaUrl(fileRelPath, stat.mtimeMs),
           sizeBytes: stat.size,
           sizeFormatted: formatBytes(stat.size),
           mtimeMs: stat.mtimeMs,
@@ -553,7 +568,7 @@ export function scanSingleContentFolder(
           fileName,
           relativePath: fileRelPath,
           absolutePath: fileAbsPath,
-          mediaUrl: buildMediaUrl(fileRelPath),
+          mediaUrl: buildMediaUrl(fileRelPath, stat.mtimeMs),
           sizeBytes: stat.size,
           sizeFormatted: formatBytes(stat.size),
           mtimeMs: stat.mtimeMs,
@@ -575,7 +590,7 @@ export function scanSingleContentFolder(
           fileName,
           relativePath: fileRelPath,
           absolutePath: fileAbsPath,
-          mediaUrl: buildMediaUrl(fileRelPath),
+          mediaUrl: buildMediaUrl(fileRelPath, stat.mtimeMs),
           sizeBytes: stat.size,
           sizeFormatted: formatBytes(stat.size),
           mtimeMs: stat.mtimeMs,
@@ -597,7 +612,7 @@ export function scanSingleContentFolder(
           fileName,
           relativePath: fileRelPath,
           absolutePath: fileAbsPath,
-          mediaUrl: buildMediaUrl(fileRelPath),
+          mediaUrl: buildMediaUrl(fileRelPath, stat.mtimeMs),
           sizeBytes: stat.size,
           sizeFormatted: formatBytes(stat.size),
           mtimeMs: stat.mtimeMs,
@@ -617,7 +632,7 @@ export function scanSingleContentFolder(
         fileName,
         relativePath: fileRelPath,
         absolutePath: fileAbsPath,
-        mediaUrl: buildMediaUrl(fileRelPath),
+        mediaUrl: buildMediaUrl(fileRelPath, stat.mtimeMs),
         sizeBytes: stat.size,
         sizeFormatted: formatBytes(stat.size),
         mtimeMs: stat.mtimeMs,
@@ -662,7 +677,7 @@ export function scanSingleContentFolder(
       fileName: primary.fileName,
       relativePath: primary.relativePath,
       absolutePath: primary.absolutePath,
-      mediaUrl: buildMediaUrl(primary.relativePath),
+      mediaUrl: buildMediaUrl(primary.relativePath, primary.mtimeMs),
       sizeBytes: primary.sizeBytes,
       sizeFormatted: formatBytes(primary.sizeBytes),
       mtimeMs: primary.mtimeMs,
@@ -792,33 +807,56 @@ const IGNORED_SCAN_DIRS = new Set([
   'release-artifacts',
 ]);
 
+export interface FindContentFoldersOptions {
+  maxDepth?: number;
+  maxDirsVisited?: number;
+}
+
 export function findContentFolderPaths(
   dirPath: string,
-  results: string[] = []
+  results: string[] = [],
+  options?: FindContentFoldersOptions
 ): string[] {
-  if (!fs.existsSync(dirPath)) return results;
+  const maxDepth =
+    typeof options?.maxDepth === 'number' && options.maxDepth >= 0
+      ? Math.floor(options.maxDepth)
+      : 3;
+  const maxDirsVisited =
+    typeof options?.maxDirsVisited === 'number' && options.maxDirsVisited > 0
+      ? Math.floor(options.maxDirsVisited)
+      : 5000;
 
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  } catch {
-    return results;
-  }
+  const counter = { visited: 0 };
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const lowerName = entry.name.toLowerCase();
-    if (IGNORED_SCAN_DIRS.has(lowerName) || entry.name.startsWith('.')) {
-      continue;
+  const walk = (currentDir: string, depth: number): void => {
+    if (counter.visited >= maxDirsVisited) return;
+    if (!fs.existsSync(currentDir)) return;
+
+    counter.visited += 1;
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
     }
-    const fullPath = path.join(dirPath, entry.name);
-    if (CONTENT_FOLDER_REGEX.test(entry.name)) {
-      results.push(fullPath);
-    } else {
-      findContentFolderPaths(fullPath, results);
-    }
-  }
 
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const lowerName = entry.name.toLowerCase();
+      if (IGNORED_SCAN_DIRS.has(lowerName) || entry.name.startsWith('.')) {
+        continue;
+      }
+      const fullPath = path.join(currentDir, entry.name);
+      if (CONTENT_FOLDER_REGEX.test(entry.name)) {
+        results.push(fullPath);
+      } else if (depth < maxDepth && counter.visited < maxDirsVisited) {
+        walk(fullPath, depth + 1);
+      }
+    }
+  };
+
+  walk(dirPath, 0);
   return results;
 }
 

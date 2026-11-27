@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Outlet, useLocation, useNavigate, useSearch } from '@tanstack/react-router';
+import { openManagedEventSource } from '@/lib/managedEventSource';
 import {
   AlertCircle,
   CheckCircle2,
@@ -157,6 +165,17 @@ export function App() {
     'publish' | 'caption' | 'assets'
   >('publish');
 
+  const databaseRef = useRef<PlannerDatabase | null>(database);
+  databaseRef.current = database;
+
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+
+  const needsFirstRunOnboarding =
+    workspacesLoaded &&
+    workspacesRegistry !== null &&
+    (!workspacesRegistry.onboardingCompleted ||
+      Object.keys(workspacesRegistry.workspaces).length === 0);
+
   const [toast, setToast] = useState<{
     message: string;
     type: PlannerToastKind;
@@ -224,7 +243,9 @@ export function App() {
   }, [fetchWorkspaces, fetchPlanner]);
 
   useEffect(() => {
-    let source: EventSource | null = null;
+    if (!workspacesLoaded || needsFirstRunOnboarding) return;
+
+    let managed: { source: EventSource; close: () => void } | null = null;
     let plannerSyncTimer: number | null = null;
     let workspaceSyncTimer: number | null = null;
 
@@ -249,7 +270,8 @@ export function App() {
     };
 
     try {
-      source = new EventSource('/api/events');
+      managed = openManagedEventSource('/api/events');
+      const { source } = managed;
       source.onopen = () => setIsLiveSyncActive(true);
       source.onmessage = (event) => {
         try {
@@ -295,9 +317,9 @@ export function App() {
     return () => {
       if (plannerSyncTimer !== null) window.clearTimeout(plannerSyncTimer);
       if (workspaceSyncTimer !== null) window.clearTimeout(workspaceSyncTimer);
-      source?.close();
+      managed?.close();
     };
-  }, [fetchPlanner, fetchWorkspaces]);
+  }, [fetchPlanner, fetchWorkspaces, workspacesLoaded, needsFirstRunOnboarding]);
 
   const activeWorkspace = useMemo<WorkspaceMetadata | null>(() => {
     if (!workspacesRegistry || !workspacesRegistry.workspaces) return null;
@@ -308,6 +330,10 @@ export function App() {
       null
     );
   }, [workspacesRegistry]);
+
+  const activeWorkspaceId = activeWorkspace?.id;
+  const activeWorkspaceIdRef = useRef<string | undefined>(activeWorkspaceId);
+  activeWorkspaceIdRef.current = activeWorkspaceId;
 
   const handleSwitchWorkspace = useCallback(
     async (workspaceId: string) => {
@@ -331,6 +357,13 @@ export function App() {
         };
         setWorkspacesRegistry(data.registry);
         setDatabase(data.database);
+        setMonthFilter('all');
+        setSlotFilter('all');
+        setReadinessFilter('all');
+        setPlatformFilter('all');
+        setWorkflowStatusFilter('all');
+        setSearchQuery('');
+        setSelectedItemId(null);
         showToast(`Workspace aktif: ${data.workspace.name} (${data.workspace.handle})`);
       } catch (err) {
         showToast(
@@ -430,8 +463,8 @@ export function App() {
         }
       }
 
-      if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase().trim();
+      if (deferredSearchQuery.trim()) {
+        const query = deferredSearchQuery.toLowerCase().trim();
         const inCode = item.folderCode.toLowerCase().includes(query);
         const inMonth = item.monthFolder.toLowerCase().includes(query);
         const inTitle = (
@@ -471,7 +504,7 @@ export function App() {
     readinessFilter,
     workflowStatusFilter,
     platformFilter,
-    searchQuery,
+    deferredSearchQuery,
   ]);
 
   const activeFilterCount = useMemo(() => {
@@ -528,7 +561,8 @@ export function App() {
 
   const handleUpdateStatus = useCallback(
     async (item: ContentPlannerItem, newStatus: WorkflowStatus) => {
-      const previous = database;
+      const capturedWorkspaceId = activeWorkspaceIdRef.current;
+      const previousItem = databaseRef.current?.items[item.id];
       setDatabase((prev) => {
         if (!prev?.items[item.id]) return prev;
         const target = prev.items[item.id];
@@ -554,17 +588,33 @@ export function App() {
           workflowStatus: newStatus,
           statusLockedManually: true,
         });
-        setDatabase(res.database);
+        if (activeWorkspaceIdRef.current === capturedWorkspaceId) {
+          setDatabase(res.database);
+        }
         showToast(`Status ${item.folderCode} diubah ke "${newStatus}".`);
       } catch (err) {
-        if (previous) setDatabase(previous);
+        if (
+          previousItem &&
+          activeWorkspaceIdRef.current === capturedWorkspaceId
+        ) {
+          setDatabase((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              items: {
+                ...prev.items,
+                [item.id]: previousItem,
+              },
+            };
+          });
+        }
         showToast(
           err instanceof Error ? err.message : 'Gagal memperbarui status.',
           'error'
         );
       }
     },
-    [database, showToast]
+    [showToast]
   );
 
   const handleTogglePlatform = useCallback(
@@ -572,7 +622,8 @@ export function App() {
       const currentStatus =
         item.userProperties.platforms[platformKey]?.status ?? 'not_started';
       const nextStatus = PLATFORM_CYCLE[currentStatus] ?? 'not_started';
-      const previous = database;
+      const capturedWorkspaceId = activeWorkspaceIdRef.current;
+      const previousItem = databaseRef.current?.items[item.id];
 
       setDatabase((prev) => {
         if (!prev?.items[item.id]) return prev;
@@ -605,12 +656,28 @@ export function App() {
           platformKey,
           { status: nextStatus }
         );
-        setDatabase(res.database);
+        if (activeWorkspaceIdRef.current === capturedWorkspaceId) {
+          setDatabase(res.database);
+        }
         showToast(
           `${item.folderCode} (${platformKey.toUpperCase()}): ${nextStatus}.`
         );
       } catch (err) {
-        if (previous) setDatabase(previous);
+        if (
+          previousItem &&
+          activeWorkspaceIdRef.current === capturedWorkspaceId
+        ) {
+          setDatabase((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              items: {
+                ...prev.items,
+                [item.id]: previousItem,
+              },
+            };
+          });
+        }
         showToast(
           err instanceof Error
             ? err.message
@@ -619,7 +686,7 @@ export function App() {
         );
       }
     },
-    [database, showToast]
+    [showToast]
   );
 
   const handleUpdateProperties = useCallback(
@@ -910,12 +977,6 @@ export function App() {
     ]
   );
 
-  const needsFirstRunOnboarding =
-    workspacesLoaded &&
-    workspacesRegistry !== null &&
-    (!workspacesRegistry.onboardingCompleted ||
-      Object.keys(workspacesRegistry.workspaces).length === 0);
-
   if (needsFirstRunOnboarding) {
     return (
       <OnboardingWizard
@@ -1038,79 +1099,87 @@ export function App() {
         </footer>
       </AppShell>
 
-      <ContentDetailModal
-        item={selectedItem}
-        isOpen={Boolean(selectedItem)}
-        initialTab={detailInitialTab}
-        onClose={() => {
-          setSelectedItemId(null);
-          clearDeepLinkSearch();
-        }}
-        allItems={filteredItems}
-        onSelectItem={(item) => setSelectedItemId(item.id)}
-        onNavigate={(id) => setSelectedItemId(id)}
-        onUpdateProperties={handleUpdateProperties}
-        onUpdateUserProperties={handleUpdateProperties}
-        onUpdateStatus={(itemId, status, lockManually = true) =>
-          handleUpdateProperties(itemId, {
-            workflowStatus: status,
-            statusLockedManually: lockManually,
-          })
-        }
-        onUpdatePlatform={handleUpdatePlatformDetail}
-        onBatchUpdatePlatforms={handleBatchUpdatePlatforms}
-        onSaveCaption={handleSaveCaption}
-        onOpenExplorer={handleOpenExplorer}
-        onOpenAutoPost={(item, platform) =>
-          openAutoPost(item, platform ?? null)
-        }
-        onOpenWatermark={(item) => openWatermark(item)}
-      />
+      {selectedItem ? (
+        <ContentDetailModal
+          item={selectedItem}
+          isOpen
+          initialTab={detailInitialTab}
+          onClose={() => {
+            setSelectedItemId(null);
+            clearDeepLinkSearch();
+          }}
+          allItems={filteredItems}
+          onSelectItem={(item) => setSelectedItemId(item.id)}
+          onNavigate={(id) => setSelectedItemId(id)}
+          onUpdateProperties={handleUpdateProperties}
+          onUpdateUserProperties={handleUpdateProperties}
+          onUpdateStatus={(itemId, status, lockManually = true) =>
+            handleUpdateProperties(itemId, {
+              workflowStatus: status,
+              statusLockedManually: lockManually,
+            })
+          }
+          onUpdatePlatform={handleUpdatePlatformDetail}
+          onBatchUpdatePlatforms={handleBatchUpdatePlatforms}
+          onSaveCaption={handleSaveCaption}
+          onOpenExplorer={handleOpenExplorer}
+          onOpenAutoPost={(item, platform) =>
+            openAutoPost(item, platform ?? null)
+          }
+          onOpenWatermark={(item) => openWatermark(item)}
+        />
+      ) : null}
 
-      <WorkspaceModal
-        isOpen={workspaceModalState.open}
-        mode={workspaceModalState.mode}
-        registry={workspacesRegistry}
-        activeWorkspace={activeWorkspace}
-        onClose={() =>
-          setWorkspaceModalState((prev) => ({ ...prev, open: false }))
-        }
-        onSaved={(payload) => {
-          setWorkspacesRegistry(payload.registry);
-          setDatabase(payload.database);
-        }}
-        onToast={showToast}
-      />
+      {workspaceModalState.open ? (
+        <WorkspaceModal
+          isOpen={workspaceModalState.open}
+          mode={workspaceModalState.mode}
+          registry={workspacesRegistry}
+          activeWorkspace={activeWorkspace}
+          onClose={() =>
+            setWorkspaceModalState((prev) => ({ ...prev, open: false }))
+          }
+          onSaved={(payload) => {
+            setWorkspacesRegistry(payload.registry);
+            setDatabase(payload.database);
+          }}
+          onToast={showToast}
+        />
+      ) : null}
 
-      <CreateContentModal
-        isOpen={createContentState.open}
-        initialTab={createContentState.tab}
-        activeWorkspace={activeWorkspace}
-        contentRootPath={workspace.contentRootPath}
-        availableMonths={availableMonths}
-        onClose={() =>
-          setCreateContentState((prev) => ({ ...prev, open: false }))
-        }
-        onCreatedSingle={(payload) => {
-          setDatabase(payload.database);
-        }}
-        onCreatedBatch={(payload) => {
-          setDatabase(payload.database);
-        }}
-        onToast={showToast}
-      />
+      {createContentState.open ? (
+        <CreateContentModal
+          isOpen={createContentState.open}
+          initialTab={createContentState.tab}
+          activeWorkspace={activeWorkspace}
+          contentRootPath={workspace.contentRootPath}
+          availableMonths={availableMonths}
+          onClose={() =>
+            setCreateContentState((prev) => ({ ...prev, open: false }))
+          }
+          onCreatedSingle={(payload) => {
+            setDatabase(payload.database);
+          }}
+          onCreatedBatch={(payload) => {
+            setDatabase(payload.database);
+          }}
+          onToast={showToast}
+        />
+      ) : null}
 
-      <QuickGuideModal
-        isOpen={isQuickGuideOpen}
-        activeWorkspace={activeWorkspace}
-        contentRootPath={workspace.contentRootPath}
-        onClose={() => setIsQuickGuideOpen(false)}
-        onOpenCreateContent={() => openCreateContent('single')}
-        onOpenExplorerRoot={() =>
-          void handleOpenExplorer(workspace.contentRootPath, false)
-        }
-        onOpenWorkspaceSettings={() => openWorkspaceModal('edit')}
-      />
+      {isQuickGuideOpen ? (
+        <QuickGuideModal
+          isOpen={isQuickGuideOpen}
+          activeWorkspace={activeWorkspace}
+          contentRootPath={workspace.contentRootPath}
+          onClose={() => setIsQuickGuideOpen(false)}
+          onOpenCreateContent={() => openCreateContent('single')}
+          onOpenExplorerRoot={() =>
+            void handleOpenExplorer(workspace.contentRootPath, false)
+          }
+          onOpenWorkspaceSettings={() => openWorkspaceModal('edit')}
+        />
+      ) : null}
 
       {toast ? (
         <div
