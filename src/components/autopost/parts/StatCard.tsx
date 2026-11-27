@@ -66,7 +66,7 @@ export function StatCard({
             {value}
           </p>
           {hint ? (
-            <p className="text-[11px] font-light leading-tight text-muted-foreground/75">
+            <p className="text-[11px] text-muted-foreground">
               {hint}
             </p>
           ) : null}

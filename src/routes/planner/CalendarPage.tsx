@@ -9,6 +9,7 @@ export function CalendarPage() {
       items={workspace.filteredItems}
       onSelectItem={(item) => workspace.openDetail(item)}
       onEditCaption={(item) => workspace.openCaption(item)}
+      onOpenWatermark={(item) => workspace.openWatermark(item)}
       onOpenAutoPost={(item) => workspace.openAutoPost(item, null)}
       onUpdateStatus={workspace.updateStatus}
       onTogglePlatform={workspace.togglePlatform}

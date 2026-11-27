@@ -1,17 +1,26 @@
 import { useState } from 'react';
-import { Square, X } from 'lucide-react';
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  RotateCcw,
+  Square,
+  Terminal,
+  X,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import type { AutoPostJob, AutoPostJobStatus } from '@/types/autopost';
 import { IconActionButton } from './IconActionButton';
-import { PlatformIcon } from './platformMeta';
+import { PLATFORM_META, PlatformIcon } from './platformMeta';
 
 export interface ActivityFeedProps {
   jobs: AutoPostJob[];
   onCancel: (jobId: string) => void | Promise<void>;
   onConfirm: (jobId: string, url?: string) => void | Promise<void>;
+  onRetry?: (job: AutoPostJob) => void;
   busyKey: string | null;
 }
 
@@ -21,7 +30,7 @@ const ACTIVE_STATUSES: AutoPostJobStatus[] = [
   'awaiting_review',
 ];
 
-const RECENT_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const RECENT_FAILURE_WINDOW_MS = 10 * 60 * 1000;
 const MAX_ROWS = 4;
 
 function jobStatusMeta(status: AutoPostJobStatus): {
@@ -40,13 +49,25 @@ function jobStatusMeta(status: AutoPostJobStatus): {
   }
 }
 
+function formatLogTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 export function ActivityFeed({
   jobs,
   onCancel,
   onConfirm,
+  onRetry,
   busyKey,
 }: ActivityFeedProps) {
   const [dismissedIds, setDismissedIds] = useState<string[]>([]);
+  const [expandedLogIds, setExpandedLogIds] = useState<string[]>([]);
   const now = Date.now();
 
   const visible = jobs
@@ -64,12 +85,23 @@ export function ActivityFeed({
 
   if (visible.length === 0) return null;
 
+  const toggleLogs = (jobId: string) => {
+    setExpandedLogIds((prev) =>
+      prev.includes(jobId)
+        ? prev.filter((id) => id !== jobId)
+        : [...prev, jobId]
+    );
+  };
+
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle>Aktivitas Berjalan</CardTitle>
+    <Card aria-live="polite">
+      <CardHeader className="flex-row items-center justify-between gap-2 pb-2">
+        <CardTitle className="text-sm">Proses Aktif &amp; Status Terbaru</CardTitle>
+        <Badge variant="muted" size="xs" className="font-mono">
+          {visible.length} tugas
+        </Badge>
       </CardHeader>
-      <CardContent className="space-y-2 p-2 pt-0">
+      <CardContent className="space-y-2.5 p-3 pt-0">
         {visible.map((job) => {
           const status = jobStatusMeta(job.status);
           const progress = Math.min(
@@ -80,87 +112,175 @@ export function ActivityFeed({
           const canCancel =
             job.status === 'queued' || job.status === 'running';
           const isFailed = job.status === 'failed';
+          const isExpanded = expandedLogIds.includes(job.jobId);
+          const recentLogs = (job.logs ?? []).slice(-8);
 
           return (
             <div
               key={job.jobId}
-              className="flex flex-wrap items-start gap-2 rounded-md border border-border p-2.5"
+              className={
+                isFailed
+                  ? 'rounded-lg border border-[#fca5a5] bg-[#fef2f2]/60 p-3 dark:border-[#991b1b] dark:bg-[#450a0a]/30'
+                  : 'rounded-lg border border-border bg-card p-3'
+              }
             >
-              <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <PlatformIcon platform={job.platform} />
-                  <span className="font-mono text-[11px] font-semibold text-foreground">
-                    {job.folderCode}
-                  </span>
-                  <Badge variant={status.variant} size="xs">
-                    {status.label}
-                  </Badge>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <PlatformIcon platform={job.platform} size={15} />
+                    <span className="font-mono text-xs font-semibold text-foreground">
+                      {job.folderCode}
+                    </span>
+                    <span className="text-xs font-medium text-foreground">
+                      {PLATFORM_META[job.platform].label}
+                    </span>
+                    <Badge variant={status.variant} size="xs">
+                      {status.label}
+                    </Badge>
+                    <Badge variant="outline" size="xs">
+                      {job.engine === 'meta_api'
+                        ? 'Meta API'
+                        : job.engine === 'youtube_api'
+                          ? 'YouTube API'
+                          : 'Browser'}
+                    </Badge>
+                  </div>
+
+                  {isFailed ? (
+                    <div className="flex items-start gap-1.5 text-xs leading-relaxed text-[#991b1b] dark:text-[#fca5a5]">
+                      <AlertCircle
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <span>{job.error || job.step || 'Proses gagal.'}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        {job.step || 'Menyiapkan proses...'}
+                      </p>
+
+                      <div className="flex items-center gap-2.5">
+                        <Progress value={progress} className="w-full" />
+                        <span className="shrink-0 font-mono text-xs font-medium text-foreground tabular-nums">
+                          {progress}%
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
 
-                {isFailed ? (
-                  <p className="text-[11px] leading-relaxed text-[#991b1b] dark:text-[#fca5a5]">
-                    {job.error || job.step || 'Proses gagal.'}
-                  </p>
-                ) : (
-                  <>
-                    <p className="truncate text-[11px] text-muted-foreground">
-                      {job.step || 'Menyiapkan proses...'}
-                    </p>
-
-                    <div className="flex items-center gap-2">
-                      <Progress value={progress} className="w-full" />
-                      <span className="shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums">
-                        {progress}%
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
-
-              <div className="flex shrink-0 items-center gap-1">
-                {canCancel ? (
-                  <IconActionButton
-                    icon={Square}
-                    label="Batalkan proses"
-                    disabled={isBusy}
-                    onClick={() => void onCancel(job.jobId)}
-                  />
-                ) : null}
-
-                {isFailed ? (
-                  <IconActionButton
-                    icon={X}
-                    label="Tutup pemberitahuan gagal"
-                    onClick={() =>
-                      setDismissedIds((prev) =>
-                        prev.includes(job.jobId) ? prev : [...prev, job.jobId]
-                      )
-                    }
-                  />
-                ) : null}
-
-                {job.status === 'awaiting_review' ? (
-                  <>
+                <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                  {recentLogs.length > 0 ? (
                     <Button
                       type="button"
                       size="xs"
-                      variant="editorial"
-                      disabled={isBusy}
-                      onClick={() => void onConfirm(job.jobId)}
+                      variant="outline"
+                      aria-expanded={isExpanded}
+                      onClick={() => toggleLogs(job.jobId)}
+                      className="min-h-9 sm:min-h-7"
                     >
-                      {job.engine === 'meta_api' && job.platform === 'ig_reels'
-                        ? 'Publish IG Sekarang'
-                        : 'Tandai Sudah Publish'}
+                      <Terminal className="size-3" aria-hidden="true" />
+                      <span>Log ({job.logs.length})</span>
+                      {isExpanded ? (
+                        <ChevronUp className="size-3" aria-hidden="true" />
+                      ) : (
+                        <ChevronDown className="size-3" aria-hidden="true" />
+                      )}
                     </Button>
-                    <IconActionButton
-                      icon={X}
-                      label="Abaikan tugas ini"
+                  ) : null}
+
+                  {canCancel ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
                       disabled={isBusy}
                       onClick={() => void onCancel(job.jobId)}
+                      className="min-h-9 sm:min-h-7"
+                    >
+                      <Square className="size-3" aria-hidden="true" />
+                      <span>Batal</span>
+                    </Button>
+                  ) : null}
+
+                  {isFailed && onRetry ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={() => onRetry(job)}
+                      className="min-h-9 sm:min-h-7"
+                    >
+                      <RotateCcw className="size-3" aria-hidden="true" />
+                      <span>Coba Lagi</span>
+                    </Button>
+                  ) : null}
+
+                  {isFailed ? (
+                    <IconActionButton
+                      icon={X}
+                      label="Tutup pemberitahuan gagal"
+                      onClick={() =>
+                        setDismissedIds((prev) =>
+                          prev.includes(job.jobId) ? prev : [...prev, job.jobId]
+                        )
+                      }
+                      className="min-h-9 min-w-9 sm:min-h-7 sm:min-w-7"
                     />
-                  </>
-                ) : null}
+                  ) : null}
+
+                  {job.status === 'awaiting_review' ? (
+                    <>
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="editorial"
+                        disabled={isBusy}
+                        onClick={() => void onConfirm(job.jobId)}
+                        className="min-h-9 sm:min-h-7"
+                      >
+                        {job.engine === 'meta_api' && job.platform === 'ig_reels'
+                          ? 'Publish IG Sekarang'
+                          : 'Tandai Sudah Publish'}
+                      </Button>
+                      <IconActionButton
+                        icon={X}
+                        label="Abaikan tugas ini"
+                        disabled={isBusy}
+                        onClick={() => void onCancel(job.jobId)}
+                        className="min-h-9 min-w-9 sm:min-h-7 sm:min-w-7"
+                      />
+                    </>
+                  ) : null}
+                </div>
               </div>
+
+              {isExpanded && recentLogs.length > 0 ? (
+                <div className="mt-2.5 rounded-md border border-border bg-muted/60 p-2.5">
+                  <ul className="space-y-1 font-mono text-[11px] leading-relaxed">
+                    {recentLogs.map((entry, idx) => (
+                      <li
+                        key={`${job.jobId}-log-${idx}`}
+                        className={
+                          entry.level === 'error'
+                            ? 'text-[#991b1b] dark:text-[#fca5a5]'
+                            : entry.level === 'warning'
+                              ? 'text-[#92400e] dark:text-[#fcd34d]'
+                              : entry.level === 'success'
+                                ? 'text-[#166534] dark:text-[#86efac]'
+                                : 'text-foreground'
+                        }
+                      >
+                        <span className="mr-2 text-muted-foreground">
+                          {formatLogTime(entry.timestamp)}
+                        </span>
+                        <span>{entry.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
           );
         })}

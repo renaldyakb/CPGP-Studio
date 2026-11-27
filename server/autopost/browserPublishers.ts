@@ -1414,20 +1414,135 @@ async function uploadFacebookReelCover(
     ];
 
     for (const candidate of candidates) {
+      if ((await candidate.count().catch(() => 0)) === 0) continue;
+      await candidate.scrollIntoViewIfNeeded({ timeout: 2500 }).catch(() => {});
       const visible = await candidate
         .isVisible({ timeout: 500 })
         .catch(() => false);
-      if (visible) {
+      if (visible && (await isLocatorEnabled(candidate))) {
         return candidate;
       }
     }
     return null;
   };
 
+  /**
+   * Read-only MutationObserver inside the Reels Composer DOM that detects the exact
+   * moment Meta renders and enables the Thumbnail / Upload image button, even if it
+   * is currently scrolled below the fold. Performs zero scrolling and zero DOM mutations
+   * while waiting so the browser stays completely still and natural.
+   */
+  const waitForThumbnailReadyViaObserver = async (
+    timeoutMs: number
+  ): Promise<'trigger_ready' | 'file_input_ready' | 'timeout'> => {
+    const patternSource = UPLOAD_IMAGE_LABEL.source;
+    const waitStartMs = Date.now();
+
+    const progressTimer = setInterval(() => {
+      if (signal.aborted) return;
+      const waitedSec = Math.round((Date.now() - waitStartMs) / 1000);
+      if (waitedSec >= 10) {
+        onProgress({
+          step: `Menunggu bagian Thumbnail Meta muncul otomatis (${waitedSec}s)`,
+          progressPercent: 71,
+          log: `Memantau DOM Reels Composer secara pasif hingga bagian Thumbnail & Upload image muncul (${waitedSec}s)...`,
+          level: 'info',
+        });
+      }
+    }, 12_000);
+
+    try {
+      const result = await raceWithAbort(
+        page.evaluate(
+          ({ regexSource, maxWaitMs }) => {
+            return new Promise<'trigger_ready' | 'file_input_ready' | 'timeout'>(
+              (resolve) => {
+                const labelRegex = new RegExp(regexSource, 'i');
+                const root =
+                  document.querySelector('[data-surface$="lib:bizweb_create_reel"]') ||
+                  document.querySelector('[data-surface$="bizweb_create_reel:left_panel"]') ||
+                  document.body;
+
+                const isNodeReady = (el: Element): boolean => {
+                  const htmlEl = el as HTMLElement;
+                  if (htmlEl.getAttribute('aria-disabled') === 'true') return false;
+                  if ((htmlEl as HTMLButtonElement).disabled === true) return false;
+                  const style = window.getComputedStyle(htmlEl);
+                  if (style.display === 'none' || style.visibility === 'hidden') {
+                    return false;
+                  }
+                  const rect = htmlEl.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0;
+                };
+
+                const checkDom = (): 'trigger_ready' | 'file_input_ready' | null => {
+                  const controls = root.querySelectorAll(
+                    '[role="button"], [role="radio"], [role="tab"], button, a[role="link"]'
+                  );
+                  for (const el of controls) {
+                    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (text && labelRegex.test(text) && isNodeReady(el)) {
+                      return 'trigger_ready';
+                    }
+                  }
+                  // Also check direct image file input scoped inside the reel composer
+                  const scopedInput = root.querySelector(
+                    'input[type="file"][accept*="image"]:not([accept*="video"])'
+                  );
+                  if (scopedInput) {
+                    return 'file_input_ready';
+                  }
+                  return null;
+                };
+
+                const initial = checkDom();
+                if (initial) {
+                  resolve(initial);
+                  return;
+                }
+
+                let finished = false;
+                let timerId: number | null = null;
+                const finish = (
+                  outcome: 'trigger_ready' | 'file_input_ready' | 'timeout'
+                ) => {
+                  if (finished) return;
+                  finished = true;
+                  observer.disconnect();
+                  if (timerId !== null) window.clearTimeout(timerId);
+                  resolve(outcome);
+                };
+
+                const observer = new MutationObserver(() => {
+                  const found = checkDom();
+                  if (found) finish(found);
+                });
+
+                observer.observe(root, {
+                  childList: true,
+                  subtree: true,
+                  attributes: true,
+                  attributeFilter: ['aria-disabled', 'disabled', 'style', 'class'],
+                });
+
+                timerId = window.setTimeout(() => finish('timeout'), maxWaitMs);
+              }
+            );
+          },
+          { regexSource: patternSource, maxWaitMs: timeoutMs }
+        ),
+        signal
+      );
+      return result;
+    } finally {
+      clearInterval(progressTimer);
+    }
+  };
+
   const confirmCoverModalIfPresent = async (): Promise<void> => {
-    await humanDelay(900, 1500, signal);
+    await humanDelay(1100, 1800, signal);
     const dialog = page.locator('[role="dialog"]').last();
-    if (!(await dialog.isVisible({ timeout: 700 }).catch(() => false))) {
+    if (!(await dialog.isVisible({ timeout: 800 }).catch(() => false))) {
       return;
     }
     const saveBtn = dialog
@@ -1435,67 +1550,74 @@ async function uploadFacebookReelCover(
       .filter({ hasText: CONFIRM_COVER_LABEL })
       .last();
     if (
-      (await saveBtn.isVisible({ timeout: 900 }).catch(() => false)) &&
-      (await isLocatorEnabled(saveBtn))
+      (await saveBtn.isVisible({ timeout: 1200 }).catch(() => false)) &&
+      (await waitForEnabledLocator(saveBtn, 10_000, signal))
     ) {
-      await humanDelay(300, 650, signal);
+      await humanDelay(500, 950, signal);
       await humanClick(page, saveBtn, signal, { timeout: 6000 }).catch(() => {});
-      await humanDelay(1200, 2000, signal);
+      await humanDelay(1600, 2600, signal);
     }
+  };
+
+  const waitUntilCoverUploadSettles = async (): Promise<void> => {
+    // Wait calmly for any uploading spinner / progressbar inside left_panel to clear
+    const settleDeadline = Date.now() + 18_000;
+    await humanDelay(1800, 2600, signal);
+    while (Date.now() < settleDeadline) {
+      throwIfAborted(signal);
+      const hasBusySpinner = await reelSurface
+        .locator('[role="progressbar"]:visible, [aria-busy="true"]:visible')
+        .first()
+        .isVisible({ timeout: 250 })
+        .catch(() => false);
+      if (!hasBusySpinner) {
+        break;
+      }
+      await humanDelay(700, 1100, signal);
+    }
+    await humanDelay(600, 1100, signal);
   };
 
   try {
     onProgress({
-      step: `Mengunggah cover ${coverFileName} ke Thumbnail Meta Reels`,
+      step: `Menunggu bagian Thumbnail Meta Reels muncul otomatis untuk ${coverFileName}`,
       progressPercent: 71,
-      log: `Mencari bagian Thumbnail dan tombol Upload image untuk memasang cover ${coverFileName}.`,
+      log: `Menunggu bagian Thumbnail & tombol Upload image muncul otomatis di Meta Business Suite (tanpa scroll berulang)...`,
       level: 'info',
     });
 
-    const leftPanel = page
-      .locator('[data-surface$="bizweb_create_reel:left_panel"]')
-      .first();
-    const hasLeftPanel = await leftPanel
-      .isVisible({ timeout: 1000 })
-      .catch(() => false);
+    // Natural pause after finishing caption before waiting passively
+    await humanDelay(750, 1350, signal);
 
-    // Wait up to 16s while scrolling naturally down the left panel (Meta lazy-renders
-    // Thumbnail options while the video is still initializing / parsing frames)
-    let trigger: Locator | null = null;
-    const searchDeadline = Date.now() + 16_000;
-    let scrollAttempts = 0;
+    // Automatically detect the exact moment Meta mounts & enables Thumbnail controls (up to 120s)
+    const detected = await waitForThumbnailReadyViaObserver(120_000);
 
-    while (Date.now() < searchDeadline) {
-      throwIfAborted(signal);
-      trigger = await findUploadImageTrigger();
-      if (trigger) break;
-
-      if (scrollAttempts < 5) {
-        scrollAttempts += 1;
-        await humanScrollWheel(
-          page,
-          320 + Math.floor(Math.random() * 140),
-          signal,
-          hasLeftPanel ? leftPanel : reelSurface
-        );
-      } else {
-        await humanIdleDrift(page, signal);
-      }
-      await humanDelay(650, 1100, signal);
+    if (detected === 'timeout') {
+      onProgress({
+        step: 'Tombol Upload image thumbnail belum muncul',
+        progressPercent: 72,
+        log: 'Bagian Thumbnail / tombol Upload image Meta Business Suite belum muncul setelah 120 detik. Melanjutkan tanpa mengganti thumbnail.',
+        level: 'warning',
+      });
+      return false;
     }
 
+    // Natural reaction pause once Thumbnail automatically appears
+    await humanDelay(600, 1150, signal);
+
+    const trigger = await findUploadImageTrigger();
+
     if (!trigger) {
-      // Fallback: check if a scoped image file input is already attached in reelSurface
       const directImageInput = reelSurface
         .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
         .last();
       if ((await directImageInput.count().catch(() => 0)) > 0) {
         await directImageInput.setInputFiles(coverPath);
         await confirmCoverModalIfPresent();
-        await humanDelay(1600, 2400, signal);
+        await waitUntilCoverUploadSettles();
         onProgress({
           step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
-          progressPercent: 73,
+          progressPercent: 74,
           log: `Cover ${coverFileName} terpasang langsung melalui input gambar di Reels Composer.`,
           level: 'success',
         });
@@ -1503,16 +1625,16 @@ async function uploadFacebookReelCover(
       }
 
       onProgress({
-        step: 'Tombol Upload image thumbnail tidak ditemukan',
+        step: 'Tombol Upload image thumbnail tidak dapat diklik',
         progressPercent: 72,
-        log: 'Tombol Upload image pada bagian Thumbnail Meta Business Suite tidak muncul setelah 16 detik. Melanjutkan tanpa mengganti thumbnail.',
+        log: 'Bagian Thumbnail terdeteksi tetapi tombol Upload image tidak aktif. Melanjutkan tanpa mengganti thumbnail.',
         level: 'warning',
       });
       return false;
     }
 
     await trigger.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
-    await humanDelay(350, 700, signal);
+    await humanDelay(500, 950, signal);
 
     // Click Upload image while listening for an immediate native filechooser dialog
     const immediateChooserPromise = page
@@ -1523,12 +1645,13 @@ async function uploadFacebookReelCover(
     const immediateChooser = await raceWithAbort(immediateChooserPromise, signal);
 
     if (immediateChooser) {
+      await humanDelay(350, 700, signal);
       await immediateChooser.setFiles([coverPath]);
       await confirmCoverModalIfPresent();
-      await humanDelay(1800, 2700, signal);
+      await waitUntilCoverUploadSettles();
       onProgress({
         step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
-        progressPercent: 73,
+        progressPercent: 74,
         log: `Cover ${coverFileName} terpasang melalui tombol Upload image.`,
         level: 'success',
       });
@@ -1536,7 +1659,7 @@ async function uploadFacebookReelCover(
     }
 
     // Step 2: Meta Business Suite reveals a secondary row ("[icon] Upload image ... [Upload Image]")
-    await humanDelay(650, 1100, signal);
+    await humanDelay(850, 1450, signal);
 
     const secondaryCandidates: Locator[] = [
       reelSurface
@@ -1570,16 +1693,18 @@ async function uploadFacebookReelCover(
         const secondChooserPromise = page
           .waitForEvent('filechooser', { timeout: 5500 })
           .catch(() => null);
+        await humanDelay(350, 650, signal);
         await humanClick(page, secondBtn, signal, { timeout: 6000 });
         const secondChooser = await raceWithAbort(secondChooserPromise, signal);
 
         if (secondChooser) {
+          await humanDelay(350, 700, signal);
           await secondChooser.setFiles([coverPath]);
           await confirmCoverModalIfPresent();
-          await humanDelay(2000, 2900, signal);
+          await waitUntilCoverUploadSettles();
           onProgress({
             step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
-            progressPercent: 73,
+            progressPercent: 74,
             log: `Cover ${coverFileName} terpasang melalui tombol kedua Upload Image.`,
             level: 'success',
           });
@@ -1599,10 +1724,10 @@ async function uploadFacebookReelCover(
     if ((await scopedImageInput.count().catch(() => 0)) > 0) {
       await scopedImageInput.setInputFiles(coverPath);
       await confirmCoverModalIfPresent();
-      await humanDelay(2000, 2900, signal);
+      await waitUntilCoverUploadSettles();
       onProgress({
         step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
-        progressPercent: 73,
+        progressPercent: 74,
         log: `Cover ${coverFileName} terpasang melalui input gambar di Reels Composer.`,
         level: 'success',
       });
@@ -2427,6 +2552,7 @@ export async function publishMetaBusinessSuiteViaBrowser(
       signal,
       onProgress
     );
+    await humanDelay(900, 1500, signal);
   }
 
   // Advance Reel wizard: Step 0 (Create) -> Step 1 (Edit, if enabled) -> Step 2 (Share).
@@ -3776,11 +3902,11 @@ async function uploadTikTokCover(
       level: 'info',
     });
 
-    // TikTok generates the cover card once video metadata finishes parsing (~2-15s)
+    // TikTok generates the cover card once video metadata finishes parsing (~5-40s for larger videos)
     const editBtn = await findFirstVisibleLocator(
       root,
       EDIT_COVER_SELECTORS,
-      18_000,
+      45_000,
       signal
     );
 
@@ -3788,15 +3914,16 @@ async function uploadTikTokCover(
       onProgress({
         step: 'Tombol Edit cover TikTok tidak ditemukan',
         progressPercent: 69,
-        log: 'Tombol Edit cover di TikTok Studio belum muncul setelah 18 detik. Melanjutkan tanpa mengganti sampul.',
+        log: 'Tombol Edit cover di TikTok Studio belum muncul setelah 45 detik. Melanjutkan tanpa mengganti sampul.',
         level: 'warning',
       });
       return false;
     }
 
-    await humanDelay(350, 750, signal);
+    await waitForEnabledLocator(editBtn, 15_000, signal);
+    await humanDelay(650, 1250, signal);
     await humanClick(page, editBtn, signal, { timeout: 8000 });
-    await humanDelay(900, 1500, signal);
+    await humanDelay(1000, 1650, signal);
 
     // Switch to the "Upload cover" tab inside the cover editor modal
     const uploadTab = await findFirstVisibleLocator(

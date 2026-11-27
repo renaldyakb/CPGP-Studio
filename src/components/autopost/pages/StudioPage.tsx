@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
+import {
+  Check,
+  Copy,
+  ExternalLink,
+  Loader2,
+  ShieldCheck,
+} from 'lucide-react';
 import {
   Accordion,
   AccordionContent,
@@ -11,15 +17,9 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input, NativeSelect } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
 import type { AiContentDisclosureMode } from '@/types/autopost';
 import type { PlatformKey } from '@/types/planner';
 import type { AutoPostPageProps } from '../pageProps';
-import { IconActionButton } from '../parts/IconActionButton';
 import { PlatformIcon } from '../parts/platformMeta';
 import {
   resolvePlatformEngine,
@@ -34,6 +34,10 @@ interface StudioSessionCardDef {
   platforms: PlatformKey[];
   primaryPlatform: PlatformKey;
 }
+
+const DEFAULT_CDP_URL = 'http://127.0.0.1:9222';
+const CHROME_CDP_SHORTCUT_TARGET =
+  '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\\Google\\Chrome-CDP"';
 
 const STUDIO_SESSION_CARDS: StudioSessionCardDef[] = [
   {
@@ -54,7 +58,7 @@ const STUDIO_SESSION_CARDS: StudioSessionCardDef[] = [
   },
   {
     id: 'meta',
-    label: 'Meta Business',
+    label: 'Meta Business Suite',
     subtitle: 'Facebook & Instagram Reels',
     icons: ['fb_reels', 'ig_reels'],
     platforms: ['fb_reels', 'ig_reels'],
@@ -67,33 +71,13 @@ function renderSessionBadge(check?: PlatformSessionCheckResult) {
     return <Badge variant="muted">Belum Dicek</Badge>;
   }
 
-  const badgeProps =
-    check.state === 'logged_in'
-      ? ({ variant: 'success', label: 'Aktif' } as const)
-      : check.state === 'logged_out'
-        ? ({ variant: 'warning', label: 'Perlu Login' } as const)
-        : ({ variant: 'muted', label: 'Belum Dicek' } as const);
-
-  const detail = check.detail?.trim();
-  if (!detail) {
-    return <Badge variant={badgeProps.variant}>{badgeProps.label}</Badge>;
+  if (check.state === 'logged_in') {
+    return <Badge variant="success">Sesi Aktif</Badge>;
   }
-
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            tabIndex={0}
-            className="inline-flex cursor-default rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          />
-        }
-      >
-        <Badge variant={badgeProps.variant}>{badgeProps.label}</Badge>
-      </TooltipTrigger>
-      <TooltipContent side="top">{detail}</TooltipContent>
-    </Tooltip>
-  );
+  if (check.state === 'logged_out') {
+    return <Badge variant="warning">Perlu Login</Badge>;
+  }
+  return <Badge variant="muted">Belum Dicek</Badge>;
 }
 
 export function StudioPage({ ctx }: AutoPostPageProps) {
@@ -103,12 +87,14 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
   const savedCdpUrl = browser.cdpUrl ?? '';
   const [cdpUrlDraft, setCdpUrlDraft] = useState<string>(savedCdpUrl);
   const [isSavingCdp, setIsSavingCdp] = useState<boolean>(false);
+  const [copiedShortcut, setCopiedShortcut] = useState<boolean>(false);
 
   useEffect(() => {
     setCdpUrlDraft(savedCdpUrl);
   }, [savedCdpUrl, browser.profileDir]);
 
   const isCdpDirty = cdpUrlDraft.trim() !== savedCdpUrl.trim();
+  const isCdpConfigured = Boolean(savedCdpUrl.trim());
 
   const handleSaveCdpUrl = async () => {
     setIsSavingCdp(true);
@@ -121,11 +107,21 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
     }
   };
 
+  const handleCopyShortcut = async () => {
+    try {
+      await navigator.clipboard.writeText(CHROME_CDP_SHORTCUT_TARGET);
+      setCopiedShortcut(true);
+      window.setTimeout(() => setCopiedShortcut(false), 2000);
+    } catch {
+      // clipboard unavailable
+    }
+  };
+
   const isOpen = browserSession.isOpen;
   const anyBrowserAvailable =
     capabilities.chromeAvailable ||
     capabilities.edgeAvailable ||
-    Boolean(savedCdpUrl.trim());
+    isCdpConfigured;
   const isOpeningProfile = busyKey === 'open-profile';
   const isClosingProfile = busyKey === 'close-profile';
   const isCheckingAllSessions = busyKey === 'check-sessions';
@@ -136,80 +132,67 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
-          <CardTitle>Browser Lokal</CardTitle>
-          <Badge variant={isOpen ? 'success' : 'muted'}>
-            {isOpen
-              ? `Terbuka (${browserSession.openTabsCount} tab)`
-              : 'Tertutup'}
-          </Badge>
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-2">
+          <div className="space-y-0.5">
+            <CardTitle className="text-sm">Koneksi Browser Studio</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              Upload video, cover 9:16, dan jadwal tanpa API Key melalui Chrome
+              harian (CDP) atau profil lokal terisolasi.
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Badge variant={isCdpConfigured ? 'info' : 'muted'} size="sm">
+              {isCdpConfigured ? 'Mode Chrome Harian (CDP)' : 'Profil Terisolasi'}
+            </Badge>
+            <Badge variant={isOpen ? 'success' : 'muted'} size="sm">
+              {isOpen
+                ? `Terbuka (${browserSession.openTabsCount} tab)`
+                : 'Tertutup'}
+            </Badge>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-xs font-light text-muted-foreground/75">
-            Tanpa API Key. Cukup login sekali di YouTube, TikTok, dan Meta
-            Business Suite untuk upload video + cover 9:16 ke 4 platform (FB &amp;
-            IG langsung dari Meta Business Suite).
-          </p>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-light text-muted-foreground/75">
-              Terdeteksi
-            </span>
-            <Badge
-              variant={capabilities.chromeAvailable ? 'success' : 'muted'}
-              size="sm"
-            >
-              Chrome
-            </Badge>
-            <Badge
-              variant={capabilities.edgeAvailable ? 'success' : 'muted'}
-              size="sm"
-            >
-              Edge
-            </Badge>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
+        <CardContent className="space-y-4">
+          {/* CDP Section - Primary recommended setup */}
+          <div className="space-y-2.5 rounded-lg border border-border bg-muted/40 p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <label
-                htmlFor="autopost-browser-channel"
-                className="block text-xs font-medium text-foreground"
+                htmlFor="autopost-browser-cdp-url"
+                className="text-xs font-semibold text-foreground"
               >
-                Channel
+                Sambung Chrome Harian (CDP URL)
               </label>
-              <NativeSelect
-                id="autopost-browser-channel"
-                value={browser.channel}
-                disabled={isSavingSettings}
-                onChange={(event) => {
-                  const channel =
-                    event.target.value === 'msedge' ? 'msedge' : 'chrome';
-                  void ctx.data.saveSettings({ browser: { channel } });
-                }}
-                className="w-full"
-              >
-                <option value="chrome">Google Chrome</option>
-                <option value="msedge">Microsoft Edge</option>
-              </NativeSelect>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {cdpUrlDraft.trim() !== DEFAULT_CDP_URL ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    onClick={() => setCdpUrlDraft(DEFAULT_CDP_URL)}
+                    className="min-h-9 sm:min-h-7"
+                  >
+                    Isi {DEFAULT_CDP_URL}
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => void handleCopyShortcut()}
+                  className="min-h-9 sm:min-h-7"
+                >
+                  {copiedShortcut ? (
+                    <Check className="size-3" aria-hidden="true" />
+                  ) : (
+                    <Copy className="size-3" aria-hidden="true" />
+                  )}
+                  <span>
+                    {copiedShortcut ? 'Target Disalin' : 'Salin Target Shortcut'}
+                  </span>
+                </Button>
+              </div>
             </div>
 
-            <div className="space-y-1.5">
-              <span className="block text-xs font-medium text-foreground">
-                Folder Profil
-              </span>
-              <code className="flex min-h-9 items-center truncate rounded-md border border-input bg-muted px-2.5 font-mono text-xs text-foreground">
-                {browser.profileDir}
-              </code>
-            </div>
-          </div>
-
-          <div className="space-y-1.5 rounded-md border border-border bg-muted/60 px-3.5 py-2.5">
-            <label
-              htmlFor="autopost-browser-cdp-url"
-              className="block text-xs font-medium text-foreground"
-            >
-              Sambung Chrome Harian (CDP URL)
-            </label>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <Input
                 id="autopost-browser-cdp-url"
@@ -224,14 +207,15 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                   }
                 }}
                 placeholder="http://127.0.0.1:9222"
-                className="flex-1 bg-card font-mono text-xs"
+                className="min-h-10 flex-1 bg-card font-mono text-xs sm:min-h-9"
               />
               <Button
                 type="button"
-                variant="outline"
+                variant="editorial"
                 size="sm"
                 disabled={isSavingCdp || !isCdpDirty}
                 onClick={() => void handleSaveCdpUrl()}
+                className="min-h-10 sm:min-h-9"
               >
                 {isSavingCdp ? (
                   <Loader2
@@ -239,72 +223,118 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                     aria-hidden="true"
                   />
                 ) : null}
-                Simpan
+                Simpan CDP
               </Button>
             </div>
-            <p className="text-[11px] font-light text-muted-foreground/75">
-              Opsional: sambungkan profil Chrome harian agar terhindar dari
-              checkpoint bot. Kosongkan untuk memakai profil terisolasi.
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Disarankan untuk menghindari checkpoint bot: jalankan Chrome harian
+              dengan flag <code className="font-mono text-foreground">--remote-debugging-port=9222</code>, lalu masukkan{' '}
+              <code className="font-mono text-foreground">http://127.0.0.1:9222</code>. Kosongkan untuk kembali ke profil terisolasi.
             </p>
           </div>
 
-          <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted px-3.5 py-2.5">
-            <div className="space-y-0.5">
+          {/* Browser binary & profile row */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
               <label
-                htmlFor="autopost-keep-tab"
-                className="cursor-pointer text-xs font-medium text-foreground"
-              >
-                Tab Tinjau
-              </label>
-              <p className="text-[11px] font-light text-muted-foreground/75">
-                Pertahankan tab studio terbuka saat mode tinjau agar pratinjau
-                unggah mudah diperiksa.
-              </p>
-            </div>
-            <Switch
-              id="autopost-keep-tab"
-              checked={browser.keepTabOpenOnReview}
-              disabled={isSavingSettings}
-              onCheckedChange={(checked) => {
-                void ctx.data.saveSettings({
-                  browser: { keepTabOpenOnReview: checked },
-                });
-              }}
-            />
-          </div>
-
-          <div className="flex flex-col justify-between gap-2 rounded-md border border-border bg-muted px-3.5 py-2.5 sm:flex-row sm:items-center">
-            <div className="space-y-0.5">
-              <label
-                htmlFor="autopost-ai-disclosure"
+                htmlFor="autopost-browser-channel"
                 className="block text-xs font-medium text-foreground"
               >
-                Label AI-Generated
+                Browser Fallback (Saat CDP Kosong)
               </label>
-              <p className="text-[11px] font-light text-muted-foreground/75">
-                Atur default atau tampilkan dialog konfirmasi tiap kali hendak
-                upload otomatis.
-              </p>
+              <NativeSelect
+                id="autopost-browser-channel"
+                value={browser.channel}
+                disabled={isSavingSettings}
+                onChange={(event) => {
+                  const channel =
+                    event.target.value === 'msedge' ? 'msedge' : 'chrome';
+                  void ctx.data.saveSettings({ browser: { channel } });
+                }}
+                className="min-h-10 w-full sm:min-h-9"
+              >
+                <option value="chrome">
+                  Google Chrome {capabilities.chromeAvailable ? '(Terdeteksi)' : '(Tidak ditemukan)'}
+                </option>
+                <option value="msedge">
+                  Microsoft Edge {capabilities.edgeAvailable ? '(Terdeteksi)' : '(Tidak ditemukan)'}
+                </option>
+              </NativeSelect>
             </div>
-            <NativeSelect
-              id="autopost-ai-disclosure"
-              value={settings.aiContentDisclosure ?? 'ask'}
-              disabled={isSavingSettings}
-              onChange={(event) => {
-                const raw = event.target.value;
-                const next: AiContentDisclosureMode =
-                  raw === 'always_ai' || raw === 'always_non_ai' ? raw : 'ask';
-                void ctx.data.saveSettings({ aiContentDisclosure: next });
-              }}
-              className="w-full sm:w-48"
-            >
-              <option value="ask">Tanya tiap upload</option>
-              <option value="always_ai">Selalu tandai AI</option>
-              <option value="always_non_ai">Selalu bukan AI</option>
-            </NativeSelect>
+
+            <div className="space-y-1.5">
+              <span className="block text-xs font-medium text-foreground">
+                Folder Profil Terisolasi
+              </span>
+              <code className="flex min-h-10 items-center truncate rounded-md border border-input bg-muted px-2.5 font-mono text-xs text-foreground sm:min-h-9">
+                {browser.profileDir}
+              </code>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 pt-1">
+          {/* Behavior toggles */}
+          <div className="divide-y divide-border rounded-lg border border-border bg-card">
+            <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+              <div className="space-y-0.5">
+                <label
+                  htmlFor="autopost-keep-tab"
+                  className="cursor-pointer text-xs font-medium text-foreground"
+                >
+                  Pertahankan Tab Saat Mode Tinjau
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Biarkan tab studio tetap terbuka saat mode Tinjau agar Anda
+                  mudah memeriksa pratinjau unggahan.
+                </p>
+              </div>
+              <Switch
+                id="autopost-keep-tab"
+                checked={browser.keepTabOpenOnReview}
+                disabled={isSavingSettings}
+                onCheckedChange={(checked) => {
+                  void ctx.data.saveSettings({
+                    browser: { keepTabOpenOnReview: checked },
+                  });
+                }}
+              />
+            </div>
+
+            <div className="flex flex-col justify-between gap-2 px-3.5 py-2.5 sm:flex-row sm:items-center">
+              <div className="space-y-0.5">
+                <label
+                  htmlFor="autopost-ai-disclosure"
+                  className="block text-xs font-medium text-foreground"
+                >
+                  Default Label AI-Generated
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Atur jawaban bawaan atau tampilkan dialog konfirmasi setiap
+                  kali mengirim konten.
+                </p>
+              </div>
+              <NativeSelect
+                id="autopost-ai-disclosure"
+                value={settings.aiContentDisclosure ?? 'ask'}
+                disabled={isSavingSettings}
+                onChange={(event) => {
+                  const raw = event.target.value;
+                  const next: AiContentDisclosureMode =
+                    raw === 'always_ai' || raw === 'always_non_ai'
+                      ? raw
+                      : 'ask';
+                  void ctx.data.saveSettings({ aiContentDisclosure: next });
+                }}
+                className="min-h-10 w-full sm:min-h-9 sm:w-48"
+              >
+                <option value="ask">Tanya tiap upload</option>
+                <option value="always_ai">Selalu tandai AI</option>
+                <option value="always_non_ai">Selalu bukan AI</option>
+              </NativeSelect>
+            </div>
+          </div>
+
+          {/* Primary browser session actions */}
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
               variant="editorial"
@@ -312,6 +342,7 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                 isOpeningProfile || isCheckingAnySession || !anyBrowserAvailable
               }
               onClick={() => void ctx.data.openProfile()}
+              className="min-h-10 sm:min-h-9"
             >
               {isOpeningProfile ? (
                 <Loader2
@@ -319,7 +350,7 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                   aria-hidden="true"
                 />
               ) : null}
-              Buka Semua
+              Buka Semua Studio
             </Button>
             <Button
               type="button"
@@ -328,6 +359,7 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                 isCheckingAnySession || isOpeningProfile || !anyBrowserAvailable
               }
               onClick={() => void ctx.data.checkStudioSessions()}
+              className="min-h-10 sm:min-h-9"
             >
               {isCheckingAllSessions ? (
                 <Loader2
@@ -337,13 +369,14 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
               ) : (
                 <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
               )}
-              Cek Sesi
+              Cek Semua Sesi
             </Button>
             <Button
               type="button"
               variant="outline"
               disabled={!isOpen || isClosingProfile || isCheckingAnySession}
               onClick={() => void ctx.data.closeProfile()}
+              className="min-h-10 sm:min-h-9"
             >
               {isClosingProfile ? (
                 <Loader2
@@ -351,12 +384,13 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                   aria-hidden="true"
                 />
               ) : null}
-              Tutup
+              {isCdpConfigured ? 'Putus Koneksi CDP' : 'Tutup Browser'}
             </Button>
           </div>
         </CardContent>
       </Card>
 
+      {/* Per-studio session cards */}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         {STUDIO_SESSION_CARDS.map((card) => {
           const engine = resolvePlatformEngine(
@@ -388,7 +422,7 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                     </span>
                     <span className="truncate">{card.label}</span>
                   </CardTitle>
-                  <p className="truncate text-[11px] font-light text-muted-foreground/75">
+                  <p className="truncate text-xs text-muted-foreground">
                     {card.subtitle}
                   </p>
                 </div>
@@ -396,35 +430,56 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
                   {engine.label}
                 </Badge>
               </CardHeader>
-              <CardContent className="flex items-center justify-between gap-2 p-4 pt-1">
-                {renderSessionBadge(sessionCheck)}
-                <div className="flex shrink-0 items-center gap-1.5">
-                  <IconActionButton
-                    icon={isCheckingThis ? Loader2 : ShieldCheck}
-                    iconClassName={isCheckingThis ? 'animate-spin' : undefined}
-                    label={`Cek status login ${card.label}`}
-                    variant="outline"
-                    disabled={
-                      isCheckingAnySession ||
-                      isOpeningProfile ||
-                      !anyBrowserAvailable
-                    }
-                    onClick={() =>
-                      void ctx.data.checkStudioSessions(card.platforms)
-                    }
-                  />
-                  <IconActionButton
-                    icon={ExternalLink}
-                    label={`Buka login ${card.label}`}
-                    variant="outline"
-                    disabled={
-                      isOpeningProfile ||
-                      isCheckingAnySession ||
-                      !anyBrowserAvailable
-                    }
-                    onClick={() => void ctx.data.openProfile(card.platforms)}
-                  />
+              <CardContent className="space-y-2.5 p-4 pt-1">
+                <div className="flex items-center justify-between gap-2">
+                  {renderSessionBadge(sessionCheck)}
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      disabled={
+                        isCheckingAnySession ||
+                        isOpeningProfile ||
+                        !anyBrowserAvailable
+                      }
+                      onClick={() =>
+                        void ctx.data.checkStudioSessions(card.platforms)
+                      }
+                      className="min-h-9 sm:min-h-7"
+                    >
+                      {isCheckingThis ? (
+                        <Loader2
+                          className="size-3 animate-spin"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <ShieldCheck className="size-3" aria-hidden="true" />
+                      )}
+                      <span>Cek</span>
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      disabled={
+                        isOpeningProfile ||
+                        isCheckingAnySession ||
+                        !anyBrowserAvailable
+                      }
+                      onClick={() => void ctx.data.openProfile(card.platforms)}
+                      className="min-h-9 sm:min-h-7"
+                    >
+                      <ExternalLink className="size-3" aria-hidden="true" />
+                      <span>Buka</span>
+                    </Button>
+                  </div>
                 </div>
+                {sessionCheck?.detail ? (
+                  <p className="text-xs text-muted-foreground">
+                    {sessionCheck.detail}
+                  </p>
+                ) : null}
               </CardContent>
             </Card>
           );
@@ -435,25 +490,23 @@ export function StudioPage({ ctx }: AutoPostPageProps) {
         <CardContent className="p-4">
           <Accordion>
             <AccordionItem value="login-guide">
-              <AccordionTrigger>Panduan login sekali</AccordionTrigger>
+              <AccordionTrigger>
+                Panduan singkat sambung Chrome harian (CDP)
+              </AccordionTrigger>
               <AccordionContent>
-                <ol className="list-decimal space-y-1.5 pl-4 text-xs font-light leading-relaxed text-muted-foreground/75">
+                <ol className="list-decimal space-y-1.5 pl-4 text-xs leading-relaxed text-muted-foreground">
                   <li>
-                    Klik Buka Semua atau tombol buka di kartu platform untuk
-                    menjalankan browser profil lokal.
+                    Klik tombol Salin Target Shortcut di atas, lalu tempel pada
+                    kolom Target di Properties shortcut Google Chrome Anda.
                   </li>
                   <li>
-                    Login manual di YouTube, TikTok, dan Meta Business Suite
-                    (pastikan akun Instagram sudah terhubung ke Facebook Page);
-                    sandi tidak pernah disimpan aplikasi.
+                    Tutup seluruh jendela Chrome, lalu buka kembali Chrome lewat
+                    shortcut tersebut dan login ke YouTube Studio, TikTok
+                    Studio, dan Meta Business Suite.
                   </li>
                   <li>
-                    Klik Cek Sesi untuk memastikan status aktif, lalu klik Tutup
-                    agar sesi tersimpan di{' '}
-                    <code className="font-mono text-foreground">
-                      {browser.profileDir}
-                    </code>
-                    .
+                    Masukkan http://127.0.0.1:9222 pada kolom Sambung Chrome
+                    Harian (CDP URL) lalu klik Simpan CDP.
                   </li>
                 </ol>
               </AccordionContent>

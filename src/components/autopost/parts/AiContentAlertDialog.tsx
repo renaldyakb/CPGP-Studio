@@ -109,7 +109,7 @@ export function AiContentAlertDialog({
                 >
                   Jadikan default workspace
                 </label>
-                <p className="text-[11px] font-light text-muted-foreground/75">
+                <p className="text-[11px] text-muted-foreground">
                   Gunakan pilihan ini otomatis di upload berikutnya tanpa
                   bertanya lagi.
                 </p>

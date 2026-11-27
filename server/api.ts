@@ -670,6 +670,7 @@ export function createApiRouter(): Express {
     watchedRootPath = targetRoot;
     watcher = chokidar.watch(targetRoot, {
       ignoreInitial: true,
+      ignorePermissionErrors: true,
       persistent: true,
       depth: 4,
       ignored: (watchPath: string) => isIgnoredWatchPath(watchPath, targetRoot),
@@ -706,7 +707,14 @@ export function createApiRouter(): Express {
       .on('change', (p) => triggerDebouncedScan('change', p))
       .on('unlink', (p) => triggerDebouncedScan('unlink', p))
       .on('addDir', (p) => triggerDebouncedScan('addDir', p))
-      .on('unlinkDir', (p) => triggerDebouncedScan('unlinkDir', p));
+      .on('unlinkDir', (p) => triggerDebouncedScan('unlinkDir', p))
+      .on('error', (err) => {
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        if (code === 'EBUSY' || code === 'EPERM' || code === 'ENOENT') {
+          return;
+        }
+        console.warn('[Chokidar Watcher Warning]:', err);
+      });
 
     if (singletonInstance) {
       singletonInstance.watcher = watcher;

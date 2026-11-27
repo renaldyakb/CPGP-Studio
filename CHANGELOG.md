@@ -4,6 +4,27 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.12.2] - 2026-11-27 (Auto-Detect Meta Thumbnail Observer, Redesigned Auto-Post / Tabel / Kalender UX & Windows Watcher Stability)
+
+### Peningkatan UX, UI & Aksesibilitas (Improved)
+- **Redesign `/auto-post` (Dasbor, Riwayat & Log, Browser Studio / CDP) (`src/components/autopost/*`)**:
+  - **Modal Detail & Caption In-Place**: Klik tombol **Detail** atau **Caption** di `/auto-post` kini membuka `ContentDetailModal` langsung di halaman `/auto-post` tanpa redirect ke `/?detail=` atau `/?caption=`, menjaga konteks jadwal dan pilihan platform tetap utuh.
+  - **Navigasi Sub-Tab & Strip Koneksi Cepat**: Menambahkan bar navigasi horizontal (`Dasbor`, `Riwayat & Log`, `Browser Studio / CDP`, `Meta API`, `YouTube API`) beserta penanda status koneksi aktif dan filter cepat antrean (`Siap Kirim`, `Perlu WM`, `Tayang`).
+  - **Pemilihan Multi-Platform Fleksibel & Log Live**: Menambahkan checkbox target per platform (bebas kirim ke kombinasi apa pun), label engine yang selalu terlihat (`Meta API`, `YouTube API`, `Chrome CDP`, `Browser`), panel proses aktif di posisi teratas dengan tombol **Log** live yang bisa diperluas dan tombol **Coba Lagi** 1-klik, serta tombol 1-klik **Salin Target Shortcut** Chrome CDP di `/auto-post/studio`.
+  - **Kontras WCAG AA & Responsif**: Menghapus seluruh teks rendah-kontras `text-muted-foreground/75`, menambahkan `min-w-0` pada `SidebarInset` (`src/components/ui/sidebar.tsx`), dan tampilan kartu responsif di tablet/mobile (0px horizontal overflow di `1440px`, `768px`, `390px`).
+- **Pembaruan `/tabel` & `/kalender` (`src/components/TableView.tsx`, `src/components/CalendarView.tsx`, `src/routes/planner/CalendarPage.tsx`)**:
+  - **`/tabel`**: Bar filter cepat (`Semua`, `Siap Upload`, `Perlu WM`, `Selesai`), urutan kronologis akurat (`isoDate` + `folderCode`) dengan `aria-sort`, tombol aksi cepat 1-klik (`WM` / `Post`) di tiap baris, serta kartu responsif untuk tablet & mobile.
+  - **`/kalender`**: Menampilkan status publikasi nyata (tidak hanya status WM) di seluruh tampilan Bulan/Minggu/Hari (`4/4` hijau + centang ganda, `1/4..3/4` atau `Jdw` biru) dan tampilan **Agenda** (thumbnail 9:16, 4 lencana platform individual, serta tombol cepat `Post`/`WM`), lengkap dengan 6 filter status interaktif (`Semua`, `Terpublish 4/4`, `Sebagian / Jadwal`, `Siap Upload`, `Perlu WM`, `Hold / Draft`).
+
+### Perbaikan Stabilitas & Anti-Bot Browser (Fixed)
+- **Deteksi Otomatis Thumbnail Meta Business Suite via `MutationObserver` (`server/autopost/browserPublishers.ts`)**:
+  - Menghilangkan scroll berulang yang gelisah saat menunggu bagian Thumbnail FB+IG muncul. Kini browser menunggu diam secara pasif hingga 120 detik dengan `MutationObserver` read-only, langsung mendeteksi saat tombol `Upload image` muncul dan aktif (meski di bawah fold), scroll 1x secara halus, lalu menunggu progressbar upload cover selesai sebelum lanjut ke tab berikutnya.
+  - Memperluas waktu tunggu sabar tombol `Edit cover` TikTok menjadi 45 detik.
+- **Mencegah Crash `chokidar EBUSY` di Windows (`server/api.ts`)**:
+  - Menambahkan `ignorePermissionErrors: true` dan listener `.on('error')` pada `chokidar.watch()` agar kunci file sementara dari Windows Explorer/antivirus di folder `KONTEN` tidak pernah menjatuhkan server.
+
+---
+
 ## [v2.12.1] - 2026-11-27 (Meta API Cover Upload, Real-Time Terminal Logs, All-Platform Browser Cover & Human-Like Anti-Bot v2)
 
 ### Perbaikan & Peningkatan (Fixed / Improved)

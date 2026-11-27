@@ -373,7 +373,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0">
           <div className="space-y-1">
             <CardTitle>Status Koneksi</CardTitle>
-            <CardDescription className="font-light text-muted-foreground/75">
+            <CardDescription className="text-muted-foreground">
               Status mesin unggah Meta Graph API untuk Facebook Reels dan
               Instagram Reels.
             </CardDescription>
@@ -413,7 +413,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
           {isConfigured ? (
             <div className="grid grid-cols-1 gap-3 rounded-md border border-border bg-muted/50 px-3.5 py-2.5 sm:grid-cols-3">
               <div className="min-w-0 space-y-0.5">
-                <span className="block text-[11px] font-light text-muted-foreground/75">
+                <span className="block text-[11px] text-muted-foreground">
                   Facebook Page
                 </span>
                 <span className="block truncate font-mono text-xs text-foreground">
@@ -421,7 +421,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                 </span>
               </div>
               <div className="min-w-0 space-y-0.5">
-                <span className="block text-[11px] font-light text-muted-foreground/75">
+                <span className="block text-[11px] text-muted-foreground">
                   Instagram Business
                 </span>
                 <span className="block truncate font-mono text-xs text-foreground">
@@ -431,7 +431,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                 </span>
               </div>
               <div className="min-w-0 space-y-1">
-                <span className="block text-[11px] font-light text-muted-foreground/75">
+                <span className="block text-[11px] text-muted-foreground">
                   Status Token
                 </span>
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -445,11 +445,11 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                     </Badge>
                   )}
                   {metaApi.tokenType === 'page_permanent' ? (
-                    <span className="font-mono text-[11px] font-light text-muted-foreground/75">
+                    <span className="font-mono text-[11px] text-muted-foreground">
                       Never expires
                     </span>
                   ) : formattedTokenExpiry ? (
-                    <span className="font-mono text-[11px] font-light text-muted-foreground/75">
+                    <span className="font-mono text-[11px] text-muted-foreground">
                       s/d {formattedTokenExpiry}
                     </span>
                   ) : null}
@@ -457,7 +457,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
               </div>
             </div>
           ) : (
-            <p className="text-xs font-light text-muted-foreground/75">
+            <p className="text-xs text-muted-foreground">
               Belum ada token Meta yang terhubung. Isi kredensial di bawah dan
               tukar token untuk mulai menggunakan API resmi.
             </p>
@@ -483,7 +483,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
             </Button>
 
             {testResult ? (
-              <span className="font-mono text-[11px] font-light text-muted-foreground/75">
+              <span className="font-mono text-[11px] text-muted-foreground">
                 Diperiksa {formatCheckedTime(testResult.checkedAt)} ·{' '}
                 {testResult.graphApiVersion}
               </span>
@@ -519,7 +519,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                         {testResult.fbPage.ok ? 'OK' : 'Gagal'}
                       </Badge>
                     </div>
-                    <p className="truncate font-mono text-[11px] font-light text-muted-foreground/75">
+                    <p className="truncate font-mono text-[11px] text-muted-foreground">
                       {testResult.fbPage.ok
                         ? `${testResult.fbPage.pageName || 'Page'} · ${testResult.fbPage.pageId}`
                         : testResult.fbPage.error || 'Page belum terhubung'}
@@ -553,7 +553,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                         {testResult.igAccount.ok ? 'OK' : 'Gagal'}
                       </Badge>
                     </div>
-                    <p className="truncate font-mono text-[11px] font-light text-muted-foreground/75">
+                    <p className="truncate font-mono text-[11px] text-muted-foreground">
                       {testResult.igAccount.ok
                         ? `@${testResult.igAccount.username || testResult.igAccount.igUserId}${
                             testResult.igAccount.mediaCount !== null
@@ -633,7 +633,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
       <Card>
         <CardHeader>
           <CardTitle>Kredensial Meta App &amp; Token</CardTitle>
-          <CardDescription className="font-light text-muted-foreground/75">
+          <CardDescription className="text-muted-foreground">
             Masukkan App ID dan App Secret dari Meta Developer, lalu tukar
             short-lived token (EAA...) menjadi Long-Lived dan Page Token
             permanen dalam satu klik.
@@ -792,7 +792,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                 onClick={() => setTokenDraft('')}
               />
             </div>
-            <p className="text-[11px] font-light leading-relaxed text-muted-foreground/75">
+            <p className="text-[11px] font-light leading-relaxed text-muted-foreground">
               {tokenDraft.trim() && !canUseOAuth
                 ? 'Isi App ID dan App Secret di atas agar tombol Tukar Long-Lived dapat digunakan, atau gunakan Deteksi Saja untuk token yang sudah Long-Lived.'
                 : 'Tombol Tukar Long-Lived menjalankan Langkah 5 dan 6 otomatis: memperpanjang token Explorer menjadi 60 hari, mengambil Page Token permanen, lalu memuat Page ID dan IG User ID.'}
@@ -831,7 +831,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                           </Badge>
                         ) : null}
                       </div>
-                      <span className="whitespace-normal font-mono text-[11px] font-light text-muted-foreground/75">
+                      <span className="whitespace-normal font-mono text-[11px] text-muted-foreground">
                         Page ID: {page.pageId} ·{' '}
                         {page.igUsername
                           ? `IG: @${page.igUsername}`
@@ -843,7 +843,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
               </div>
 
               {selectedPage && !selectedPage.igUserId ? (
-                <p className="text-[11px] font-light text-muted-foreground/75">
+                <p className="text-[11px] text-muted-foreground">
                   Page ini belum memiliki akun Instagram Business tertaut.
                   Facebook Reels tetap bisa dipakai.
                 </p>
@@ -911,7 +911,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                         placeholder="1000"
                         className="font-mono"
                       />
-                      <span className="block text-[11px] font-light text-muted-foreground/75">
+                      <span className="block text-[11px] text-muted-foreground">
                         Contoh: 1000 berarti frame pada detik pertama video.
                       </span>
                     </div>
@@ -925,7 +925,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
                       >
                         Bagikan ke Feed
                       </label>
-                      <span className="block text-[11px] font-light text-muted-foreground/75">
+                      <span className="block text-[11px] text-muted-foreground">
                         Tampilkan Instagram Reels di grid profil selain di tab
                         Reels.
                       </span>
@@ -973,7 +973,7 @@ export function MetaApiPage({ ctx }: AutoPostPageProps) {
       <Card>
         <CardHeader>
           <CardTitle>Panduan Sambungkan Meta API (Langkah 0 - 8)</CardTitle>
-          <CardDescription className="font-light text-muted-foreground/75">
+          <CardDescription className="text-muted-foreground">
             Ikuti urutan ini sebelum membuat token. Akun Instagram yang belum
             siap akan membuat token gagal dipakai publish.
           </CardDescription>

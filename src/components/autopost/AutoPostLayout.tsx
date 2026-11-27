@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Link,
   Outlet,
   useLocation,
   useNavigate,
   useSearch,
 } from '@tanstack/react-router';
-import { AlertCircle, CheckCircle2, RefreshCw } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Clock,
+  Globe,
+  LayoutDashboard,
+  RefreshCw,
+  Share2,
+  Video,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { AppShell } from '@/components/shell/AppShell';
 import { useAppTheme } from '@/components/shell/useAppTheme';
@@ -20,11 +30,23 @@ import {
   CreateContentModal,
   type CreateContentTab,
 } from '@/components/planner/CreateContentModal';
+import {
+  ContentDetailModal,
+  type DetailWorkTab,
+} from '@/components/ContentDetailModal';
 import { IconActionButton } from './parts/IconActionButton';
 import { AutoPostProvider } from './AutoPostContext';
 import { useAutoPostData, type ToastKind } from './useAutoPostData';
 import type { AutoPostPageContext } from './pageProps';
-import type { ContentPlannerItem, PlannerDatabase } from '@/types/planner';
+import type {
+  ContentPlannerItem,
+  PlannerDatabase,
+  PlatformKey,
+  PlatformPublishState,
+  PlatformUploadStatus,
+  UserContentProperties,
+  WorkflowStatus,
+} from '@/types/planner';
 import type {
   WorkspaceMetadata,
   WorkspacesRegistry,
@@ -102,6 +124,10 @@ export function AutoPostLayout() {
     tab: CreateContentTab;
   }>({ open: false, tab: 'single' });
   const [isQuickGuideOpen, setIsQuickGuideOpen] = useState<boolean>(false);
+  const [detailModalState, setDetailModalState] = useState<{
+    itemId: string | null;
+    initialTab: DetailWorkTab;
+  }>({ itemId: null, initialTab: 'publish' });
 
   const [toast, setToast] = useState<{
     message: string;
@@ -286,25 +312,127 @@ export function AutoPostLayout() {
     }
   }, [contentRootPath, showToast]);
 
-  const openContentDetail = useCallback(
-    (item: ContentPlannerItem) => {
-      void navigate({ to: '/', search: { detail: item.id } });
-    },
-    [navigate]
-  );
+  const openContentDetail = useCallback((item: ContentPlannerItem) => {
+    setDetailModalState({ itemId: item.id, initialTab: 'publish' });
+  }, []);
 
-  const editCaption = useCallback(
-    (item: ContentPlannerItem) => {
-      void navigate({ to: '/', search: { caption: item.id } });
-    },
-    [navigate]
-  );
+  const editCaption = useCallback((item: ContentPlannerItem) => {
+    setDetailModalState({ itemId: item.id, initialTab: 'caption' });
+  }, []);
 
   const openWatermark = useCallback(
     (item: ContentPlannerItem) => {
-      void navigate({ to: '/', search: { watermark: item.id } });
+      void navigate({ to: '/watermark', search: { item: item.id } });
     },
     [navigate]
+  );
+
+  const selectedDetailItem = useMemo(() => {
+    if (!detailModalState.itemId) return null;
+    return items.find((entry) => entry.id === detailModalState.itemId) ?? null;
+  }, [detailModalState.itemId, items]);
+
+  const handleDetailUpdateProperties = useCallback(
+    async (itemId: string, patch: Partial<UserContentProperties>) => {
+      try {
+        await plannerApi.updateItemProperties(itemId, patch);
+        await refreshItems();
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Gagal memperbarui properti konten.',
+          'error'
+        );
+      }
+    },
+    [refreshItems, showToast]
+  );
+
+  const handleDetailUpdateStatus = useCallback(
+    async (itemId: string, status: WorkflowStatus, lockManually = true) => {
+      try {
+        await plannerApi.updateItemProperties(itemId, {
+          workflowStatus: status,
+          statusLockedManually: lockManually,
+        });
+        await refreshItems();
+        showToast('Status konten diperbarui.');
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Gagal memperbarui status konten.',
+          'error'
+        );
+      }
+    },
+    [refreshItems, showToast]
+  );
+
+  const handleDetailUpdatePlatform = useCallback(
+    async (
+      itemId: string,
+      platform: PlatformKey,
+      patch: Partial<PlatformPublishState>
+    ) => {
+      try {
+        await plannerApi.updatePlatformStatus(itemId, platform, patch);
+        await refreshItems();
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Gagal memperbarui status platform.',
+          'error'
+        );
+      }
+    },
+    [refreshItems, showToast]
+  );
+
+  const handleDetailBatchUpdatePlatforms = useCallback(
+    async (itemId: string, status: PlatformUploadStatus) => {
+      try {
+        await plannerApi.batchUpdatePlatforms(itemId, status);
+        await refreshItems();
+        showToast('Status seluruh platform diperbarui.');
+      } catch (err) {
+        showToast(
+          err instanceof Error
+            ? err.message
+            : 'Gagal memperbarui status batch platform.',
+          'error'
+        );
+      }
+    },
+    [refreshItems, showToast]
+  );
+
+  const handleDetailSaveCaption = useCallback(
+    async (itemId: string, newText: string) => {
+      try {
+        await plannerApi.saveCaptionToFile(itemId, newText);
+        await refreshItems();
+        showToast('caption.txt berhasil disimpan.');
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Gagal menyimpan caption.txt.',
+          'error'
+        );
+      }
+    },
+    [refreshItems, showToast]
+  );
+
+  const handleDetailOpenExplorer = useCallback(
+    async (targetPath: string, selectFile = false) => {
+      try {
+        await plannerApi.openInExplorer(targetPath, selectFile);
+      } catch (err) {
+        showToast(
+          err instanceof Error
+            ? err.message
+            : 'Gagal membuka lokasi file di Explorer.',
+          'error'
+        );
+      }
+    },
+    [showToast]
   );
 
   const ctx = useMemo<AutoPostPageContext>(
@@ -435,6 +563,104 @@ export function AutoPostLayout() {
           </>
         }
       >
+        <nav
+          aria-label="Navigasi Auto-Post"
+          className="mb-4 flex flex-wrap items-center gap-1.5 border-b border-border pb-3"
+        >
+          {(
+            [
+              {
+                to: '/auto-post',
+                label: 'Dasbor',
+                icon: LayoutDashboard,
+                badge: runningCount > 0 ? String(runningCount) : null,
+                badgeVariant: 'info' as const,
+                connected: false,
+              },
+              {
+                to: '/auto-post/history',
+                label: 'Riwayat & Log',
+                icon: Clock,
+                badge:
+                  data.jobs.filter((j) => j.status === 'failed').length > 0
+                    ? String(
+                        data.jobs.filter((j) => j.status === 'failed').length
+                      )
+                    : data.jobs.length > 0
+                      ? String(data.jobs.length)
+                      : null,
+                badgeVariant:
+                  data.jobs.filter((j) => j.status === 'failed').length > 0
+                    ? ('destructive' as const)
+                    : ('muted' as const),
+                connected: false,
+              },
+              {
+                to: '/auto-post/studio',
+                label: data.settings.browser.cdpUrl?.trim()
+                  ? 'Browser (CDP)'
+                  : 'Browser Studio',
+                icon: Globe,
+                badge: null,
+                badgeVariant: 'muted' as const,
+                connected: Boolean(
+                  data.browserSession.isOpen ||
+                    data.settings.browser.cdpUrl?.trim()
+                ),
+              },
+              {
+                to: '/auto-post/meta',
+                label: 'Meta API',
+                icon: Share2,
+                badge: null,
+                badgeVariant: 'muted' as const,
+                connected: Boolean(
+                  data.capabilities.metaFbApiReady ||
+                    data.capabilities.metaIgApiReady
+                ),
+              },
+              {
+                to: '/auto-post/youtube',
+                label: 'YouTube API',
+                icon: Video,
+                badge: null,
+                badgeVariant: 'muted' as const,
+                connected: Boolean(data.capabilities.youtubeApiReady),
+              },
+            ] as const
+          ).map((tab) => {
+            const isActive = activeRoute === tab.to;
+            const TabIcon = tab.icon;
+            return (
+              <Link
+                key={tab.to}
+                to={tab.to}
+                aria-current={isActive ? 'page' : undefined}
+                className={
+                  isActive
+                    ? 'inline-flex min-h-10 sm:min-h-9 cursor-pointer items-center gap-2 rounded-md border border-[#7F1D1D]/30 bg-[#FCE7EB] px-3 py-1.5 text-xs font-semibold text-[#651220] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:border-[#9F1239]/40 dark:bg-[#4C0519] dark:text-[#FECDD3]'
+                    : 'inline-flex min-h-10 sm:min-h-9 cursor-pointer items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-border hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+                }
+              >
+                <TabIcon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>{tab.label}</span>
+                {tab.connected ? (
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full bg-[#166534] dark:bg-[#86efac]"
+                    aria-label="Terhubung"
+                    title="Terhubung"
+                  />
+                ) : null}
+                {tab.badge ? (
+                  <Badge variant={tab.badgeVariant} size="xs" className="font-mono">
+                    {tab.badge}
+                  </Badge>
+                ) : null}
+              </Link>
+            );
+          })}
+        </nav>
+
         {data.isLoading ? (
           <div
             role="status"
@@ -456,6 +682,45 @@ export function AutoPostLayout() {
           <Outlet />
         )}
       </AppShell>
+
+      {selectedDetailItem ? (
+        <ContentDetailModal
+          item={selectedDetailItem}
+          isOpen={Boolean(selectedDetailItem)}
+          initialTab={detailModalState.initialTab}
+          allItems={items}
+          onClose={() =>
+            setDetailModalState((prev) => ({ ...prev, itemId: null }))
+          }
+          onSelectItem={(nextItem) =>
+            setDetailModalState((prev) => ({ ...prev, itemId: nextItem.id }))
+          }
+          onNavigate={(nextItemId) =>
+            setDetailModalState((prev) => ({ ...prev, itemId: nextItemId }))
+          }
+          onUpdateProperties={handleDetailUpdateProperties}
+          onUpdateStatus={handleDetailUpdateStatus}
+          onUpdatePlatform={handleDetailUpdatePlatform}
+          onBatchUpdatePlatforms={handleDetailBatchUpdatePlatforms}
+          onSaveCaption={handleDetailSaveCaption}
+          onOpenWatermark={(target) => {
+            setDetailModalState((prev) => ({ ...prev, itemId: null }));
+            openWatermark(target);
+          }}
+          onOpenAutoPost={(target, platform) => {
+            setDetailModalState((prev) => ({ ...prev, itemId: null }));
+            void navigate({
+              to: '/auto-post',
+              search: {
+                item: target.id,
+                ...(platform ? { platform } : {}),
+              },
+              replace: true,
+            });
+          }}
+          onOpenExplorer={handleDetailOpenExplorer}
+        />
+      ) : null}
 
       {workspaceModalState.open ? (
         <WorkspaceModal
