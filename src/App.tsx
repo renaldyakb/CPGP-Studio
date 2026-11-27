@@ -225,6 +225,29 @@ export function App() {
 
   useEffect(() => {
     let source: EventSource | null = null;
+    let plannerSyncTimer: number | null = null;
+    let workspaceSyncTimer: number | null = null;
+
+    const schedulePlannerSync = () => {
+      if (plannerSyncTimer !== null) {
+        window.clearTimeout(plannerSyncTimer);
+      }
+      plannerSyncTimer = window.setTimeout(() => {
+        plannerSyncTimer = null;
+        void fetchPlanner();
+      }, 300);
+    };
+
+    const scheduleWorkspaceSync = () => {
+      if (workspaceSyncTimer !== null) {
+        window.clearTimeout(workspaceSyncTimer);
+      }
+      workspaceSyncTimer = window.setTimeout(() => {
+        workspaceSyncTimer = null;
+        void fetchWorkspaces();
+      }, 300);
+    };
+
     try {
       source = new EventSource('/api/events');
       source.onopen = () => setIsLiveSyncActive(true);
@@ -249,14 +272,17 @@ export function App() {
             return;
           }
           if (
-            payload.type === 'scan_complete' ||
-            payload.type === 'file_change' ||
-            payload.type === 'planner-updated' ||
             payload.type === 'workspace-switched' ||
             payload.type === 'workspace-activated'
           ) {
-            void fetchWorkspaces();
-            void fetchPlanner();
+            scheduleWorkspaceSync();
+            schedulePlannerSync();
+          } else if (
+            payload.type === 'scan_complete' ||
+            payload.type === 'file_change' ||
+            payload.type === 'planner-updated'
+          ) {
+            schedulePlannerSync();
           }
         } catch {
           // ignore heartbeat
@@ -267,6 +293,8 @@ export function App() {
       setIsLiveSyncActive(false);
     }
     return () => {
+      if (plannerSyncTimer !== null) window.clearTimeout(plannerSyncTimer);
+      if (workspaceSyncTimer !== null) window.clearTimeout(workspaceSyncTimer);
       source?.close();
     };
   }, [fetchPlanner, fetchWorkspaces]);

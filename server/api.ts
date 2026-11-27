@@ -332,8 +332,10 @@ export function createApiRouter(): Express {
   const app = express();
   const sseClients = new Set<Response>();
 
-  // Ensure initial scan / JSON database exists on startup
-  let cachedDb: PlannerDatabase = syncDatabaseWithDisk();
+  // Ensure initial scan / JSON database exists on startup (skip if awaiting first-run onboarding)
+  let cachedDb: PlannerDatabase = hasConfiguredWorkspace()
+    ? syncDatabaseWithDisk()
+    : createEmptyDatabase('', new Date().getFullYear());
 
   function broadcastUpdate(reason: string, db: PlannerDatabase) {
     cachedDb = db;
@@ -440,6 +442,74 @@ export function createApiRouter(): Express {
   let watcher: FSWatcher | null = null;
   let watchedRootPath: string | null = null;
   let debounceTimer: NodeJS.Timeout | null = null;
+  let lastSelfScanAt = 0;
+
+  const internalIgnoredRoots = [
+    path.resolve(APP_ROOT, 'data'),
+    path.resolve(APP_ROOT, '.cache'),
+    path.resolve(APP_ROOT, 'node_modules'),
+    path.resolve(APP_ROOT, 'dist'),
+    path.resolve(APP_ROOT, 'dist-server'),
+    path.resolve(APP_ROOT, '.git'),
+    path.resolve(APP_ROOT, 'graphify-out'),
+  ].map((p) => (process.platform === 'win32' ? p.toLowerCase() : p));
+
+  const internalIgnoredDirNames = new Set([
+    'node_modules',
+    'data',
+    '.cache',
+    '.git',
+    'dist',
+    'dist-server',
+    'browser-profile',
+    'graphify-out',
+  ]);
+
+  const internalIgnoredFileNames = new Set([
+    'planner.json',
+    'planner-data.json',
+    'workspaces.json',
+    'watermark-presets.json',
+    'autopost-config.json',
+    'motionprovit-config.json',
+    'motionprovit-session.json',
+    '.cpgp-watermarked.json',
+  ]);
+
+  function isIgnoredWatchPath(candidatePath: string): boolean {
+    if (!candidatePath) return true;
+    const resolved = path.resolve(candidatePath);
+    const norm = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+
+    for (const root of internalIgnoredRoots) {
+      if (
+        norm === root ||
+        norm.startsWith(root + path.sep) ||
+        norm.startsWith(`${root}/`)
+      ) {
+        return true;
+      }
+    }
+
+    const base = path.basename(norm);
+    if (
+      internalIgnoredFileNames.has(base) ||
+      base.endsWith('.part') ||
+      base.endsWith('.tmp') ||
+      base.includes('.tmp.')
+    ) {
+      return true;
+    }
+
+    const segments = norm.split(/[\\/]+/);
+    for (const seg of segments) {
+      if (internalIgnoredDirNames.has(seg)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
 
   function rebindWatcherToActiveWorkspace() {
     if (!hasConfiguredWorkspace()) {
@@ -473,6 +543,7 @@ export function createApiRouter(): Express {
       ignoreInitial: true,
       persistent: true,
       depth: 4,
+      ignored: (watchPath: string) => isIgnoredWatchPath(watchPath),
       awaitWriteFinish: {
         stabilityThreshold: 300,
         pollInterval: 100,
@@ -480,9 +551,16 @@ export function createApiRouter(): Express {
     });
 
     const triggerDebouncedScan = (eventType: string, changedPath: string) => {
+      if (isIgnoredWatchPath(changedPath)) {
+        return;
+      }
+      if (Date.now() - lastSelfScanAt < 800) {
+        return;
+      }
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         try {
+          lastSelfScanAt = Date.now();
           const updatedDb = syncDatabaseWithDisk();
           broadcastUpdate(
             `fs:${eventType}:${path.basename(changedPath)}`,
@@ -491,7 +569,7 @@ export function createApiRouter(): Express {
         } catch (err) {
           console.error('[Chokidar Auto-Scan Error]:', err);
         }
-      }, 300);
+      }, 450);
     };
 
     watcher

@@ -4,6 +4,18 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.11.2] - 2026-11-27 (Fix Infinite `/api/workspaces` + `/api/planner` SSE Fetch Loop in Release Bundle)
+
+### Perbaikan (Fixed — Direproduksi & Diverifikasi Langsung pada Rilis GitHub)
+- **Menghentikan Infinite Loop Chokidar Watcher -> `planner.json` -> SSE (`server/api.ts`, `server/scanner.ts`)**:
+  - **Akar Masalah**: Saat folder konten workspace mencakup (atau berada di induk dari) folder internal aplikasi `data/`, `chokidar.watch(targetRoot)` ikut memantau perubahan `data/workspaces/<id>/planner.json`. Setiap kali `syncDatabaseWithDisk()` menulis `planner.json`, watcher mendeteksi perubahan tersebut setiap ~650ms (`awaitWriteFinish` 300ms + debounce 300ms) -> memicu scan ulang -> mem-broadcast SSE `planner-updated` -> frontend me-fetch `/api/workspaces` & `/api/planner` terus-menerus tanpa henti.
+  - **Solusi**: Menambahkan `isIgnoredWatchPath()` di `chokidar.watch()` dan `triggerDebouncedScan()` untuk mengecualikan seluruh direktori internal (`data/`, `.cache/`, `node_modules/`, `dist/`, `dist-server/`, `.git/`, `browser-profile/`) serta seluruh berkas JSON runtime (`planner.json`, `workspaces.json`, `autopost-config.json`, `watermark-presets.json`, `motionprovit-*.json`, `*.tmp`, `*.part`), ditambah guard cooldown 800ms dan pengecualian folder internal di `findContentFolderPaths()`.
+  - Melewati `syncDatabaseWithDisk()` saat startup bila workspace belum dikonfigurasi (menunggu Onboarding) agar tidak membuat file `__pending_onboarding__/planner.json` yang tidak perlu.
+- **Debounce & Pemisahan Event SSE di Frontend (`src/App.tsx`)**:
+  - Event `planner-updated` kini hanya menyegarkan `fetchPlanner()` (dengan debounce 300ms) tanpa memanggil `fetchWorkspaces()` berulang kali; `fetchWorkspaces()` hanya dipanggil pada event pergantian workspace (`workspace-switched` / `workspace-activated`).
+
+---
+
 ## [v2.11.1] - 2026-11-26 (Fix Windows Path Space Bug in Standalone Release CLI Launcher)
 
 ### Perbaikan (Fixed)

@@ -779,6 +779,19 @@ export function scanSingleContentFolder(
   };
 }
 
+const IGNORED_SCAN_DIRS = new Set([
+  'node_modules',
+  'data',
+  '.cache',
+  '.git',
+  'dist',
+  'dist-server',
+  'browser-profile',
+  'graphify-out',
+  'release-bundle',
+  'release-artifacts',
+]);
+
 export function findContentFolderPaths(
   dirPath: string,
   results: string[] = []
@@ -794,6 +807,10 @@ export function findContentFolderPaths(
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
+    const lowerName = entry.name.toLowerCase();
+    if (IGNORED_SCAN_DIRS.has(lowerName) || entry.name.startsWith('.')) {
+      continue;
+    }
     const fullPath = path.join(dirPath, entry.name);
     if (CONTENT_FOLDER_REGEX.test(entry.name)) {
       results.push(fullPath);
