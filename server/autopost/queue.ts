@@ -168,10 +168,30 @@ export class AutoPostQueueManager {
     };
   }
 
+  private logTerminal(
+    job: Pick<AutoPostJob, 'folderCode' | 'platform' | 'engine'>,
+    message: string,
+    level: AutoPostStepLog['level'] = 'info'
+  ): void {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const tag = `[AutoPost ${hh}:${mm}:${ss}][${job.folderCode}][${job.platform}:${job.engine}]`;
+    if (level === 'error') {
+      console.error(`${tag} ERROR: ${message}`);
+    } else if (level === 'warning') {
+      console.warn(`${tag} WARN: ${message}`);
+    } else {
+      console.log(`${tag} ${message}`);
+    }
+  }
+
   private appendLog(
     job: AutoPostJob,
     message: string,
-    level: AutoPostStepLog['level'] = 'info'
+    level: AutoPostStepLog['level'] = 'info',
+    mirrorToTerminal = true
   ): void {
     job.logs.push({
       timestamp: new Date().toISOString(),
@@ -180,6 +200,9 @@ export class AutoPostQueueManager {
     });
     if (job.logs.length > MAX_LOGS_PER_JOB) {
       job.logs.splice(0, job.logs.length - MAX_LOGS_PER_JOB);
+    }
+    if (mirrorToTerminal) {
+      this.logTerminal(job, message, level);
     }
   }
 
@@ -579,6 +602,11 @@ export class AutoPostQueueManager {
         this.combinedMetaPartners.set(fbJobId, igJobId);
         this.combinedMetaPartners.set(igJobId, fbJobId);
 
+        this.logTerminal(
+          { folderCode: input.item.folderCode, platform: 'fb_reels', engine: 'browser' },
+          `Masuk antrean gabungan Meta Business Suite (FB & IG, mode: ${resolvedMode}${scheduleTag}${aiTag}).`
+        );
+
         for (const metaJob of metaJobs) {
           this.jobs.unshift(metaJob);
           this.trimOldJobs();
@@ -624,12 +652,18 @@ export class AutoPostQueueManager {
                   Math.min(100, Math.round(update.progressPercent))
                 );
                 const hasLog = Boolean(update.log);
-                for (const metaJob of metaJobs) {
+                for (let idx = 0; idx < metaJobs.length; idx += 1) {
+                  const metaJob = metaJobs[idx];
                   if (metaJob.status !== 'running') continue;
                   metaJob.step = update.step;
                   metaJob.progressPercent = clamped;
                   if (update.log) {
-                    this.appendLog(metaJob, update.log, update.level ?? 'info');
+                    this.appendLog(
+                      metaJob,
+                      update.log,
+                      update.level ?? 'info',
+                      idx === 0
+                    );
                   }
                   this.emitJobUpdate(metaJob, hasLog || clamped >= 100);
                 }
@@ -820,6 +854,10 @@ export class AutoPostQueueManager {
       this.jobs.unshift(job);
       this.trimOldJobs();
       createdJobs.push(cloneJob(job));
+      this.logTerminal(
+        job,
+        `Masuk antrean Auto-Post (mode: ${resolvedMode}${scheduleTag}${aiTag}).`
+      );
       this.emitJobUpdate(job, true);
 
       void this.queue
@@ -841,6 +879,7 @@ export class AutoPostQueueManager {
             job.startedAt = new Date().toISOString();
             job.step = 'Memulai proses Auto-Post';
             job.progressPercent = 2;
+            this.logTerminal(job, 'Memulai proses Auto-Post...');
             this.emitJobUpdate(job, true);
 
             const handleProgress = (update: {

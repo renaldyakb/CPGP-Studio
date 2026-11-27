@@ -269,6 +269,7 @@ export function useAutoPostData(
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   const syncedCompletedJobs = useRef<Set<string>>(new Set());
+  const notifiedFailedJobs = useRef<Set<string>>(new Set());
   const prevWorkspaceIdRef = useRef<string | undefined>(workspaceId);
   const inFlightRefreshRef = useRef<Promise<void> | null>(null);
 
@@ -277,6 +278,7 @@ export function useAutoPostData(
     const next = workspaceId;
     if (prev && next && prev !== next) {
       syncedCompletedJobs.current.clear();
+      notifiedFailedJobs.current.clear();
     }
     setSessionChecks(loadStoredSessionChecks(activeWorkspaceKey));
     prevWorkspaceIdRef.current = next;
@@ -313,6 +315,8 @@ export function useAutoPostData(
           for (const job of jobsRes.value.jobs) {
             if (job.status === 'completed') {
               syncedCompletedJobs.current.add(job.jobId);
+            } else if (job.status === 'failed') {
+              notifiedFailedJobs.current.add(job.jobId);
             }
           }
           setJobs(jobsRes.value.jobs);
@@ -355,6 +359,7 @@ export function useAutoPostData(
             setBrowserSession(payload.browserSession);
           }
 
+          const isSnapshot = payload.type === 'jobs-snapshot';
           if (Array.isArray(payload.jobs)) {
             let completedNow = false;
             for (const job of payload.jobs) {
@@ -363,7 +368,18 @@ export function useAutoPostData(
                 !syncedCompletedJobs.current.has(job.jobId)
               ) {
                 syncedCompletedJobs.current.add(job.jobId);
-                completedNow = true;
+                if (!isSnapshot) completedNow = true;
+              } else if (
+                job.status === 'failed' &&
+                !notifiedFailedJobs.current.has(job.jobId)
+              ) {
+                notifiedFailedJobs.current.add(job.jobId);
+                if (!isSnapshot) {
+                  onToastRef.current?.(
+                    `Auto-Post ${job.platform} gagal: ${job.error || job.step}`,
+                    'error'
+                  );
+                }
               }
             }
             setJobs(payload.jobs);
@@ -382,6 +398,15 @@ export function useAutoPostData(
             ) {
               syncedCompletedJobs.current.add(incoming.jobId);
               onPlannerSyncRef.current?.();
+            } else if (
+              incoming.status === 'failed' &&
+              !notifiedFailedJobs.current.has(incoming.jobId)
+            ) {
+              notifiedFailedJobs.current.add(incoming.jobId);
+              onToastRef.current?.(
+                `Auto-Post ${incoming.platform} gagal: ${incoming.error || incoming.step}`,
+                'error'
+              );
             }
           }
         } catch {

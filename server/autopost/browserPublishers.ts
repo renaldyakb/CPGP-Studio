@@ -324,9 +324,248 @@ async function humanDelay(
   maxMs: number,
   signal: AbortSignal
 ): Promise<void> {
-  const delayMs =
-    minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
+  // Approximate Gaussian-like distribution by averaging two uniform samples
+  const u = (Math.random() + Math.random()) / 2;
+  const span = Math.max(1, maxMs - minMs);
+  const delayMs = minMs + Math.round(u * span);
   await abortableWait(delayMs, signal);
+}
+
+const lastCursorByPage = new WeakMap<Page, { x: number; y: number }>();
+
+async function getViewportBounds(
+  page: Page
+): Promise<{ width: number; height: number } | null> {
+  const direct = page.viewportSize();
+  if (direct && direct.width > 0 && direct.height > 0) {
+    return direct;
+  }
+  return page
+    .evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }))
+    .catch(() => null);
+}
+
+/**
+ * Moves the pointer along a randomized cubic Bezier trajectory with ease-in-out
+ * speed variation and subtle hand micro-jitter instead of a straight linear line.
+ */
+async function humanMoveMouse(
+  page: Page,
+  targetX: number,
+  targetY: number,
+  signal: AbortSignal
+): Promise<void> {
+  throwIfAborted(signal);
+  const viewport = await getViewportBounds(page);
+  const vw = viewport?.width ?? 1280;
+  const vh = viewport?.height ?? 800;
+
+  let start = lastCursorByPage.get(page);
+  if (!start) {
+    // Seed an organic initial cursor position inside the viewport rather than (0, 0)
+    start = {
+      x: Math.round(vw * (0.25 + Math.random() * 0.5)),
+      y: Math.round(vh * (0.2 + Math.random() * 0.5)),
+    };
+    await page.mouse.move(start.x, start.y).catch(() => {});
+  }
+
+  const dx = targetX - start.x;
+  const dy = targetY - start.y;
+  const distance = Math.hypot(dx, dy);
+
+  if (distance < 4) {
+    await page.mouse.move(targetX, targetY);
+    lastCursorByPage.set(page, { x: targetX, y: targetY });
+    return;
+  }
+
+  // Perpendicular arc offset proportional to travel distance
+  const perpX = -dy / distance;
+  const perpY = dx / distance;
+  const arcSign = Math.random() < 0.5 ? -1 : 1;
+  const arcMag = Math.min(95, Math.max(12, distance * (0.12 + Math.random() * 0.16)));
+
+  const cp1x = start.x + dx * (0.24 + Math.random() * 0.14) + perpX * arcSign * arcMag;
+  const cp1y = start.y + dy * (0.24 + Math.random() * 0.14) + perpY * arcSign * arcMag;
+  const cp2x = start.x + dx * (0.66 + Math.random() * 0.14) + perpX * arcSign * arcMag * 0.45;
+  const cp2y = start.y + dy * (0.66 + Math.random() * 0.14) + perpY * arcSign * arcMag * 0.45;
+
+  const steps = Math.max(12, Math.min(28, Math.round(distance / 28) + 8));
+
+  for (let i = 1; i <= steps; i += 1) {
+    throwIfAborted(signal);
+    const linearT = i / steps;
+    // Smoothstep ease-in-out timing curve
+    const t = linearT * linearT * (3 - 2 * linearT);
+    const inv = 1 - t;
+
+    const jitterScale = i === steps ? 0 : Math.sin(linearT * Math.PI) * 1.4;
+    const x =
+      inv * inv * inv * start.x +
+      3 * inv * inv * t * cp1x +
+      3 * inv * t * t * cp2x +
+      t * t * t * targetX +
+      (Math.random() - 0.5) * jitterScale;
+    const y =
+      inv * inv * inv * start.y +
+      3 * inv * inv * t * cp1y +
+      3 * inv * t * t * cp2y +
+      t * t * t * targetY +
+      (Math.random() - 0.5) * jitterScale;
+
+    const clampedX = Math.max(1, Math.min(vw - 1, x));
+    const clampedY = Math.max(1, Math.min(vh - 1, y));
+    await page.mouse.move(clampedX, clampedY);
+
+    if (i < steps) {
+      // Slightly slower near start and target, faster mid-travel
+      const edgeFactor = 1 - Math.sin(linearT * Math.PI) * 0.55;
+      const stepDelay = Math.round((5 + Math.random() * 9) * edgeFactor);
+      await abortableWait(stepDelay, signal);
+    }
+  }
+
+  // Occasional subtle human overshoot + micro-correction on longer cursor moves
+  if (distance > 180 && Math.random() < 0.35) {
+    const overX = Math.max(1, Math.min(vw - 1, targetX + (Math.random() - 0.5) * 6));
+    const overY = Math.max(1, Math.min(vh - 1, targetY + (Math.random() - 0.5) * 5));
+    await page.mouse.move(overX, overY);
+    await humanDelay(25, 55, signal);
+    await page.mouse.move(targetX, targetY);
+  }
+
+  lastCursorByPage.set(page, { x: targetX, y: targetY });
+}
+
+/**
+ * Performs a subtle, natural mouse drift while reading a newly loaded page.
+ */
+async function humanIdleDrift(page: Page, signal: AbortSignal): Promise<void> {
+  try {
+    const viewport = await getViewportBounds(page);
+    if (!viewport) return;
+    const cur = lastCursorByPage.get(page) ?? {
+      x: Math.round(viewport.width * 0.45),
+      y: Math.round(viewport.height * 0.4),
+    };
+    const nextX = Math.max(
+      40,
+      Math.min(viewport.width - 40, cur.x + (Math.random() - 0.5) * 180)
+    );
+    const nextY = Math.max(
+      60,
+      Math.min(viewport.height - 60, cur.y + (Math.random() - 0.5) * 120)
+    );
+    await humanMoveMouse(page, nextX, nextY, signal);
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
+ * Emits natural wheel scroll ticks over a scrollable region or viewport.
+ */
+async function humanScrollWheel(
+  page: Page,
+  totalDeltaY: number,
+  signal: AbortSignal,
+  anchorLocator?: Locator
+): Promise<void> {
+  throwIfAborted(signal);
+  try {
+    if (anchorLocator) {
+      const box = await anchorLocator.boundingBox({ timeout: 1500 }).catch(() => null);
+      if (box && box.width > 10 && box.height > 10) {
+        const hoverX = box.x + box.width * (0.3 + Math.random() * 0.4);
+        const hoverY = box.y + box.height * (0.3 + Math.random() * 0.4);
+        await humanMoveMouse(page, hoverX, hoverY, signal);
+      }
+    }
+    const direction = totalDeltaY >= 0 ? 1 : -1;
+    let remaining = Math.abs(totalDeltaY);
+    while (remaining > 0) {
+      throwIfAborted(signal);
+      const tick = Math.min(remaining, 85 + Math.floor(Math.random() * 85));
+      await page.mouse.wheel(0, direction * tick);
+      remaining -= tick;
+      await humanDelay(45, 115, signal);
+    }
+  } catch {
+    // Ignore wheel scroll errors on non-scrollable targets
+  }
+}
+
+/**
+ * Enters text with realistic human cadence:
+ * - Short strings (<= 65 chars): character-by-character typing with variable key delays.
+ * - Longer multi-line captions: paragraph-by-paragraph entry with Enter keys and pauses,
+ *   typing short bursts and inserting longer lines naturally so it stays fast without
+ *   looking like an instant 0ms DOM dump.
+ */
+async function humanTypeText(
+  page: Page,
+  text: string,
+  signal: AbortSignal
+): Promise<void> {
+  throwIfAborted(signal);
+  const normalized = text.replace(/\r\n/g, '\n');
+
+  if (normalized.length <= 65 && !normalized.includes('\n')) {
+    for (let i = 0; i < normalized.length; i += 1) {
+      throwIfAborted(signal);
+      const ch = normalized[i];
+      await page.keyboard.type(ch);
+      if (ch === ' ' || ch === '.' || ch === '?' || ch === '!') {
+        await humanDelay(55, 130, signal);
+      } else {
+        await humanDelay(28, 78, signal);
+      }
+    }
+    return;
+  }
+
+  const lines = normalized.split('\n');
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx += 1) {
+    throwIfAborted(signal);
+    const line = lines[lineIdx];
+    if (line.length > 0) {
+      // Split long lines into natural word chunks (~18-36 chars) with brief pauses
+      const words = line.split(' ');
+      let chunk = '';
+      for (let w = 0; w < words.length; w += 1) {
+        const nextWord = words[w];
+        const candidate = chunk ? `${chunk} ${nextWord}` : nextWord;
+        if (candidate.length >= 24 + Math.floor(Math.random() * 14) || w === words.length - 1) {
+          const toSend = w === words.length - 1 ? candidate : `${candidate} `;
+          if (lineIdx === 0 && w < 3 && toSend.length <= 26) {
+            for (const ch of toSend) {
+              throwIfAborted(signal);
+              await page.keyboard.type(ch);
+              await humanDelay(25, 68, signal);
+            }
+          } else {
+            await page.keyboard.insertText(toSend);
+          }
+          chunk = '';
+          await humanDelay(90, 220, signal);
+        } else {
+          chunk = candidate;
+        }
+      }
+      if (chunk) {
+        await page.keyboard.insertText(chunk);
+        await humanDelay(80, 180, signal);
+      }
+    }
+    if (lineIdx < lines.length - 1) {
+      await page.keyboard.press('Enter');
+      await humanDelay(140, 320, signal);
+    }
+  }
 }
 
 async function raceWithAbort<T>(
@@ -498,10 +737,11 @@ async function humanClick(
         .catch(() => false);
 
       if (hitOk) {
-        const steps = 6 + Math.floor(Math.random() * 7);
-        await page.mouse.move(targetX, targetY, { steps });
-        await humanDelay(80, 160, signal);
-        await page.mouse.click(targetX, targetY);
+        await humanMoveMouse(page, targetX, targetY, signal);
+        await humanDelay(110, 240, signal);
+        await page.mouse.down();
+        await humanDelay(45, 115, signal);
+        await page.mouse.up();
         return;
       }
     }
@@ -619,12 +859,12 @@ async function fillTextWithInsertFallback(
   throwIfAborted(signal);
   try {
     await humanClick(page, locator, signal, { timeout: 6000 });
-    await humanDelay(180, 350, signal);
+    await humanDelay(200, 420, signal);
     await page.keyboard.press(SELECT_ALL_SHORTCUT);
-    await humanDelay(80, 160, signal);
+    await humanDelay(90, 180, signal);
     await page.keyboard.press('Backspace');
-    await humanDelay(100, 220, signal);
-    await page.keyboard.insertText(text);
+    await humanDelay(140, 280, signal);
+    await humanTypeText(page, text, signal);
     return true;
   } catch {
     try {
@@ -632,7 +872,7 @@ async function fillTextWithInsertFallback(
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
       await humanDelay(100, 220, signal);
       await page.keyboard.press('Backspace');
-      await humanDelay(100, 220, signal);
+      await humanDelay(120, 240, signal);
       await page.keyboard.insertText(text);
       return true;
     } catch {
@@ -650,16 +890,19 @@ async function fillYouTubeTextbox(
   throwIfAborted(signal);
   try {
     await humanClick(page, locator, signal, { timeout: 6000 });
+    await humanDelay(160, 320, signal);
     await page.keyboard.press(SELECT_ALL_SHORTCUT);
+    await humanDelay(80, 160, signal);
     await page.keyboard.press('Delete');
-    await humanDelay(120, 250, signal);
+    await humanDelay(140, 280, signal);
 
     try {
-      await page.keyboard.insertText(text);
+      await humanTypeText(page, text, signal);
     } catch {
-      await page.keyboard.type(text);
+      await page.keyboard.insertText(text);
     }
 
+    await humanDelay(180, 360, signal);
     await page
       .evaluate(() => {
         const active = document.activeElement as HTMLElement | null;
@@ -1150,12 +1393,14 @@ async function uploadFacebookReelCover(
   onProgress: (update: BrowserPublishProgressUpdate) => void
 ): Promise<boolean> {
   const UPLOAD_IMAGE_LABEL =
-    /^(?:Upload image|Unggah gambar|Upload thumbnail|Unggah thumbnail|Upload cover|Unggah sampul|上传图片)$/i;
+    /^(?:Upload image|Upload photo|Unggah gambar|Unggah foto|Upload thumbnail|Unggah thumbnail|Upload cover|Unggah sampul|Add thumbnail|Tambah thumbnail|Edit thumbnail|Edit cover|Edit sampul|上传图片)$/i;
+  const CONFIRM_COVER_LABEL =
+    /^(?:Save|Simpan|Apply|Terapkan|Done|Selesai|Confirm|Konfirmasi)$/i;
 
   const findUploadImageTrigger = async (): Promise<Locator | null> => {
     const candidates: Locator[] = [
       reelSurface
-        .locator('[role="button"], [role="radio"], [role="tab"], button')
+        .locator('[role="button"], [role="radio"], [role="tab"], button, a[role="link"]')
         .filter({ hasText: UPLOAD_IMAGE_LABEL })
         .first(),
       page
@@ -1170,7 +1415,7 @@ async function uploadFacebookReelCover(
 
     for (const candidate of candidates) {
       const visible = await candidate
-        .isVisible({ timeout: 1200 })
+        .isVisible({ timeout: 500 })
         .catch(() => false);
       if (visible) {
         return candidate;
@@ -1179,40 +1424,95 @@ async function uploadFacebookReelCover(
     return null;
   };
 
+  const confirmCoverModalIfPresent = async (): Promise<void> => {
+    await humanDelay(900, 1500, signal);
+    const dialog = page.locator('[role="dialog"]').last();
+    if (!(await dialog.isVisible({ timeout: 700 }).catch(() => false))) {
+      return;
+    }
+    const saveBtn = dialog
+      .locator('[role="button"], button')
+      .filter({ hasText: CONFIRM_COVER_LABEL })
+      .last();
+    if (
+      (await saveBtn.isVisible({ timeout: 900 }).catch(() => false)) &&
+      (await isLocatorEnabled(saveBtn))
+    ) {
+      await humanDelay(300, 650, signal);
+      await humanClick(page, saveBtn, signal, { timeout: 6000 }).catch(() => {});
+      await humanDelay(1200, 2000, signal);
+    }
+  };
+
   try {
     onProgress({
-      step: `Mengunggah cover ${coverFileName} ke Thumbnail Facebook Reels`,
+      step: `Mengunggah cover ${coverFileName} ke Thumbnail Meta Reels`,
       progressPercent: 71,
-      log: `Mencari tombol Upload image untuk memasang cover ${coverFileName}.`,
+      log: `Mencari bagian Thumbnail dan tombol Upload image untuk memasang cover ${coverFileName}.`,
       level: 'info',
     });
 
-    // Scroll left panel down slightly in case Thumbnail section is lazy-rendered below caption
     const leftPanel = page
       .locator('[data-surface$="bizweb_create_reel:left_panel"]')
       .first();
-    if (await leftPanel.isVisible({ timeout: 800 }).catch(() => false)) {
-      await leftPanel
-        .evaluate((el) => {
-          el.scrollTop = Math.min(el.scrollHeight, 520);
-        })
-        .catch(() => {});
-      await abortableWait(350, signal);
+    const hasLeftPanel = await leftPanel
+      .isVisible({ timeout: 1000 })
+      .catch(() => false);
+
+    // Wait up to 16s while scrolling naturally down the left panel (Meta lazy-renders
+    // Thumbnail options while the video is still initializing / parsing frames)
+    let trigger: Locator | null = null;
+    const searchDeadline = Date.now() + 16_000;
+    let scrollAttempts = 0;
+
+    while (Date.now() < searchDeadline) {
+      throwIfAborted(signal);
+      trigger = await findUploadImageTrigger();
+      if (trigger) break;
+
+      if (scrollAttempts < 5) {
+        scrollAttempts += 1;
+        await humanScrollWheel(
+          page,
+          320 + Math.floor(Math.random() * 140),
+          signal,
+          hasLeftPanel ? leftPanel : reelSurface
+        );
+      } else {
+        await humanIdleDrift(page, signal);
+      }
+      await humanDelay(650, 1100, signal);
     }
 
-    const trigger = await findUploadImageTrigger();
     if (!trigger) {
+      // Fallback: check if a scoped image file input is already attached in reelSurface
+      const directImageInput = reelSurface
+        .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
+        .last();
+      if ((await directImageInput.count().catch(() => 0)) > 0) {
+        await directImageInput.setInputFiles(coverPath);
+        await confirmCoverModalIfPresent();
+        await humanDelay(1600, 2400, signal);
+        onProgress({
+          step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
+          progressPercent: 73,
+          log: `Cover ${coverFileName} terpasang langsung melalui input gambar di Reels Composer.`,
+          level: 'success',
+        });
+        return true;
+      }
+
       onProgress({
         step: 'Tombol Upload image thumbnail tidak ditemukan',
         progressPercent: 72,
-        log: 'Tombol Upload image pada bagian Thumbnail tidak terlihat. Melanjutkan tanpa mengganti thumbnail.',
+        log: 'Tombol Upload image pada bagian Thumbnail Meta Business Suite tidak muncul setelah 16 detik. Melanjutkan tanpa mengganti thumbnail.',
         level: 'warning',
       });
       return false;
     }
 
     await trigger.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
-    await abortableWait(250, signal);
+    await humanDelay(350, 700, signal);
 
     // Click Upload image while listening for an immediate native filechooser dialog
     const immediateChooserPromise = page
@@ -1224,9 +1524,10 @@ async function uploadFacebookReelCover(
 
     if (immediateChooser) {
       await immediateChooser.setFiles([coverPath]);
-      await humanDelay(2000, 2800, signal);
+      await confirmCoverModalIfPresent();
+      await humanDelay(1800, 2700, signal);
       onProgress({
-        step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
+        step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
         progressPercent: 73,
         log: `Cover ${coverFileName} terpasang melalui tombol Upload image.`,
         level: 'success',
@@ -1235,14 +1536,12 @@ async function uploadFacebookReelCover(
     }
 
     // Step 2: Meta Business Suite reveals a secondary row ("[icon] Upload image ... [Upload Image]")
-    // Prioritize clicking the revealed "Upload Image" button/link on the right side of that row!
-    await abortableWait(650, signal);
+    await humanDelay(650, 1100, signal);
 
     const secondaryCandidates: Locator[] = [
-      // Exact match for the blue <a role="link">Upload Image</a> shown in Meta Business Suite
       reelSurface
         .locator('a[role="link"], a')
-        .filter({ hasText: /^Upload Image$/ })
+        .filter({ hasText: UPLOAD_IMAGE_LABEL })
         .last(),
       reelSurface
         .locator('a, button, [role="button"]')
@@ -1276,9 +1575,10 @@ async function uploadFacebookReelCover(
 
         if (secondChooser) {
           await secondChooser.setFiles([coverPath]);
-          await humanDelay(2200, 3000, signal);
+          await confirmCoverModalIfPresent();
+          await humanDelay(2000, 2900, signal);
           onProgress({
-            step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
+            step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
             progressPercent: 73,
             log: `Cover ${coverFileName} terpasang melalui tombol kedua Upload Image.`,
             level: 'success',
@@ -1289,19 +1589,19 @@ async function uploadFacebookReelCover(
         if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
           throw createAbortError();
         }
-        // Try next candidate
       }
     }
 
-    // Fallback: direct image file input scoped strictly inside bizweb_create_reel (not hidden post composer)
+    // Fallback: direct image file input scoped strictly inside bizweb_create_reel
     const scopedImageInput = reelSurface
       .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
       .last();
     if ((await scopedImageInput.count().catch(() => 0)) > 0) {
       await scopedImageInput.setInputFiles(coverPath);
-      await humanDelay(2200, 3000, signal);
+      await confirmCoverModalIfPresent();
+      await humanDelay(2000, 2900, signal);
       onProgress({
-        step: `Cover ${coverFileName} berhasil diunggah ke Facebook Reels`,
+        step: `Cover ${coverFileName} berhasil diunggah ke Meta Reels`,
         progressPercent: 73,
         log: `Cover ${coverFileName} terpasang melalui input gambar di Reels Composer.`,
         level: 'success',
@@ -1324,7 +1624,7 @@ async function uploadFacebookReelCover(
     onProgress({
       step: 'Gagal mengunggah cover thumbnail (non-fatal)',
       progressPercent: 72,
-      log: `Upload cover Facebook Reels dilewati: ${msg}`,
+      log: `Upload cover Meta Reels dilewati: ${msg}`,
       level: 'warning',
     });
     return false;
@@ -1626,13 +1926,15 @@ async function configureMetaBusinessSchedule(
           timeout: 5000,
           force: true,
         });
-        await abortableWait(200, signal);
+        await humanDelay(180, 320, signal);
         await page.keyboard.press(SELECT_ALL_SHORTCUT);
+        await humanDelay(70, 140, signal);
         await page.keyboard.press('Backspace');
-        await page.keyboard.type(formattedDate, { delay: 30 });
-        await abortableWait(200, signal);
+        await humanDelay(100, 200, signal);
+        await humanTypeText(page, formattedDate, signal);
+        await humanDelay(180, 320, signal);
         await page.keyboard.press('Tab');
-        await abortableWait(300, signal);
+        await humanDelay(250, 450, signal);
       }
     }
 
@@ -1646,28 +1948,31 @@ async function configureMetaBusinessSchedule(
     for (const hourInput of hourInputs) {
       throwIfAborted(signal);
       await humanClick(page, hourInput, signal, { timeout: 5000, force: true });
-      await abortableWait(150, signal);
+      await humanDelay(140, 260, signal);
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
-      await page.keyboard.type(hourValue, { delay: 35 });
-      await abortableWait(200, signal);
+      await humanDelay(70, 140, signal);
+      await humanTypeText(page, hourValue, signal);
+      await humanDelay(180, 340, signal);
     }
 
     for (const minInput of minInputs) {
       throwIfAborted(signal);
       await humanClick(page, minInput, signal, { timeout: 5000, force: true });
-      await abortableWait(150, signal);
+      await humanDelay(140, 260, signal);
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
-      await page.keyboard.type(minValue, { delay: 35 });
-      await abortableWait(200, signal);
+      await humanDelay(70, 140, signal);
+      await humanTypeText(page, minValue, signal);
+      await humanDelay(180, 340, signal);
     }
 
     for (const ampmInput of ampmInputs) {
       throwIfAborted(signal);
       await humanClick(page, ampmInput, signal, { timeout: 5000, force: true });
-      await abortableWait(150, signal);
+      await humanDelay(140, 260, signal);
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
-      await page.keyboard.type(meridiemValue, { delay: 35 });
-      await abortableWait(200, signal);
+      await humanDelay(70, 140, signal);
+      await humanTypeText(page, meridiemValue, signal);
+      await humanDelay(180, 340, signal);
     }
 
     for (const { locator: timeInput, sample } of timeEntries) {
@@ -1678,12 +1983,15 @@ async function configureMetaBusinessSchedule(
         schedule.minute
       );
       await humanClick(page, timeInput, signal, { timeout: 5000, force: true });
-      await abortableWait(150, signal);
+      await humanDelay(140, 260, signal);
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
+      await humanDelay(70, 140, signal);
       await page.keyboard.press('Backspace');
-      await page.keyboard.type(formattedTime, { delay: 30 });
+      await humanDelay(100, 180, signal);
+      await humanTypeText(page, formattedTime, signal);
+      await humanDelay(150, 260, signal);
       await page.keyboard.press('Tab');
-      await abortableWait(250, signal);
+      await humanDelay(220, 400, signal);
     }
 
     await page.keyboard.press('Tab').catch(() => {});
@@ -1856,7 +2164,8 @@ export async function publishMetaBusinessSuiteViaBrowser(
       }),
       signal
     );
-    await humanDelay(2500, 3500, signal);
+    await humanDelay(2400, 3600, signal);
+    await humanIdleDrift(page, signal);
   }
 
   const currentUrl = page.url().toLowerCase();
@@ -2414,12 +2723,15 @@ async function configureYouTubeSchedule(
       .first();
     if (await dateInput.isVisible({ timeout: 4000 }).catch(() => false)) {
       await humanClick(page, dateInput, signal, { timeout: 4000 });
-      await abortableWait(120, signal);
+      await humanDelay(140, 260, signal);
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
+      await humanDelay(70, 140, signal);
       await page.keyboard.press('Backspace');
-      await page.keyboard.type(formattedDate, { delay: 25 });
+      await humanDelay(100, 180, signal);
+      await humanTypeText(page, formattedDate, signal);
+      await humanDelay(160, 280, signal);
       await page.keyboard.press('Enter');
-      await humanDelay(350, 600, signal);
+      await humanDelay(350, 650, signal);
     } else {
       onProgress({
         step: 'Input tanggal YouTube datepicker tidak ditemukan',
@@ -2447,11 +2759,13 @@ async function configureYouTubeSchedule(
       );
 
       await humanClick(page, timeInput, signal, { timeout: 5000 });
-      await abortableWait(200, signal);
+      await humanDelay(180, 320, signal);
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
+      await humanDelay(70, 140, signal);
       await page.keyboard.press('Backspace');
-      await page.keyboard.type(formattedTime, { delay: 25 });
-      await abortableWait(300, signal);
+      await humanDelay(100, 180, signal);
+      await humanTypeText(page, formattedTime, signal);
+      await humanDelay(280, 480, signal);
 
       // Click exact matching option in YouTube's 15-min dropdown if rendered
       // Note: YouTube uses narrow no-break space (\u202f) between time and AM/PM, so match with \s+
@@ -2588,6 +2902,127 @@ async function configureYouTubeAiDisclosure(
   }
 }
 
+async function uploadYouTubeCover(
+  page: Page,
+  coverPath: string,
+  coverFileName: string,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  try {
+    onProgress({
+      step: `Memasang cover ${coverFileName} di YouTube Studio`,
+      progressPercent: 58,
+      log: `Mencari bagian Thumbnail YouTube Studio untuk mengunggah cover ${coverFileName}.`,
+      level: 'info',
+    });
+
+    const dialogBody = page.locator('#scrollable-content, ytcp-uploads-details').first();
+    if (await dialogBody.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await humanScrollWheel(page, 320, signal, dialogBody);
+      await humanDelay(450, 800, signal);
+    }
+
+    const uploadBtnSelectors = [
+      'ytcp-thumbnail-editor #select-button',
+      'ytcp-still-editor #select-button',
+      'ytcp-video-thumbnail-with-info #select-button',
+      'ytcp-thumbnail-uploader #select-button',
+      'button:has-text("Upload file")',
+      'button:has-text("Upload thumbnail")',
+      'button:has-text("Unggah file")',
+      'button:has-text("Unggah thumbnail")',
+    ];
+
+    // Wait up to 6s for thumbnail section to finish rendering
+    const uploadBtn = await findFirstVisibleLocator(
+      page,
+      uploadBtnSelectors,
+      6000,
+      signal
+    );
+
+    if (uploadBtn) {
+      const enabled = await isLocatorEnabled(uploadBtn);
+      if (!enabled) {
+        onProgress({
+          step: 'Thumbnail kustom dinonaktifkan YouTube untuk Shorts ini',
+          progressPercent: 60,
+          log: 'Tombol Upload thumbnail di YouTube Studio berstatus nonaktif (bawaan YouTube web untuk Shorts / channel belum verifikasi). Melanjutkan tanpa mengubah thumbnail.',
+          level: 'warning',
+        });
+        return false;
+      }
+
+      const chooserPromise = page
+        .waitForEvent('filechooser', { timeout: 5000 })
+        .catch(() => null);
+      await humanClick(page, uploadBtn, signal, { timeout: 6000 });
+      const chooser = await raceWithAbort(chooserPromise, signal);
+      if (chooser) {
+        await chooser.setFiles([coverPath]);
+        await humanDelay(1400, 2200, signal);
+        onProgress({
+          step: `Cover ${coverFileName} berhasil dipasang di YouTube Studio`,
+          progressPercent: 60,
+          log: `Cover thumbnail ${coverFileName} berhasil diunggah melalui tombol Upload thumbnail YouTube.`,
+          level: 'success',
+        });
+        return true;
+      }
+    }
+
+    // Fallback: direct file input (note: #file-loader IS the <input type="file"> itself!)
+    const thumbInput = page
+      .locator(
+        'input#file-loader[type="file"], ytcp-video-thumbnail-with-info input[type="file"], ytcp-still-editor input[type="file"], ytcp-thumbnail-uploader input[type="file"], #still-picker input[type="file"], ytcp-uploads-details input[type="file"][accept*="image"]'
+      )
+      .first();
+
+    if ((await thumbInput.count().catch(() => 0)) > 0) {
+      const isDisabled = await thumbInput.isDisabled().catch(() => false);
+      if (isDisabled) {
+        onProgress({
+          step: 'Input thumbnail YouTube nonaktif untuk Shorts ini',
+          progressPercent: 60,
+          log: 'Input thumbnail YouTube Studio dinonaktifkan untuk video Shorts ini (batasan bawaan YouTube web). Melanjutkan...',
+          level: 'warning',
+        });
+        return false;
+      }
+      await thumbInput.setInputFiles(coverPath);
+      await humanDelay(1400, 2200, signal);
+      onProgress({
+        step: `Cover ${coverFileName} berhasil dipasang di YouTube Studio`,
+        progressPercent: 60,
+        log: `Cover thumbnail ${coverFileName} berhasil dipasang di YouTube Studio.`,
+        level: 'success',
+      });
+      return true;
+    }
+
+    onProgress({
+      step: 'Bagian thumbnail YouTube tidak ditemukan',
+      progressPercent: 60,
+      log: 'Input cover thumbnail YouTube Studio tidak tersedia pada halaman Details (normal untuk YouTube Shorts versi web). Melanjutkan...',
+      level: 'warning',
+    });
+    return false;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Upload cover YouTube dilewati (non-fatal)',
+      progressPercent: 60,
+      log: `Upload cover YouTube Studio dilewati: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
+}
+
 export async function publishYouTubeViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -2614,7 +3049,8 @@ export async function publishYouTubeViaBrowser(
     }),
     signal
   );
-  await abortableWait(2500, signal);
+  await humanDelay(2400, 3500, signal);
+  await humanIdleDrift(page, signal);
 
   const currentUrl = page.url().toLowerCase();
   if (
@@ -2707,25 +3143,9 @@ export async function publishYouTubeViaBrowser(
   // Optional cover / thumbnail upload (non-fatal)
   const coverPath = getCoverPathForItem(item);
   if (coverPath) {
-    try {
-      const thumbInput = page
-        .locator(
-          '#file-loader input[type="file"], ytcp-thumbnail-uploader input[type="file"]'
-        )
-        .first();
-      if ((await thumbInput.count()) > 0) {
-        await thumbInput.setInputFiles(coverPath);
-        onProgress({
-          step: 'Memasang cover thumbnail YouTube',
-          progressPercent: 60,
-          log: 'Cover thumbnail berhasil dipasang di YouTube Studio.',
-          level: 'info',
-        });
-        await humanDelay(400, 700, signal);
-      }
-    } catch {
-      // Non-fatal if thumbnail input is disabled for Shorts or unverified channel
-    }
+    const coverFileName =
+      item.autoMetadata.assets.cover.fileName ?? 'cover-9x16.jpg';
+    await uploadYouTubeCover(page, coverPath, coverFileName, signal, onProgress);
   }
 
   await tryClickAny(
@@ -3300,6 +3720,217 @@ async function configureTikTokAiLabel(
   }
 }
 
+async function uploadTikTokCover(
+  page: Page,
+  root: Page | FrameLocator,
+  coverPath: string,
+  coverFileName: string,
+  signal: AbortSignal,
+  onProgress: (update: BrowserPublishProgressUpdate) => void
+): Promise<boolean> {
+  const EDIT_COVER_SELECTORS = [
+    '[data-e2e="edit_cover_button"]',
+    'button:has-text("Edit cover")',
+    'button:has-text("Edit sampul")',
+    'button:has-text("Ubah sampul")',
+    'button:has-text("Change cover")',
+    '[role="button"]:has-text("Edit cover")',
+    '[role="button"]:has-text("Edit sampul")',
+    'div.edit-container:has-text("Edit cover")',
+    'div.edit-container:has-text("Edit sampul")',
+    '.cover-container .edit-cover',
+    '.edit-cover-btn',
+    'text=/^(?:Edit cover|Edit sampul|Ubah sampul|Change cover)$/i',
+  ];
+
+  const UPLOAD_COVER_TAB_SELECTORS = [
+    'button:has-text("Upload cover")',
+    'button:has-text("Unggah sampul")',
+    'button:has-text("Upload image")',
+    'button:has-text("Unggah gambar")',
+    '[role="tab"]:has-text("Upload cover")',
+    '[role="tab"]:has-text("Unggah sampul")',
+    '[role="button"]:has-text("Upload cover")',
+    '[role="button"]:has-text("Unggah sampul")',
+    'div:has-text("Upload cover"):not(:has(div:has-text("Upload cover")))',
+    'div:has-text("Unggah sampul"):not(:has(div:has-text("Unggah sampul")))',
+  ];
+
+  const CONFIRM_COVER_SELECTORS = [
+    '[role="dialog"] button:has-text("Confirm")',
+    '[role="dialog"] button:has-text("Konfirmasi")',
+    '[role="dialog"] button:has-text("Save")',
+    '[role="dialog"] button:has-text("Simpan")',
+    'button[data-e2e="confirm_cover_button"]',
+    '.cover-edit-modal button:has-text("Confirm")',
+    '.cover-edit-modal button:has-text("Konfirmasi")',
+    'button:has-text("Confirm")',
+    'button:has-text("Konfirmasi")',
+  ];
+
+  try {
+    onProgress({
+      step: `Memasang cover ${coverFileName} di TikTok Studio`,
+      progressPercent: 68,
+      log: `Mencari tombol Edit cover TikTok Studio untuk mengunggah cover ${coverFileName}.`,
+      level: 'info',
+    });
+
+    // TikTok generates the cover card once video metadata finishes parsing (~2-15s)
+    const editBtn = await findFirstVisibleLocator(
+      root,
+      EDIT_COVER_SELECTORS,
+      18_000,
+      signal
+    );
+
+    if (!editBtn) {
+      onProgress({
+        step: 'Tombol Edit cover TikTok tidak ditemukan',
+        progressPercent: 69,
+        log: 'Tombol Edit cover di TikTok Studio belum muncul setelah 18 detik. Melanjutkan tanpa mengganti sampul.',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    await humanDelay(350, 750, signal);
+    await humanClick(page, editBtn, signal, { timeout: 8000 });
+    await humanDelay(900, 1500, signal);
+
+    // Switch to the "Upload cover" tab inside the cover editor modal
+    const uploadTab = await findFirstVisibleLocator(
+      root,
+      UPLOAD_COVER_TAB_SELECTORS,
+      8000,
+      signal
+    );
+    if (uploadTab) {
+      await humanDelay(250, 550, signal);
+      await humanClick(page, uploadTab, signal, { timeout: 6000 });
+      await humanDelay(700, 1200, signal);
+    }
+
+    // Attach cover image either via scoped image file input or via filechooser trigger
+    let coverAttached = false;
+    const modalScope = root
+      .locator('[role="dialog"], .cover-edit-modal, .TUXModal-content')
+      .last();
+    const hasModal = await modalScope
+      .isVisible({ timeout: 1000 })
+      .catch(() => false);
+
+    const imageInputCandidates = [
+      ...(hasModal
+        ? [
+            modalScope.locator('input[type="file"][accept*="image"]').last(),
+            modalScope.locator('input[type="file"]').last(),
+          ]
+        : []),
+      root.locator('input[type="file"][accept*="image"]:not([accept*="video"])').last(),
+    ];
+
+    for (const inputLoc of imageInputCandidates) {
+      if ((await inputLoc.count().catch(() => 0)) > 0) {
+        try {
+          await inputLoc.setInputFiles(coverPath);
+          coverAttached = true;
+          break;
+        } catch {
+          // Try next candidate
+        }
+      }
+    }
+
+    if (!coverAttached) {
+      const uploadTriggerSelectors = [
+        '[role="dialog"] button:has-text("Upload")',
+        '[role="dialog"] button:has-text("Unggah")',
+        '[role="dialog"] button:has-text("Select")',
+        '[role="dialog"] button:has-text("Pilih")',
+        '[role="dialog"] [class*="upload"]',
+      ];
+      const dropTrigger = await findFirstVisibleLocator(
+        root,
+        uploadTriggerSelectors,
+        4000,
+        signal
+      );
+      if (dropTrigger) {
+        const chooserPromise = page
+          .waitForEvent('filechooser', { timeout: 6000 })
+          .catch(() => null);
+        await humanClick(page, dropTrigger, signal, { timeout: 6000 });
+        const chooser = await raceWithAbort(chooserPromise, signal);
+        if (chooser) {
+          await chooser.setFiles([coverPath]);
+          coverAttached = true;
+        }
+      }
+    }
+
+    if (!coverAttached) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await humanDelay(400, 700, signal);
+      onProgress({
+        step: 'Input unggah cover TikTok tidak ditemukan',
+        progressPercent: 69,
+        log: 'Modal Edit cover TikTok terbuka tetapi input file gambar tidak terdeteksi. Menutup modal dan melanjutkan...',
+        level: 'warning',
+      });
+      return false;
+    }
+
+    // Allow TikTok cover crop preview to render before confirming
+    await humanDelay(1800, 2800, signal);
+
+    const confirmBtn = await findFirstVisibleLocator(
+      root,
+      CONFIRM_COVER_SELECTORS,
+      8000,
+      signal
+    );
+
+    if (confirmBtn) {
+      await waitForEnabledLocator(confirmBtn, 8000, signal);
+      await humanDelay(300, 650, signal);
+      await humanClick(page, confirmBtn, signal, { timeout: 8000 });
+      await humanDelay(1200, 2000, signal);
+
+      onProgress({
+        step: `Cover ${coverFileName} berhasil dipasang di TikTok Studio`,
+        progressPercent: 71,
+        log: `Cover sampul ${coverFileName} berhasil diunggah dan dikonfirmasi di TikTok Studio.`,
+        level: 'success',
+      });
+      return true;
+    }
+
+    await page.keyboard.press('Escape').catch(() => {});
+    await humanDelay(400, 700, signal);
+    onProgress({
+      step: 'Tombol Confirm cover TikTok tidak ditemukan',
+      progressPercent: 69,
+      log: `File cover ${coverFileName} sudah masuk tetapi tombol Confirm di modal TikTok tidak ditemukan. Melanjutkan...`,
+      level: 'warning',
+    });
+    return false;
+  } catch (err) {
+    if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+      throw createAbortError();
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+    const msg = err instanceof Error ? err.message : String(err);
+    onProgress({
+      step: 'Upload cover TikTok dilewati (non-fatal)',
+      progressPercent: 69,
+      log: `Upload cover TikTok Studio dilewati: ${msg}`,
+      level: 'warning',
+    });
+    return false;
+  }
+}
+
 export async function publishTikTokViaBrowser(
   page: Page,
   item: ContentPlannerItem,
@@ -3326,7 +3957,8 @@ export async function publishTikTokViaBrowser(
     }),
     signal
   );
-  await abortableWait(2500, signal);
+  await humanDelay(2400, 3600, signal);
+  await humanIdleDrift(page, signal);
 
   if (page.url().toLowerCase().includes('/login')) {
     await safeBringToFront(page);
@@ -3393,7 +4025,7 @@ export async function publishTikTokViaBrowser(
         const [chooser] = await raceWithAbort(
           Promise.all([
             page.waitForEvent('filechooser', { timeout: 15_000 }),
-            selectButton.click({ timeout: 8000 }),
+            humanClick(page, selectButton, signal, { timeout: 8000 }),
           ]),
           signal
         );
@@ -3444,11 +4076,28 @@ export async function publishTikTokViaBrowser(
   });
 
   await humanClick(page, captionEditor, signal, { timeout: 8000 });
-  await humanDelay(200, 400, signal);
+  await humanDelay(250, 480, signal);
   await page.keyboard.press(SELECT_ALL_SHORTCUT);
+  await humanDelay(90, 180, signal);
   await page.keyboard.press('Delete');
-  await humanDelay(150, 300, signal);
-  await page.keyboard.insertText(caption);
+  await humanDelay(180, 340, signal);
+  await humanTypeText(page, caption, signal);
+  await humanDelay(600, 1100, signal);
+
+  // Upload custom 9:16 Cover via "Edit cover" -> "Upload cover" -> "Confirm" (both immediate & scheduled)
+  const coverPath = getCoverPathForItem(item);
+  if (coverPath) {
+    const coverFileName =
+      item.autoMetadata.assets.cover.fileName ?? 'cover-9x16.jpg';
+    await uploadTikTokCover(
+      page,
+      root,
+      coverPath,
+      coverFileName,
+      signal,
+      onProgress
+    );
+  }
 
   if (aiGenerated) {
     await configureTikTokAiLabel(page, root, signal, onProgress);

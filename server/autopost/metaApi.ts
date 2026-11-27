@@ -1,5 +1,7 @@
 import fs from 'node:fs';
-import { Readable } from 'node:stream';
+import http from 'node:http';
+import https from 'node:https';
+import path from 'node:path';
 import type { WorkspaceMetadata } from '../../shared/types/workspace.ts';
 import type {
   AutoPostMode,
@@ -23,7 +25,7 @@ const META_OAUTH_DIALOG_BASE = 'https://www.facebook.com';
 const META_RUPLOAD_BASE = 'https://rupload.facebook.com';
 const DEFAULT_GRAPH_VERSION = 'v25.0';
 const IG_POLL_INTERVAL_MS = 3000;
-const IG_POLL_MAX_ATTEMPTS = 50;
+const IG_POLL_MAX_ATTEMPTS = 80;
 
 export const META_REQUIRED_IG_PERMISSIONS = [
   'instagram_basic',
@@ -45,6 +47,7 @@ export const META_OAUTH_SCOPES = [
   'pages_manage_posts',
   'pages_manage_metadata',
   'publish_video',
+  'business_management',
 ] as const;
 
 const discoveredPageTokens = new Map<string, string>();
@@ -109,6 +112,7 @@ interface MetaGraphErrorPayload {
     error_subcode?: number;
     error_user_title?: string;
     error_user_msg?: string;
+    is_transient?: boolean;
   };
 }
 
@@ -1008,44 +1012,234 @@ function parseMetaScheduledPublishTime(
   };
 }
 
+const RUPLOAD_INACTIVITY_TIMEOUT_MS = 90_000;
+
+function normalizeRuploadUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  return `https://${trimmed.replace(/^\/+/, '')}`;
+}
+
+function formatMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+interface RuploadUploadResult {
+  ok: boolean;
+  status: number;
+  bytesSent: number;
+  payload: {
+    success?: boolean;
+    message?: string;
+    debug_info?: {
+      type?: string;
+      message?: string;
+      retriable?: boolean;
+    };
+  } & MetaGraphErrorPayload;
+}
+
 async function uploadVideoFileToMetaRupload(params: {
   uploadUrl: string;
   videoPath: string;
   fileSize: number;
   token: string;
   signal: AbortSignal;
-}): Promise<Response> {
-  const { uploadUrl, videoPath, fileSize, token, signal } = params;
-  const fileStream = fs.createReadStream(videoPath);
+  onBytesProgress?: (bytesSent: number, totalBytes: number) => void;
+}): Promise<RuploadUploadResult> {
+  const { uploadUrl, videoPath, fileSize, token, signal, onBytesProgress } = params;
+  const normalizedUrl = normalizeRuploadUrl(uploadUrl);
+  const parsedUrl = new URL(normalizedUrl);
+  const transport = parsedUrl.protocol === 'http:' ? http : https;
 
-  const onAbort = () => {
-    fileStream.destroy();
-  };
-  signal.addEventListener('abort', onAbort, { once: true });
+  return new Promise<RuploadUploadResult>((resolve, reject) => {
+    if (signal.aborted) {
+      const abortErr = new Error('Upload ke server Meta dibatalkan.');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+      return;
+    }
 
-  try {
-    const webStream = Readable.toWeb(fileStream) as unknown as BodyInit;
-    const requestInit: RequestInit & { duplex: 'half' } = {
-      method: 'POST',
-      headers: {
-        Authorization: `OAuth ${token}`,
-        offset: '0',
-        file_size: String(fileSize),
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': String(fileSize),
+    let settled = false;
+    let bytesSent = 0;
+    let lastEmitAt = 0;
+    const fileStream = fs.createReadStream(videoPath);
+
+    const req = transport.request(
+      parsedUrl,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `OAuth ${token}`,
+          offset: '0',
+          file_size: String(fileSize),
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(fileSize),
+        },
       },
-      body: webStream,
-      duplex: 'half',
-      signal,
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer | string) => {
+          chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+        });
+        res.on('end', () => {
+          const rawText = Buffer.concat(chunks).toString('utf-8').trim();
+          let payload: RuploadUploadResult['payload'] = {};
+          if (rawText) {
+            try {
+              payload = JSON.parse(rawText) as RuploadUploadResult['payload'];
+            } catch {
+              payload = {
+                error: {
+                  message: rawText.slice(0, 400),
+                },
+              };
+            }
+          }
+          const status = res.statusCode ?? 0;
+          cleanup();
+          settled = true;
+          resolve({
+            ok: status >= 200 && status < 300,
+            status,
+            bytesSent,
+            payload,
+          });
+        });
+        res.on('error', (err) => {
+          fail(err);
+        });
+      }
+    );
+
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+      if (!fileStream.destroyed) {
+        fileStream.destroy();
+      }
     };
 
-    return await fetch(uploadUrl, requestInit);
-  } finally {
-    signal.removeEventListener('abort', onAbort);
-    if (!fileStream.destroyed) {
-      fileStream.destroy();
-    }
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!req.destroyed) {
+        req.destroy();
+      }
+      reject(err);
+    };
+
+    const onAbort = () => {
+      const abortErr = new Error('Upload ke server Meta dibatalkan.');
+      abortErr.name = 'AbortError';
+      fail(abortErr);
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    req.setTimeout(RUPLOAD_INACTIVITY_TIMEOUT_MS, () => {
+      fail(
+        new Error(
+          `Koneksi upload ke server Meta (rupload) timeout tanpa aktivitas selama ${Math.round(RUPLOAD_INACTIVITY_TIMEOUT_MS / 1000)} detik.`
+        )
+      );
+    });
+
+    req.on('error', (err) => {
+      fail(err);
+    });
+
+    fileStream.on('error', (err) => {
+      fail(err);
+    });
+
+    fileStream.on('data', (chunk: Buffer | string) => {
+      bytesSent += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+      if (onBytesProgress) {
+        const now = Date.now();
+        if (bytesSent >= fileSize || now - lastEmitAt >= 1500) {
+          lastEmitAt = now;
+          onBytesProgress(Math.min(bytesSent, fileSize), fileSize);
+        }
+      }
+    });
+
+    fileStream.pipe(req);
+  });
+}
+
+const META_FB_THUMBNAIL_MAX_BYTES = 10 * 1024 * 1024;
+
+function resolveCoverMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.png') return 'image/png';
+  if (ext === '.webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+async function uploadFacebookReelThumbnail(params: {
+  videoId: string;
+  coverPath: string;
+  token: string;
+  ver: string;
+  signal: AbortSignal;
+}): Promise<{ ok: boolean; detail?: string }> {
+  const { videoId, coverPath, token, ver, signal } = params;
+  const stat = await fs.promises.stat(coverPath);
+  if (stat.size <= 0 || stat.size > META_FB_THUMBNAIL_MAX_BYTES) {
+    return {
+      ok: false,
+      detail: `Ukuran cover (${formatMb(stat.size)}) melebihi batas 10 MB Meta Graph API.`,
+    };
   }
+
+  const coverBuffer = await fs.promises.readFile(coverPath);
+  const coverFileName = path.basename(coverPath) || 'cover.jpg';
+  const mimeType = resolveCoverMimeType(coverPath);
+  const endpoint = `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(videoId)}/thumbnails`;
+
+  let lastDetail = 'Tidak diketahui';
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    throwIfAborted(signal, 'Upload cover Facebook Reels dibatalkan.');
+    const form = new FormData();
+    form.set('access_token', token);
+    form.set('is_preferred', 'true');
+    form.set(
+      'source',
+      new Blob([coverBuffer], { type: mimeType }),
+      coverFileName
+    );
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      body: form,
+      signal,
+    });
+    const payload = (await parseJsonSafe(res)) as {
+      success?: boolean;
+      id?: string;
+    } & MetaGraphErrorPayload;
+
+    if (res.ok && !payload.error && payload.success !== false) {
+      return { ok: true };
+    }
+
+    lastDetail = extractMetaErrorMessage(payload, `HTTP ${res.status}`);
+    const isRetriable =
+      res.status >= 500 ||
+      payload.error?.is_transient === true ||
+      /processing|not ready|try again/i.test(lastDetail);
+    if (attempt < 2 && isRetriable) {
+      await sleepWithAbort(2500, signal);
+      continue;
+    }
+    break;
+  }
+
+  return { ok: false, detail: lastDetail };
 }
 
 export async function publishFacebookReelViaMetaApi(
@@ -1133,10 +1327,11 @@ export async function publishFacebookReelViaMetaApi(
     );
   }
 
-  const uploadUrl =
+  const uploadUrl = normalizeRuploadUrl(
     typeof startPayload.upload_url === 'string' && startPayload.upload_url.trim()
       ? startPayload.upload_url.trim()
-      : `${META_RUPLOAD_BASE}/video-upload/${ver}/${encodeURIComponent(videoId)}`;
+      : `${META_RUPLOAD_BASE}/video-upload/${ver}/${encodeURIComponent(videoId)}`
+  );
 
   // Step 2: Stream binary video to rupload.facebook.com without buffering full video in RAM
   throwIfAborted(signal, 'Upload Facebook Reels via Meta API dibatalkan.');
@@ -1153,27 +1348,45 @@ export async function publishFacebookReelViaMetaApi(
 
   onProgress({
     step: 'Mengunggah video ke server Meta (rupload)',
-    progressPercent: 45,
-    log: `Mengirim stream biner video (${fileSize} byte) ke server rupload Meta.`,
+    progressPercent: 35,
+    log: `Mengirim stream biner video (${formatMb(fileSize)}) ke ${uploadUrl}.`,
     level: 'info',
   });
 
-  const uploadRes = await uploadVideoFileToMetaRupload({
+  let lastFbLoggedBucket = -1;
+  const uploadResult = await uploadVideoFileToMetaRupload({
     uploadUrl,
     videoPath,
     fileSize,
     token,
     signal,
+    onBytesProgress: (sent, total) => {
+      const ratio = total > 0 ? sent / total : 1;
+      const pct = Math.min(100, Math.round(ratio * 100));
+      const barProgress = 35 + Math.round(ratio * 38);
+      const bucket = Math.floor(pct / 25);
+      const shouldLog = bucket > lastFbLoggedBucket && pct > 0;
+      if (shouldLog) {
+        lastFbLoggedBucket = bucket;
+      }
+      onProgress({
+        step: `Mengunggah video Facebook ke Meta (${formatMb(sent)} / ${formatMb(total)} · ${pct}%)`,
+        progressPercent: barProgress,
+        log: shouldLog
+          ? `Progress upload Facebook Reels: ${formatMb(sent)} / ${formatMb(total)} (${pct}%).`
+          : undefined,
+        level: 'info',
+      });
+    },
   });
 
-  const uploadPayload = (await parseJsonSafe(uploadRes)) as {
-    success?: boolean;
-  } & MetaGraphErrorPayload;
+  const uploadPayload = uploadResult.payload;
 
-  if (!uploadRes.ok || uploadPayload.error || uploadPayload.success === false) {
+  if (!uploadResult.ok || uploadPayload.error || uploadPayload.success === false) {
+    const debugMsg = uploadPayload.debug_info?.message;
     const detail = extractMetaErrorMessage(
       uploadPayload,
-      `HTTP ${uploadRes.status}`
+      debugMsg ? `HTTP ${uploadResult.status}: ${debugMsg}` : `HTTP ${uploadResult.status}`
     );
     throw new Error(
       `Gagal mengunggah biner video Facebook Reels ke server Meta: ${detail}`
@@ -1245,6 +1458,63 @@ export async function publishFacebookReelViaMetaApi(
 
   const publishedUrl = `https://www.facebook.com/reel/${videoId}`;
 
+  // Step 4 (Optional): Apply local custom cover photo via POST /{video_id}/thumbnails
+  const coverAsset = item.autoMetadata.assets.cover;
+  const coverPath =
+    coverAsset.exists && coverAsset.absolutePath ? coverAsset.absolutePath : '';
+  let coverApplied = false;
+
+  if (coverPath && fs.existsSync(coverPath)) {
+    onProgress({
+      step: 'Mengunggah cover custom Facebook Reels',
+      progressPercent: 93,
+      log: `Mengunggah cover lokal (${coverAsset.fileName || path.basename(coverPath)}) ke POST /${videoId}/thumbnails...`,
+      level: 'info',
+    });
+
+    try {
+      const thumbRes = await uploadFacebookReelThumbnail({
+        videoId,
+        coverPath,
+        token,
+        ver,
+        signal,
+      });
+      if (thumbRes.ok) {
+        coverApplied = true;
+        onProgress({
+          step: 'Cover custom Facebook Reels berhasil dipasang',
+          progressPercent: 96,
+          log: `Cover custom (${coverAsset.fileName || path.basename(coverPath)}) berhasil diterapkan sebagai thumbnail utama Facebook Reels.`,
+          level: 'success',
+        });
+      } else {
+        onProgress({
+          step: 'Reel selesai (cover dilewati)',
+          progressPercent: 96,
+          log: `Video Facebook Reels berhasil diunggah, tetapi cover custom gagal diterapkan: ${thumbRes.detail}. Pastikan izin pages_manage_engagement / pages_read_user_content aktif jika diperlukan.`,
+          level: 'warning',
+        });
+      }
+    } catch (thumbErr) {
+      if (
+        signal.aborted ||
+        (thumbErr instanceof Error && thumbErr.name === 'AbortError')
+      ) {
+        throw thumbErr;
+      }
+      const msg = thumbErr instanceof Error ? thumbErr.message : String(thumbErr);
+      onProgress({
+        step: 'Reel selesai (cover dilewati)',
+        progressPercent: 96,
+        log: `Video Facebook Reels berhasil diunggah, tetapi gagal mengunggah cover custom: ${msg}`,
+        level: 'warning',
+      });
+    }
+  }
+
+  const coverSuffix = coverApplied ? ' + cover custom' : '';
+
   onProgress({
     step: isScheduled
       ? `Facebook Reels dijadwalkan (${parsedSchedule!.displayLabel})`
@@ -1253,10 +1523,10 @@ export async function publishFacebookReelViaMetaApi(
         : 'Draft Facebook Reels berhasil disimpan',
     progressPercent: mode === 'publish' ? 100 : 95,
     log: isScheduled
-      ? `Facebook Reels berhasil dijadwalkan untuk ${parsedSchedule!.displayLabel} (${publishedUrl}).`
+      ? `Facebook Reels${coverSuffix} berhasil dijadwalkan untuk ${parsedSchedule!.displayLabel} (${publishedUrl}).`
       : mode === 'publish'
-        ? `Facebook Reels telah tayang di ${publishedUrl}.`
-        : `Draft Facebook Reels tersimpan (${publishedUrl}).`,
+        ? `Facebook Reels${coverSuffix} telah tayang di ${publishedUrl}.`
+        : `Draft Facebook Reels${coverSuffix} tersimpan (${publishedUrl}).`,
     level: 'success',
   });
 
@@ -1264,10 +1534,10 @@ export async function publishFacebookReelViaMetaApi(
     status: mode === 'publish' ? 'completed' : 'awaiting_review',
     publishedUrl,
     summary: isScheduled
-      ? `Berhasil menjadwalkan Facebook Reels (${parsedSchedule!.displayLabel}) via Meta Graph API: ${publishedUrl}`
+      ? `Berhasil menjadwalkan Facebook Reels${coverSuffix} (${parsedSchedule!.displayLabel}) via Meta Graph API: ${publishedUrl}`
       : mode === 'publish'
-        ? `Berhasil publish Facebook Reels via Meta Graph API: ${publishedUrl}`
-        : `Draft Facebook Reels berhasil diunggah via Meta Graph API (${publishedUrl}). Periksa di Meta Business Suite lalu klik Tandai Sudah Publish.`,
+        ? `Berhasil publish Facebook Reels${coverSuffix} via Meta Graph API: ${publishedUrl}`
+        : `Draft Facebook Reels${coverSuffix} berhasil diunggah via Meta Graph API (${publishedUrl}). Periksa di Meta Business Suite lalu klik Tandai Sudah Publish.`,
   };
 }
 
@@ -1361,6 +1631,127 @@ export async function publishInstagramContainerNow(
   return { mediaId, permalink };
 }
 
+const META_IG_COVER_MAX_BYTES = 8 * 1024 * 1024;
+
+async function stageInstagramCoverViaFacebookTempPhoto(params: {
+  pageId: string;
+  pageToken: string;
+  coverPath: string;
+  ver: string;
+  signal: AbortSignal;
+}): Promise<{ ok: boolean; photoId?: string; coverUrl?: string; detail?: string }> {
+  const { pageId, pageToken, coverPath, ver, signal } = params;
+  const stat = await fs.promises.stat(coverPath);
+  if (stat.size <= 0 || stat.size > META_IG_COVER_MAX_BYTES) {
+    return {
+      ok: false,
+      detail: `Ukuran cover (${formatMb(stat.size)}) melebihi batas 8 MB Instagram Reels.`,
+    };
+  }
+
+  const coverBuffer = await fs.promises.readFile(coverPath);
+  const coverFileName = path.basename(coverPath) || 'cover.jpg';
+  const mimeType = resolveCoverMimeType(coverPath);
+
+  // Step A: Upload unpublished temporary photo to the connected Facebook Page (never shown on feed)
+  const form = new FormData();
+  form.set('published', 'false');
+  form.set('temporary', 'true');
+  form.set('access_token', pageToken);
+  form.set(
+    'source',
+    new Blob([coverBuffer], { type: mimeType }),
+    coverFileName
+  );
+
+  const uploadRes = await fetch(
+    `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(pageId)}/photos`,
+    {
+      method: 'POST',
+      body: form,
+      signal,
+    }
+  );
+  const uploadPayload = (await parseJsonSafe(uploadRes)) as {
+    id?: string;
+  } & MetaGraphErrorPayload;
+
+  if (!uploadRes.ok || uploadPayload.error || !uploadPayload.id) {
+    return {
+      ok: false,
+      detail: extractMetaErrorMessage(uploadPayload, `HTTP ${uploadRes.status}`),
+    };
+  }
+
+  const photoId = String(uploadPayload.id).trim();
+
+  // Step B: Resolve the public Meta CDN JPEG URL (images[0].source) for Instagram's cover_url
+  const infoUrl = new URL(
+    `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(photoId)}`
+  );
+  infoUrl.searchParams.set('fields', 'images');
+  infoUrl.searchParams.set('access_token', pageToken);
+
+  const infoRes = await fetch(infoUrl.toString(), {
+    method: 'GET',
+    signal,
+  });
+  const infoPayload = (await parseJsonSafe(infoRes)) as {
+    images?: Array<{ height?: number; width?: number; source?: string }>;
+  } & MetaGraphErrorPayload;
+
+  if (!infoRes.ok || infoPayload.error) {
+    return {
+      ok: false,
+      photoId,
+      detail: extractMetaErrorMessage(infoPayload, `HTTP ${infoRes.status}`),
+    };
+  }
+
+  const bestImage = Array.isArray(infoPayload.images)
+    ? infoPayload.images
+        .filter((img) => typeof img?.source === 'string' && img.source.trim())
+        .sort(
+          (a, b) =>
+            (Number(b.width || 0) * Number(b.height || 0)) -
+            (Number(a.width || 0) * Number(a.height || 0))
+        )[0]
+    : undefined;
+
+  if (!bestImage?.source) {
+    return {
+      ok: false,
+      photoId,
+      detail: 'Meta Graph API tidak mengembalikan URL gambar CDN untuk foto sementara.',
+    };
+  }
+
+  return {
+    ok: true,
+    photoId,
+    coverUrl: bestImage.source.trim(),
+  };
+}
+
+async function deleteTemporaryMetaPhoto(params: {
+  photoId: string;
+  pageToken: string;
+  ver: string;
+}): Promise<void> {
+  try {
+    const deleteUrl = new URL(
+      `${META_GRAPH_BASE}/${params.ver}/${encodeURIComponent(params.photoId)}`
+    );
+    deleteUrl.searchParams.set('access_token', params.pageToken);
+    await fetch(deleteUrl.toString(), {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    // temporary=true photos auto-expire on Meta servers within 24 hours
+  }
+}
+
 export async function publishInstagramReelViaMetaApi(
   params: MetaApiPublishParams
 ): Promise<MetaApiPublishResult> {
@@ -1395,40 +1786,128 @@ export async function publishInstagramReelViaMetaApi(
   const captionRawText = getItemCaption(item);
   const shareToFeed = config.metaApi.shareToFeed;
   const igThumbOffsetMs = Math.max(0, Math.round(config.metaApi.igThumbOffsetMs));
+  const fbPageId = config.metaApi.pageId.trim();
+  const fbPageToken =
+    config.metaApi.pageAccessToken.trim() || config.metaApi.accessToken.trim();
 
-  // Step 1: Create resumable Reels container
+  // Step 0 (Optional): Stage local custom cover on Meta CDN via unpublished temp Page photo
+  const coverAsset = item.autoMetadata.assets.cover;
+  const coverPath =
+    coverAsset.exists && coverAsset.absolutePath ? coverAsset.absolutePath : '';
+  let stagedCoverUrl: string | null = null;
+  let stagedCoverPhotoId: string | null = null;
+  let coverApplied = false;
+
+  if (coverPath && fs.existsSync(coverPath) && fbPageId && fbPageToken) {
+    onProgress({
+      step: 'Menyiapkan cover custom Instagram Reels',
+      progressPercent: 10,
+      log: `Mengunggah cover lokal (${coverAsset.fileName || path.basename(coverPath)}) ke staging sementara Meta CDN untuk cover_url Instagram...`,
+      level: 'info',
+    });
+    try {
+      const staged = await stageInstagramCoverViaFacebookTempPhoto({
+        pageId: fbPageId,
+        pageToken: fbPageToken,
+        coverPath,
+        ver,
+        signal,
+      });
+      if (staged.ok && staged.coverUrl) {
+        stagedCoverUrl = staged.coverUrl;
+        stagedCoverPhotoId = staged.photoId ?? null;
+        onProgress({
+          step: 'Cover custom siap dipasang ke container Instagram',
+          progressPercent: 13,
+          log: `Cover lokal berhasil disiapkan di Meta CDN (temp photo ID: ${stagedCoverPhotoId || '-'}).`,
+          level: 'info',
+        });
+      } else {
+        onProgress({
+          step: 'Menggunakan frame video sebagai cover Instagram',
+          progressPercent: 13,
+          log: `Staging cover custom Instagram dilewati (${staged.detail || 'tidak tersedia'}). Fallback ke thumb_offset=${igThumbOffsetMs}ms.`,
+          level: 'warning',
+        });
+      }
+    } catch (stageErr) {
+      if (
+        signal.aborted ||
+        (stageErr instanceof Error && stageErr.name === 'AbortError')
+      ) {
+        throw stageErr;
+      }
+      const msg = stageErr instanceof Error ? stageErr.message : String(stageErr);
+      onProgress({
+        step: 'Menggunakan frame video sebagai cover Instagram',
+        progressPercent: 13,
+        log: `Gagal menyiapkan staging cover custom Instagram (${msg}). Fallback ke thumb_offset=${igThumbOffsetMs}ms.`,
+        level: 'warning',
+      });
+    }
+  }
+
+  // Step 1: Create resumable Reels container (with cover_url when staged, auto-fallback to thumb_offset)
   onProgress({
     step: 'Membuat container upload Instagram Reels',
     progressPercent: 15,
-    log: `Membuat container resumable Instagram Reels untuk ${config.metaApi.igUsername ? `@${config.metaApi.igUsername}` : igUserId} (${fileName}, ${fileSizeLabel}).`,
+    log: `Membuat container resumable Instagram Reels untuk ${config.metaApi.igUsername ? `@${config.metaApi.igUsername}` : igUserId} (${fileName}, ${fileSizeLabel}${stagedCoverUrl ? ', + cover custom' : ''}).`,
     level: 'info',
   });
 
-  const createBody = new URLSearchParams({
-    media_type: 'REELS',
-    upload_type: 'resumable',
-    caption: captionRawText,
-    share_to_feed: String(shareToFeed),
-    thumb_offset: String(igThumbOffsetMs),
-    access_token: token,
-  });
-
-  const createRes = await fetch(
-    `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(igUserId)}/media`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: createBody.toString(),
-      signal,
+  const createContainer = async (useCoverUrl: string | null) => {
+    const body = new URLSearchParams({
+      media_type: 'REELS',
+      upload_type: 'resumable',
+      caption: captionRawText,
+      share_to_feed: String(shareToFeed),
+      access_token: token,
+    });
+    if (useCoverUrl) {
+      body.set('cover_url', useCoverUrl);
+    } else {
+      body.set('thumb_offset', String(igThumbOffsetMs));
     }
+
+    const res = await fetch(
+      `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(igUserId)}/media`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: body.toString(),
+        signal,
+      }
+    );
+    const payload = (await parseJsonSafe(res)) as {
+      id?: string;
+      uri?: string;
+    } & MetaGraphErrorPayload;
+    return { res, payload };
+  };
+
+  let { res: createRes, payload: createPayload } = await createContainer(
+    stagedCoverUrl
   );
 
-  const createPayload = (await parseJsonSafe(createRes)) as {
-    id?: string;
-    uri?: string;
-  } & MetaGraphErrorPayload;
+  if (stagedCoverUrl && (!createRes.ok || createPayload.error)) {
+    const coverErr = extractMetaErrorMessage(
+      createPayload,
+      `HTTP ${createRes.status}`
+    );
+    onProgress({
+      step: 'Mencoba ulang container Instagram tanpa cover_url',
+      progressPercent: 18,
+      log: `Meta menolak cover_url (${coverErr}). Mencoba ulang pembuatan container dengan thumb_offset=${igThumbOffsetMs}ms...`,
+      level: 'warning',
+    });
+    const retry = await createContainer(null);
+    createRes = retry.res;
+    createPayload = retry.payload;
+  } else if (stagedCoverUrl && createRes.ok && !createPayload.error) {
+    coverApplied = true;
+  }
 
   if (!createRes.ok || createPayload.error) {
     const detail = extractMetaErrorMessage(
@@ -1442,8 +1921,14 @@ export async function publishInstagramReelViaMetaApi(
 
   const containerId =
     typeof createPayload.id === 'string' ? createPayload.id.trim() : '';
-  const uploadUri =
+  const rawUploadUri =
     typeof createPayload.uri === 'string' ? createPayload.uri.trim() : '';
+  const uploadUri = normalizeRuploadUrl(
+    rawUploadUri ||
+      (containerId
+        ? `${META_RUPLOAD_BASE}/ig-api-upload/${ver}/${encodeURIComponent(containerId)}`
+        : '')
+  );
 
   if (!containerId || !uploadUri) {
     throw new Error(
@@ -1456,7 +1941,7 @@ export async function publishInstagramReelViaMetaApi(
   onProgress({
     step: `Menyiapkan stream file video ${fileName}`,
     progressPercent: 25,
-    log: `Menyiapkan stream file ${fileName} dari disk untuk diunggah ke container Instagram (${containerId}).`,
+    log: `Container Instagram dibuat (ID: ${containerId}). Menyiapkan stream file ${fileName} dari disk.`,
     level: 'info',
   });
 
@@ -1466,61 +1951,130 @@ export async function publishInstagramReelViaMetaApi(
 
   onProgress({
     step: 'Mengunggah video ke server Meta (rupload)',
-    progressPercent: 40,
-    log: `Mengirim stream biner video (${fileSize} byte) ke server rupload Instagram.`,
+    progressPercent: 32,
+    log: `Mengirim stream biner video (${formatMb(fileSize)}) ke ${uploadUri}.`,
     level: 'info',
   });
 
-  const uploadRes = await uploadVideoFileToMetaRupload({
+  let lastIgLoggedBucket = -1;
+  const uploadResult = await uploadVideoFileToMetaRupload({
     uploadUrl: uploadUri,
     videoPath,
     fileSize,
     token,
     signal,
+    onBytesProgress: (sent, total) => {
+      const ratio = total > 0 ? sent / total : 1;
+      const pct = Math.min(100, Math.round(ratio * 100));
+      const barProgress = 32 + Math.round(ratio * 26);
+      const bucket = Math.floor(pct / 25);
+      const shouldLog = bucket > lastIgLoggedBucket && pct > 0;
+      if (shouldLog) {
+        lastIgLoggedBucket = bucket;
+      }
+      onProgress({
+        step: `Mengunggah video Instagram ke Meta (${formatMb(sent)} / ${formatMb(total)} · ${pct}%)`,
+        progressPercent: barProgress,
+        log: shouldLog
+          ? `Progress upload Instagram Reels: ${formatMb(sent)} / ${formatMb(total)} (${pct}%).`
+          : undefined,
+        level: 'info',
+      });
+    },
   });
 
-  const uploadPayload = (await parseJsonSafe(uploadRes)) as {
-    success?: boolean;
-  } & MetaGraphErrorPayload;
+  const uploadPayload = uploadResult.payload;
+  let ruploadWarningDetail: string | null = null;
 
-  if (!uploadRes.ok || uploadPayload.error || uploadPayload.success === false) {
+  if (!uploadResult.ok || uploadPayload.error || uploadPayload.success === false) {
+    const debugMsg = uploadPayload.debug_info?.message;
+    const debugType = uploadPayload.debug_info?.type;
     const detail = extractMetaErrorMessage(
       uploadPayload,
-      `HTTP ${uploadRes.status}`
+      debugMsg ? `HTTP ${uploadResult.status}: ${debugMsg}` : `HTTP ${uploadResult.status}`
     );
-    throw new Error(
-      `Gagal mengunggah biner video Instagram Reels ke server Meta: ${detail}`
-    );
-  }
 
-  onProgress({
-    step: 'Video selesai diunggah ke container Meta',
-    progressPercent: 60,
-    log: `Upload biner ke container ${containerId} selesai. Menunggu pemrosesan di server Meta...`,
-    level: 'info',
-  });
+    const isMisleadingProcessingFailed400 =
+      uploadResult.status === 400 &&
+      uploadResult.bytesSent >= fileSize &&
+      (debugType === 'ProcessingFailedError' ||
+        /Request processing failed/i.test(detail));
+
+    if (isMisleadingProcessingFailed400) {
+      // Meta rupload frequently returns HTTP 400 ProcessingFailedError after ~33-37s
+      // on Reels >40s even though all bytes were accepted and the container still reaches FINISHED.
+      ruploadWarningDetail = detail;
+      onProgress({
+        step: 'Memverifikasi pemrosesan container Instagram di server Meta',
+        progressPercent: 60,
+        log: `Server rupload Meta mengembalikan ${detail} setelah 100% file (${formatMb(fileSize)}) terkirim. Memeriksa status container ${containerId} untuk memastikan pemrosesan tetap berjalan...`,
+        level: 'warning',
+      });
+    } else {
+      throw new Error(
+        `Gagal mengunggah biner video Instagram Reels ke server Meta: ${detail}`
+      );
+    }
+  } else {
+    onProgress({
+      step: 'Video selesai diunggah ke container Meta',
+      progressPercent: 60,
+      log: `Upload biner ke container ${containerId} selesai. Menunggu pemrosesan di server Meta...`,
+      level: 'info',
+    });
+  }
 
   // Step 3: Poll container status until FINISHED
   let containerFinished = false;
+  let includeVideoStatusField = true;
+
+  type MetaVideoPhaseStatus = {
+    status?: string;
+    bytes_transferred?: number;
+    errors?: Array<{ code?: number; message?: string }>;
+  };
 
   for (let attempt = 1; attempt <= IG_POLL_MAX_ATTEMPTS; attempt += 1) {
     throwIfAborted(signal, 'Upload Instagram Reels via Meta API dibatalkan.');
 
-    const statusUrl = new URL(
-      `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(containerId)}`
+    const fetchStatus = async (withVideoStatus: boolean) => {
+      const statusUrl = new URL(
+        `${META_GRAPH_BASE}/${ver}/${encodeURIComponent(containerId)}`
+      );
+      statusUrl.searchParams.set(
+        'fields',
+        withVideoStatus ? 'status_code,status,video_status' : 'status_code,status'
+      );
+      statusUrl.searchParams.set('access_token', token);
+      const res = await fetch(statusUrl.toString(), {
+        method: 'GET',
+        signal,
+      });
+      const payload = (await parseJsonSafe(res)) as {
+        status_code?: string;
+        status?: string;
+        video_status?: {
+          uploading_phase?: MetaVideoPhaseStatus;
+          processing_phase?: MetaVideoPhaseStatus;
+        };
+      } & MetaGraphErrorPayload;
+      return { res, payload };
+    };
+
+    let { res: statusRes, payload: statusPayload } = await fetchStatus(
+      includeVideoStatusField
     );
-    statusUrl.searchParams.set('fields', 'status_code,status');
-    statusUrl.searchParams.set('access_token', token);
 
-    const statusRes = await fetch(statusUrl.toString(), {
-      method: 'GET',
-      signal,
-    });
-
-    const statusPayload = (await parseJsonSafe(statusRes)) as {
-      status_code?: string;
-      status?: string;
-    } & MetaGraphErrorPayload;
+    if (
+      includeVideoStatusField &&
+      (!statusRes.ok || statusPayload.error) &&
+      statusPayload.error?.code === 100
+    ) {
+      includeVideoStatusField = false;
+      const fallback = await fetchStatus(false);
+      statusRes = fallback.res;
+      statusPayload = fallback.payload;
+    }
 
     if (!statusRes.ok || statusPayload.error) {
       const detail = extractMetaErrorMessage(
@@ -1538,6 +2092,8 @@ export async function publishInstagramReelViaMetaApi(
         : '';
     const statusText =
       typeof statusPayload.status === 'string' ? statusPayload.status.trim() : '';
+    const uploadPhase = statusPayload.video_status?.uploading_phase;
+    const processPhase = statusPayload.video_status?.processing_phase;
 
     if (statusCode === 'FINISHED' || statusCode === 'PUBLISHED') {
       containerFinished = true;
@@ -1551,16 +2107,40 @@ export async function publishInstagramReelViaMetaApi(
       );
     }
 
+    const uploadPhaseErr = uploadPhase?.status?.toLowerCase() === 'error';
+    const processPhaseErr = processPhase?.status?.toLowerCase() === 'error';
+    if (uploadPhaseErr || processPhaseErr) {
+      const phaseErrors = [
+        ...(uploadPhase?.errors ?? []),
+        ...(processPhase?.errors ?? []),
+      ]
+        .map((e) => [e.code ? `#${e.code}` : '', e.message || ''].filter(Boolean).join(' '))
+        .filter(Boolean)
+        .join('; ');
+      const detailText =
+        phaseErrors ||
+        statusText ||
+        ruploadWarningDetail ||
+        'uploading/processing phase error';
+      throw new Error(
+        `Server Meta gagal memproses video Instagram Reels (${detailText}). Coba ulangi upload atau gunakan mode Browser (Meta Business Suite) untuk video durasi panjang.`
+      );
+    }
+
     const pollProgress = Math.min(
       85,
-      65 + Math.round(((attempt - 1) / Math.max(1, IG_POLL_MAX_ATTEMPTS - 1)) * 20)
+      62 + Math.round(((attempt - 1) / Math.max(1, IG_POLL_MAX_ATTEMPTS - 1)) * 23)
     );
+    const phaseNote =
+      uploadPhase?.status || processPhase?.status
+        ? ` [upload: ${uploadPhase?.status || '-'}, proses: ${processPhase?.status || '-'}]`
+        : '';
     onProgress({
       step: `Memproses video Instagram di server Meta (${statusCode || 'IN_PROGRESS'})`,
       progressPercent: pollProgress,
       log:
         attempt === 1 || attempt % 5 === 0
-          ? `Status container Instagram: ${statusCode || 'IN_PROGRESS'} (pengecekan ${attempt}/${IG_POLL_MAX_ATTEMPTS}).`
+          ? `Status container Instagram: ${statusCode || 'IN_PROGRESS'}${phaseNote} (pengecekan ${attempt}/${IG_POLL_MAX_ATTEMPTS}).`
           : undefined,
       level: 'info',
     });
@@ -1572,7 +2152,9 @@ export async function publishInstagramReelViaMetaApi(
 
   if (!containerFinished) {
     throw new Error(
-      'Pemrosesan video Instagram Reels di server Meta melebihi batas waktu tunggu.'
+      ruploadWarningDetail
+        ? `Pemrosesan video Instagram Reels tidak selesai setelah rupload mengembalikan ${ruploadWarningDetail}. Untuk video >45 detik, Meta Graph API terkadang membatasi resumable upload; gunakan mode Browser (Meta Business Suite).`
+        : 'Pemrosesan video Instagram Reels di server Meta melebihi batas waktu tunggu.'
     );
   }
 
@@ -1607,12 +2189,22 @@ export async function publishInstagramReelViaMetaApi(
     workspace?.id
   );
 
+  if (stagedCoverPhotoId && fbPageToken) {
+    void deleteTemporaryMetaPhoto({
+      photoId: stagedCoverPhotoId,
+      pageToken: fbPageToken,
+      ver,
+    });
+  }
+
+  const coverSuffix = coverApplied ? ' + cover custom' : '';
+
   onProgress({
     step: 'Instagram Reels berhasil diterbitkan',
     progressPercent: 100,
     log: permalink
-      ? `Instagram Reels telah tayang di ${permalink}.`
-      : `Instagram Reels telah tayang (Media ID: ${mediaId}).`,
+      ? `Instagram Reels${coverSuffix} telah tayang di ${permalink}.`
+      : `Instagram Reels${coverSuffix} telah tayang (Media ID: ${mediaId}).`,
     level: 'success',
   });
 
@@ -1620,7 +2212,7 @@ export async function publishInstagramReelViaMetaApi(
     status: 'completed',
     publishedUrl: permalink,
     summary: permalink
-      ? `Berhasil publish Instagram Reels via Meta Graph API: ${permalink}`
-      : `Berhasil publish Instagram Reels via Meta Graph API (Media ID: ${mediaId}).`,
+      ? `Berhasil publish Instagram Reels${coverSuffix} via Meta Graph API: ${permalink}`
+      : `Berhasil publish Instagram Reels${coverSuffix} via Meta Graph API (Media ID: ${mediaId}).`,
   };
 }

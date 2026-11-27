@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Square, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,17 +21,20 @@ const ACTIVE_STATUSES: AutoPostJobStatus[] = [
   'awaiting_review',
 ];
 
-const MAX_ROWS = 3;
+const RECENT_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const MAX_ROWS = 4;
 
 function jobStatusMeta(status: AutoPostJobStatus): {
   label: string;
-  variant: 'secondary' | 'info' | 'warning';
+  variant: 'secondary' | 'info' | 'warning' | 'destructive';
 } {
   switch (status) {
     case 'running':
       return { label: 'Berjalan', variant: 'info' };
     case 'awaiting_review':
       return { label: 'Menunggu Tinjau', variant: 'warning' };
+    case 'failed':
+      return { label: 'Gagal', variant: 'destructive' };
     default:
       return { label: 'Antre', variant: 'secondary' };
   }
@@ -42,11 +46,23 @@ export function ActivityFeed({
   onConfirm,
   busyKey,
 }: ActivityFeedProps) {
-  const active = jobs
-    .filter((job) => ACTIVE_STATUSES.includes(job.status))
+  const [dismissedIds, setDismissedIds] = useState<string[]>([]);
+  const now = Date.now();
+
+  const visible = jobs
+    .filter((job) => {
+      if (ACTIVE_STATUSES.includes(job.status)) return true;
+      if (job.status === 'failed' && !dismissedIds.includes(job.jobId)) {
+        const finishedMs = Date.parse(job.finishedAt || job.createdAt || '');
+        return Number.isFinite(finishedMs)
+          ? now - finishedMs <= RECENT_FAILURE_WINDOW_MS
+          : true;
+      }
+      return false;
+    })
     .slice(0, MAX_ROWS);
 
-  if (active.length === 0) return null;
+  if (visible.length === 0) return null;
 
   return (
     <Card>
@@ -54,7 +70,7 @@ export function ActivityFeed({
         <CardTitle>Aktivitas Berjalan</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2 p-2 pt-0">
-        {active.map((job) => {
+        {visible.map((job) => {
           const status = jobStatusMeta(job.status);
           const progress = Math.min(
             100,
@@ -63,6 +79,7 @@ export function ActivityFeed({
           const isBusy = busyKey === `job:${job.jobId}`;
           const canCancel =
             job.status === 'queued' || job.status === 'running';
+          const isFailed = job.status === 'failed';
 
           return (
             <div
@@ -80,16 +97,24 @@ export function ActivityFeed({
                   </Badge>
                 </div>
 
-                <p className="truncate text-[11px] text-muted-foreground">
-                  {job.step || 'Menyiapkan proses...'}
-                </p>
+                {isFailed ? (
+                  <p className="text-[11px] leading-relaxed text-[#991b1b] dark:text-[#fca5a5]">
+                    {job.error || job.step || 'Proses gagal.'}
+                  </p>
+                ) : (
+                  <>
+                    <p className="truncate text-[11px] text-muted-foreground">
+                      {job.step || 'Menyiapkan proses...'}
+                    </p>
 
-                <div className="flex items-center gap-2">
-                  <Progress value={progress} className="w-full" />
-                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums">
-                    {progress}%
-                  </span>
-                </div>
+                    <div className="flex items-center gap-2">
+                      <Progress value={progress} className="w-full" />
+                      <span className="shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums">
+                        {progress}%
+                      </span>
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="flex shrink-0 items-center gap-1">
@@ -99,6 +124,18 @@ export function ActivityFeed({
                     label="Batalkan proses"
                     disabled={isBusy}
                     onClick={() => void onCancel(job.jobId)}
+                  />
+                ) : null}
+
+                {isFailed ? (
+                  <IconActionButton
+                    icon={X}
+                    label="Tutup pemberitahuan gagal"
+                    onClick={() =>
+                      setDismissedIds((prev) =>
+                        prev.includes(job.jobId) ? prev : [...prev, job.jobId]
+                      )
+                    }
                   />
                 ) : null}
 

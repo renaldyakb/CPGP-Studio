@@ -4,6 +4,23 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.12.1] - 2026-11-27 (Meta API Cover Upload, Real-Time Terminal Logs, All-Platform Browser Cover & Human-Like Anti-Bot v2)
+
+### Perbaikan & Peningkatan (Fixed / Improved)
+- **Upload Cover Otomatis di Semua Platform Mode Browser (Langsung & Jadwalkan) (`server/autopost/browserPublishers.ts`)**:
+  - **TikTok Studio**: Menambahkan alur lengkap `uploadTikTokCover()` (`Edit cover` -> tab `Upload cover` -> unggah `cover-*.jpg` -> `Confirm`) untuk mode Langsung maupun Jadwalkan.
+  - **Meta Business Suite (FB & IG Reels)**: Memperluas label pencarian thumbnail (`Upload image`, `Upload photo`, `Unggah gambar`, `Unggah foto`, `Edit cover`, `Add thumbnail`), polling hingga 16 detik sambil scroll natural pada panel kiri, serta konfirmasi otomatis tombol `Save` / `Simpan` / `Apply` bila modal crop muncul.
+  - **YouTube Studio**: Memperbaiki selector `#file-loader` menjadi `input#file-loader[type="file"]` + tombol `Upload file` via `filechooser` dengan log diagnostik jelas bila thumbnail kustom dinonaktifkan YouTube untuk Shorts web.
+- **Perilaku Browser Lebih Manusiawi (`Anti-Bot v2`) (`server/autopost/browserPublishers.ts`)**:
+  - Mengganti gerakan kursor garis lurus dengan lintasan **kurva kubik Bézier** (`humanMoveMouse`) berkecepatan *ease-in-out*, getaran mikro tangan, dan koreksi halus.
+  - Menggunakan durasi tahan klik asli (`mousedown` -> `45-115ms` -> `mouseup`), putaran roda mouse bertahap (`humanScrollWheel`), distribusi jeda Gaussian (`humanDelay` + `humanIdleDrift`), serta ketikan manusiawi (`humanTypeText`) tanpa delay konstan.
+- **Meta Graph API Cover Custom, Instagram `rupload` & Log Terminal (`server/autopost/metaApi.ts`, `server/autopost/queue.ts`, `src/components/autopost/parts/ActivityFeed.tsx`, `src/components/autopost/useAutoPostData.ts`)**:
+  - Menambahkan upload cover lokal otomatis untuk **Facebook Reels** (`POST /{video_id}/thumbnails`, `is_preferred=true`) dan **Instagram Reels** (`cover_url` melalui staging foto sementara `published=false&temporary=true` pada Meta CDN yang dibersihkan otomatis setelah publish).
+  - Menormalkan URL `https://` pada `uploadUri`, beralih ke streaming biner `node:https` dengan progress MB/% real-time & timeout inaktivitas 90 detik, menangani respons semu `HTTP 400 ProcessingFailedError` pada `ig-api-upload` dengan pemeriksaan `video_status`, serta menambahkan izin `business_management` ke `META_OAUTH_SCOPES`.
+  - Mencetak log Auto-Post ber-timestamp secara real-time ke terminal (`[AutoPost HH:mm:ss][folder][platform:engine]`) dan menampilkan toast + kartu gagal di Dasbor agar penyebab error langsung terlihat.
+
+---
+
 ## [v2.12.0] - 2026-11-27 (Full-Stack Performance, Stability, Multi-Workspace Isolation & Anti-Bot Hardening)
 
 ### Performa & Stabilitas Kritis (Fixed / Improved)
