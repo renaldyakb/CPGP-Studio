@@ -1947,35 +1947,152 @@ async function configureMetaBusinessSchedule(
     }
 
     // Fill every date input (1 for single platform, 2 for Facebook + Instagram).
-    // Meta's GeoDateInput opens a [role="grid"] calendar popup on click; selecting the day
-    // inside the calendar reliably commits the date (typing + Enter reverts to today!).
+    // Meta's GeoDateInput opens a [role="grid"] calendar popup on click; selecting the
+    // enabled [role="button"] day cell inside the verified target month+year commits the date.
     const ddStr = String(schedule.day).padStart(2, '0');
     const mmStr = String(schedule.month).padStart(2, '0');
     const targetEnMonth = EN_MONTHS_FULL[schedule.month - 1];
     const targetIdMonth = ID_MONTHS_FULL[schedule.month - 1];
-    const targetMonthRegex = new RegExp(
-      `\\b(?:${targetEnMonth}|${targetIdMonth}|${EN_MONTHS_SHORT[schedule.month - 1]}|${ID_MONTHS_SHORT[schedule.month - 1]})\\b`,
-      'i'
-    );
+    const targetEnShort = EN_MONTHS_SHORT[schedule.month - 1];
+    const targetIdShort = ID_MONTHS_SHORT[schedule.month - 1];
+    const targetMonthAlt = [
+      targetEnMonth,
+      targetIdMonth,
+      targetEnShort,
+      targetIdShort,
+    ]
+      .filter(Boolean)
+      .join('|');
+
+    const NEXT_MONTH_LABEL_REGEX =
+      /next\s*month|bulan\s*berikutnya|bulan\s*depan|berikutnya/i;
+    const PREV_MONTH_LABEL_REGEX =
+      /previous\s*month|prev\s*month|bulan\s*sebelumnya|bulan\s*lalu|sebelumnya/i;
+
+    const parseDisplayedMonthYear = (
+      rawText: string
+    ): { month: number; year: number } | null => {
+      const cleaned = rawText.replace(/\u200b/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!cleaned) return null;
+      const monthYearMatch = cleaned.match(
+        /\b([A-Za-z]+)\.?\s+(20\d{2})\b/
+      );
+      if (monthYearMatch) {
+        const m = parseMonthWordToNumber(monthYearMatch[1]);
+        const y = Number(monthYearMatch[2]);
+        if (m && y >= 2000 && y <= 2100) {
+          return { month: m, year: y };
+        }
+      }
+      const yearMonthMatch = cleaned.match(
+        /\b(20\d{2})\s+([A-Za-z]+)\.?\b/
+      );
+      if (yearMonthMatch) {
+        const y = Number(yearMonthMatch[1]);
+        const m = parseMonthWordToNumber(yearMonthMatch[2]);
+        if (m && y >= 2000 && y <= 2100) {
+          return { month: m, year: y };
+        }
+      }
+      return null;
+    };
+
+    const verifyDateInputValue = (
+      rawVal: string,
+      placeholderHint: string
+    ): boolean => {
+      const s = rawVal.trim();
+      if (!s) return false;
+
+      // ISO YYYY-MM-DD
+      const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if (isoMatch) {
+        return (
+          Number(isoMatch[1]) === schedule.year &&
+          Number(isoMatch[2]) === schedule.month &&
+          Number(isoMatch[3]) === schedule.day
+        );
+      }
+
+      // Numeric DD/MM/YYYY or MM/DD/YYYY (respect placeholder if provided)
+      const numMatch = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+      if (numMatch) {
+        const a = Number(numMatch[1]);
+        const b = Number(numMatch[2]);
+        const y = Number(numMatch[3]);
+        if (y !== schedule.year) return false;
+        if (placeholderHint.includes('mm/dd/yyyy')) {
+          return a === schedule.month && b === schedule.day;
+        }
+        if (placeholderHint.includes('dd/mm/yyyy')) {
+          return a === schedule.day && b === schedule.month;
+        }
+        return (
+          (a === schedule.day && b === schedule.month) ||
+          (a === schedule.month && b === schedule.day)
+        );
+      }
+
+      // Textual "1 December 2026" or "December 1, 2026" or "1 Des 2026"
+      const dayFirst = s.match(/^(\d{1,2})\s+([A-Za-z]+)\.?,?\s+(20\d{2})$/);
+      if (dayFirst) {
+        return (
+          Number(dayFirst[1]) === schedule.day &&
+          parseMonthWordToNumber(dayFirst[2]) === schedule.month &&
+          Number(dayFirst[3]) === schedule.year
+        );
+      }
+      const monthFirst = s.match(/^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(20\d{2})$/);
+      if (monthFirst) {
+        return (
+          parseMonthWordToNumber(monthFirst[1]) === schedule.month &&
+          Number(monthFirst[2]) === schedule.day &&
+          Number(monthFirst[3]) === schedule.year
+        );
+      }
+      return false;
+    };
+
+    const findCalendarNavButton = async (
+      calContainer: Locator,
+      direction: 'next' | 'prev'
+    ): Promise<Locator | null> => {
+      const labelRegex =
+        direction === 'next' ? NEXT_MONTH_LABEL_REGEX : PREV_MONTH_LABEL_REGEX;
+      const ariaSelector =
+        direction === 'next'
+          ? '[aria-label*="Next month" i]:visible, [aria-label*="Bulan berikutnya" i]:visible, [aria-label*="Bulan depan" i]:visible'
+          : '[aria-label*="Previous month" i]:visible, [aria-label*="Prev month" i]:visible, [aria-label*="Bulan sebelumnya" i]:visible, [aria-label*="Bulan lalu" i]:visible';
+
+      // Meta's GeoCalendar puts "Next month\u200b" / "Previous month\u200b" in sr-only text (aria-label=null)
+      const candidates: Locator[] = [
+        calContainer
+          .locator('[role="button"]:visible, button:visible')
+          .filter({ hasText: labelRegex })
+          .first(),
+        calContainer.locator(ariaSelector).first(),
+      ];
+
+      for (const candidate of candidates) {
+        if ((await candidate.count().catch(() => 0)) === 0) continue;
+        if (await candidate.isVisible({ timeout: 300 }).catch(() => false)) {
+          return candidate;
+        }
+      }
+      return null;
+    };
+
+    let allDatesVerified = true;
 
     for (let i = 0; i < dateEntries.length; i += 1) {
       throwIfAborted(signal);
       const { locator: dateInput, value: sampleVal, placeholder } = dateEntries[i];
 
-      await page
-        .evaluate(() => {
-          window.scrollTo(0, 0);
-          document.querySelectorAll('*').forEach((el) => {
-            if (el.scrollTop > 0) {
-              el.scrollTop = 0;
-            }
-          });
-        })
-        .catch(() => {});
-      await abortableWait(150, signal);
+      await dateInput.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
+      await humanDelay(200, 400, signal);
 
       await humanClick(page, dateInput, signal, { timeout: 5000, force: true });
-      await abortableWait(450, signal);
+      await humanDelay(450, 750, signal);
 
       const calGrid = page.locator('[role="grid"]:visible').last();
       const gridVisible = await calGrid
@@ -1983,60 +2100,140 @@ async function configureMetaBusinessSchedule(
         .catch(() => false);
 
       let dateSetViaCalendar = false;
+      let targetMonthYearReached = false;
+
       if (gridVisible) {
-        // Scope strictly to the calendar popover container so we NEVER click buttons outside the calendar!
+        // Walk up to the calendar popover container that holds both the month-year header and Prev/Next buttons
+        const calHeaderWrap = calGrid.locator('xpath=parent::div').first();
         const calContainer = calGrid.locator('xpath=ancestor::div[4]').first();
-        for (let nav = 0; nav < 6; nav += 1) {
+
+        for (let nav = 0; nav < 24; nav += 1) {
           throwIfAborted(signal);
-          const calContainerText = await calContainer
-            .innerText()
-            .catch(() => '');
-          if (targetMonthRegex.test(calContainerText)) {
-            break;
-          }
-          const nextMonthBtn = calContainer
-            .locator(
-              '[aria-label*="Next month" i]:visible, [aria-label*="Bulan berikutnya" i]:visible, [aria-label*="Next" i]:visible'
-            )
-            .last();
-          if (await nextMonthBtn.isVisible({ timeout: 500 }).catch(() => false)) {
-            await humanClick(page, nextMonthBtn, signal, {
-              timeout: 3000,
-            }).catch(() => {});
-            await abortableWait(300, signal);
+          const headerText =
+            (await calHeaderWrap.innerText().catch(() => '')) ||
+            (await calContainer.innerText().catch(() => ''));
+          const displayed = parseDisplayedMonthYear(headerText);
+
+          if (displayed) {
+            const deltaMonths =
+              schedule.year * 12 +
+              schedule.month -
+              (displayed.year * 12 + displayed.month);
+
+            if (deltaMonths === 0) {
+              targetMonthYearReached = true;
+              break;
+            }
+
+            const direction: 'next' | 'prev' = deltaMonths > 0 ? 'next' : 'prev';
+            const navBtn = await findCalendarNavButton(calContainer, direction);
+            if (!navBtn) {
+              onProgress({
+                step: 'Tombol pindah bulan kalender Meta tidak ditemukan',
+                progressPercent: 84,
+                log: `Kalender Meta menampilkan ${displayed.month}/${displayed.year}, target ${schedule.month}/${schedule.year}, tetapi tombol ${direction === 'next' ? 'Next month' : 'Previous month'} tidak ditemukan.`,
+                level: 'warning',
+              });
+              break;
+            }
+
+            const navEnabled = await isLocatorEnabled(navBtn);
+            if (!navEnabled) {
+              onProgress({
+                step: 'Bulan/tahun target di luar batas jadwal Meta',
+                progressPercent: 84,
+                log: `Tombol ${direction === 'next' ? 'Next month' : 'Previous month'} dinonaktifkan Meta pada ${displayed.month}/${displayed.year} (target ${schedule.day}/${schedule.month}/${schedule.year} kemungkinan melebihi batas jadwal 29 hari Meta).`,
+                level: 'warning',
+              });
+              break;
+            }
+
+            await humanClick(page, navBtn, signal, { timeout: 3000 });
+            await humanDelay(320, 560, signal);
           } else {
             break;
           }
         }
 
-        const dayCells = calGrid
-          .locator(
-            '[role="gridcell"]:not([aria-disabled="true"]), [role="button"]:not([aria-disabled="true"]), button:not([disabled])'
-          )
-          .filter({ hasText: new RegExp(`^${schedule.day}$`) });
-        const cellCount = await dayCells.count().catch(() => 0);
-        if (cellCount > 0) {
-          // Days 1..15 of current month appear before next month's leading days -> first()
-          // Days 16..31 of current month appear after previous month's trailing days -> last()
-          const targetCell =
-            schedule.day <= 15 ? dayCells.first() : dayCells.last();
-          try {
-            await humanClick(page, targetCell, signal, { timeout: 2500 });
-            await abortableWait(400, signal);
-            dateSetViaCalendar = true;
-          } catch (err) {
-            if (
-              signal.aborted ||
-              (err instanceof Error && err.name === 'AbortError')
-            ) {
-              throw createAbortError();
+        if (targetMonthYearReached) {
+          // Match ONLY enabled interactive day buttons inside calGrid (NEVER outer [role="gridcell"]!)
+          // Prefer exact aria-label containing day + target month + target year (e.g. "Tuesday, 1 December 2026")
+          const exactAriaDayRegex = new RegExp(
+            `(?:\\b0?${schedule.day}\\s+(?:${targetMonthAlt})\\.?\\s+${schedule.year}\\b|\\b(?:${targetMonthAlt})\\.?\\s+0?${schedule.day},?\\s+${schedule.year}\\b)`,
+            'i'
+          );
+
+          const allEnabledDayBtns = calGrid.locator(
+            '[role="button"]:not([aria-disabled="true"]), button:not([disabled]):not([aria-disabled="true"])'
+          );
+          const enabledCount = await allEnabledDayBtns.count().catch(() => 0);
+
+          let targetCell: Locator | null = null;
+          for (let dIdx = 0; dIdx < enabledCount; dIdx += 1) {
+            const btn = allEnabledDayBtns.nth(dIdx);
+            const aria = (await btn.getAttribute('aria-label').catch(() => '')) ?? '';
+            if (aria && exactAriaDayRegex.test(aria)) {
+              targetCell = btn;
+              break;
             }
-            dateSetViaCalendar = false;
+          }
+
+          if (!targetCell) {
+            const textMatchedBtns = allEnabledDayBtns.filter({
+              hasText: new RegExp(`^${schedule.day}$`),
+            });
+            const matchCount = await textMatchedBtns.count().catch(() => 0);
+            if (matchCount > 0) {
+              targetCell =
+                schedule.day <= 15
+                  ? textMatchedBtns.first()
+                  : textMatchedBtns.last();
+            }
+          }
+
+          if (targetCell && (await isLocatorEnabled(targetCell))) {
+            try {
+              await humanClick(page, targetCell, signal, { timeout: 3000 });
+              await humanDelay(450, 750, signal);
+
+              const committedVal = (
+                await dateInput.inputValue().catch(() => '')
+              ).trim();
+              if (verifyDateInputValue(committedVal, placeholder)) {
+                dateSetViaCalendar = true;
+              } else {
+                onProgress({
+                  step: 'Verifikasi tanggal Meta tidak cocok setelah klik kalender',
+                  progressPercent: 84,
+                  log: `Nilai tanggal setelah klik kalender adalah "${committedVal}", berbeda dari target ${ddStr}/${mmStr}/${schedule.year}.`,
+                  level: 'warning',
+                });
+              }
+            } catch (err) {
+              if (
+                signal.aborted ||
+                (err instanceof Error && err.name === 'AbortError')
+              ) {
+                throw createAbortError();
+              }
+              dateSetViaCalendar = false;
+            }
+          } else {
+            onProgress({
+              step: `Tanggal ${schedule.day}/${schedule.month}/${schedule.year} tidak aktif di kalender Meta`,
+              progressPercent: 84,
+              log: `Tanggal ${ddStr}/${mmStr}/${schedule.year} berstatus nonaktif atau di luar rentang jadwal yang diizinkan Meta Business Suite.`,
+              level: 'warning',
+            });
           }
         }
       }
 
       if (!dateSetViaCalendar) {
+        // Close calendar popup cleanly before trying keyboard fallback
+        await page.keyboard.press('Escape').catch(() => {});
+        await humanDelay(200, 350, signal);
+
         let formattedDate: string;
         if (placeholder.includes('dd/mm/yyyy')) {
           formattedDate = `${ddStr}/${mmStr}/${schedule.year}`;
@@ -2059,8 +2256,25 @@ async function configureMetaBusinessSchedule(
         await humanTypeText(page, formattedDate, signal);
         await humanDelay(180, 320, signal);
         await page.keyboard.press('Tab');
-        await humanDelay(250, 450, signal);
+        await humanDelay(300, 500, signal);
+
+        const afterTypeVal = (
+          await dateInput.inputValue().catch(() => '')
+        ).trim();
+        if (!verifyDateInputValue(afterTypeVal, placeholder)) {
+          allDatesVerified = false;
+          onProgress({
+            step: `Tanggal jadwal Meta gagal disetel ke ${ddStr}/${mmStr}/${schedule.year}`,
+            progressPercent: 85,
+            log: `Input tanggal ke-${i + 1} masih bernilai "${afterTypeVal}" (target ${ddStr}/${mmStr}/${schedule.year}). Membatalkan klik otomatis agar tidak salah tanggal.`,
+            level: 'warning',
+          });
+        }
       }
+    }
+
+    if (!allDatesVerified) {
+      return false;
     }
 
     const use12Hour = ampmInputs.length > 0;

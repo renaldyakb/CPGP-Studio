@@ -4,6 +4,19 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.12.3] - 2026-11-27 (Fix Meta Business Suite Schedule Month & Year Calendar Selection)
+
+### Perbaikan (Fixed)
+- **Perbaikan Pemilihan Bulan & Tahun pada Auto-Schedule Meta Business Suite (`server/autopost/browserPublishers.ts`)**:
+  - **Akar Masalah**: Tombol `Next month` / `Previous month` pada GeoCalendar Meta Business Suite menaruh label di sr-only `textContent` (`aria-label: null`), sehingga pencarian berbasis `[aria-label*="Next month"]` selalu gagal dan kalender tetap di bulan aktif (misal memilih 1 November alih-alih 1 Desember). Selain itu, outer `[role="gridcell"]` tidak memiliki `aria-disabled="true"` sehingga sel tanggal lalu yang nonaktif ikut terklik.
+  - **Solusi**:
+    - Mem-parsing bulan dan tahun 4 digit (`parseDisplayedMonthYear`) dari header kalender untuk navigasi maju (`Next month`) dan mundur (`Previous month`) secara presisi lintas bulan maupun lintas tahun (misal `2026 -> 2027` hingga 24 bulan).
+    - Mencocokkan tombol navigasi bulan via sr-only `hasText` dan `aria-label`, serta memeriksa status aktif sebelum klik agar berhenti aman jika tanggal berada di luar batas jadwal 29 hari Meta.
+    - Membatasi klik tanggal hanya pada `[role="button"]:not([aria-disabled="true"])` dengan `aria-label` tanggal + bulan + tahun eksak setelah bulan dan tahun target terkonfirmasi.
+    - Menambahkan verifikasi nilai input pasca-klik (`verifyDateInputValue`) agar tidak pernah melanjutkan jadwal jika tanggal tidak sesuai target.
+
+---
+
 ## [v2.12.2] - 2026-11-27 (Auto-Detect Meta Thumbnail Observer, Redesigned Auto-Post / Tabel / Kalender UX & Windows Watcher Stability)
 
 ### Peningkatan UX, UI & Aksesibilitas (Improved)
