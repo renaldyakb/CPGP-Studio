@@ -9,9 +9,14 @@ import {
   WORKSPACES_REGISTRY_FILE,
 } from './workspaces/registry.ts';
 import { resolveAppRoot } from './core/appPaths.ts';
+import {
+  getRemoteControlConfig,
+  isLoopbackRequest,
+  setActualServerPort,
+} from './core/remoteControl.ts';
 import { getCurrentAppVersion } from './core/updateChecker.ts';
 
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = process.env.HOST || '0.0.0.0';
 const BASE_PORT = Number(process.env.PORT ?? 5173);
 const MAX_PORT_RETRIES = 5;
 const DIST_DIR = path.join(resolveAppRoot(), 'dist');
@@ -19,6 +24,30 @@ const DIST_ASSETS_DIR = path.resolve(DIST_DIR, 'assets');
 const HAS_DIST = fs.existsSync(path.join(DIST_DIR, 'index.html'));
 
 const app = express();
+
+// Block non-loopback LAN requests immediately when Remote Control HP is disabled
+app.use((req, res, next) => {
+  if (isLoopbackRequest(req)) {
+    next();
+    return;
+  }
+  const remoteCfg = getRemoteControlConfig();
+  if (!remoteCfg.enabled) {
+    res
+      .status(403)
+      .type('text/plain; charset=utf-8')
+      .send(
+        'Remote Control HP sedang dinonaktifkan. Aktifkan dari tombol Remote HP di aplikasi Desktop CPGP.'
+      );
+    return;
+  }
+  if (req.path === '/' && req.method === 'GET') {
+    res.redirect(302, '/remote');
+    return;
+  }
+  next();
+});
+
 app.use(createApiRouter());
 
 app.get('/health', (_req, res) => {
@@ -107,9 +136,11 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 });
 
 server.on('listening', () => {
+  setActualServerPort(currentPort);
   const activeWorkspace = getActiveWorkspace();
   const workspacePaths = getWorkspacePaths(activeWorkspace.id);
-  const displayHost = HOST === '127.0.0.1' ? 'localhost' : HOST;
+  const displayHost =
+    HOST === '127.0.0.1' || HOST === '0.0.0.0' ? 'localhost' : HOST;
 
   console.log('================================================================');
   console.log(

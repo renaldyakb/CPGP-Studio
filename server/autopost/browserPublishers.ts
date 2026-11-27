@@ -319,15 +319,72 @@ async function abortableWait(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+interface SessionHumanProfile {
+  typingTempo: number; // 0.78..1.30 (lower = brisk typist, higher = relaxed typist)
+  dwellBaseMs: number; // 46..74ms average key hold duration
+  pauseScale: number; // 0.85..1.35 pacing multiplier between steps
+  mouseSpeed: number; // 0.80..1.28 cursor movement speed multiplier
+  curveStrength: number; // 0.11..0.24 Bezier arc curvature
+  overshootChance: number; // 0.22..0.48 chance of subtle overshoot on long moves
+  typoChance: number; // 0.008..0.018 rare adjacent-key typo rate in prose
+  hesitationChance: number; // 0.025..0.055 word-boundary thinking pause rate
+}
+
+const sessionProfileByPage = new WeakMap<Page, SessionHumanProfile>();
+
+function createSessionHumanProfile(): SessionHumanProfile {
+  return {
+    typingTempo: 0.78 + Math.random() * 0.52,
+    dwellBaseMs: 46 + Math.random() * 28,
+    pauseScale: 0.85 + Math.random() * 0.5,
+    mouseSpeed: 0.8 + Math.random() * 0.48,
+    curveStrength: 0.11 + Math.random() * 0.13,
+    overshootChance: 0.22 + Math.random() * 0.26,
+    typoChance: 0.008 + Math.random() * 0.01,
+    hesitationChance: 0.025 + Math.random() * 0.03,
+  };
+}
+
+function getSessionProfile(page?: Page): SessionHumanProfile {
+  if (!page) {
+    return createSessionHumanProfile();
+  }
+  let profile = sessionProfileByPage.get(page);
+  if (!profile) {
+    profile = createSessionHumanProfile();
+    sessionProfileByPage.set(page, profile);
+  }
+  return profile;
+}
+
+/**
+ * Generates a Box-Muller standard normal sample clamped to [-2.4, 2.8]
+ * so timing follows a realistic right-skewed human reaction distribution.
+ */
+function sampleNormal(): number {
+  const u1 = Math.max(1e-6, Math.random());
+  const u2 = Math.random();
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  return Math.max(-2.4, Math.min(2.8, z));
+}
+
+function sampleSkewedMs(minMs: number, maxMs: number, scale = 1): number {
+  const lo = Math.max(4, minMs * scale);
+  const hi = Math.max(lo + 4, maxMs * scale);
+  const median = lo + (hi - lo) * 0.36;
+  const sigma = 0.34;
+  const raw = median * Math.exp(sigma * sampleNormal());
+  return Math.round(Math.max(lo, Math.min(hi, raw)));
+}
+
 async function humanDelay(
   minMs: number,
   maxMs: number,
-  signal: AbortSignal
+  signal: AbortSignal,
+  page?: Page
 ): Promise<void> {
-  // Approximate Gaussian-like distribution by averaging two uniform samples
-  const u = (Math.random() + Math.random()) / 2;
-  const span = Math.max(1, maxMs - minMs);
-  const delayMs = minMs + Math.round(u * span);
+  const scale = page ? getSessionProfile(page).pauseScale : 1;
+  const delayMs = sampleSkewedMs(minMs, maxMs, scale);
   await abortableWait(delayMs, signal);
 }
 
@@ -359,6 +416,7 @@ async function humanMoveMouse(
   signal: AbortSignal
 ): Promise<void> {
   throwIfAborted(signal);
+  const profile = getSessionProfile(page);
   const viewport = await getViewportBounds(page);
   const vw = viewport?.width ?? 1280;
   const vh = viewport?.height ?? 800;
@@ -367,8 +425,8 @@ async function humanMoveMouse(
   if (!start) {
     // Seed an organic initial cursor position inside the viewport rather than (0, 0)
     start = {
-      x: Math.round(vw * (0.25 + Math.random() * 0.5)),
-      y: Math.round(vh * (0.2 + Math.random() * 0.5)),
+      x: Math.round(vw * (0.22 + Math.random() * 0.56)),
+      y: Math.round(vh * (0.18 + Math.random() * 0.56)),
     };
     await page.mouse.move(start.x, start.y).catch(() => {});
   }
@@ -383,18 +441,29 @@ async function humanMoveMouse(
     return;
   }
 
-  // Perpendicular arc offset proportional to travel distance
+  // Perpendicular arc offset proportional to travel distance and per-session hand curvature
   const perpX = -dy / distance;
   const perpY = dx / distance;
   const arcSign = Math.random() < 0.5 ? -1 : 1;
-  const arcMag = Math.min(95, Math.max(12, distance * (0.12 + Math.random() * 0.16)));
+  const arcMag = Math.min(
+    105,
+    Math.max(12, distance * (profile.curveStrength * (0.75 + Math.random() * 0.5)))
+  );
 
-  const cp1x = start.x + dx * (0.24 + Math.random() * 0.14) + perpX * arcSign * arcMag;
-  const cp1y = start.y + dy * (0.24 + Math.random() * 0.14) + perpY * arcSign * arcMag;
-  const cp2x = start.x + dx * (0.66 + Math.random() * 0.14) + perpX * arcSign * arcMag * 0.45;
-  const cp2y = start.y + dy * (0.66 + Math.random() * 0.14) + perpY * arcSign * arcMag * 0.45;
+  const cp1x =
+    start.x + dx * (0.22 + Math.random() * 0.16) + perpX * arcSign * arcMag;
+  const cp1y =
+    start.y + dy * (0.22 + Math.random() * 0.16) + perpY * arcSign * arcMag;
+  const cp2x =
+    start.x +
+    dx * (0.64 + Math.random() * 0.16) +
+    perpX * arcSign * arcMag * (0.35 + Math.random() * 0.25);
+  const cp2y =
+    start.y +
+    dy * (0.64 + Math.random() * 0.16) +
+    perpY * arcSign * arcMag * (0.35 + Math.random() * 0.25);
 
-  const steps = Math.max(12, Math.min(28, Math.round(distance / 28) + 8));
+  const steps = Math.max(12, Math.min(30, Math.round(distance / 26) + 8));
 
   for (let i = 1; i <= steps; i += 1) {
     throwIfAborted(signal);
@@ -403,7 +472,7 @@ async function humanMoveMouse(
     const t = linearT * linearT * (3 - 2 * linearT);
     const inv = 1 - t;
 
-    const jitterScale = i === steps ? 0 : Math.sin(linearT * Math.PI) * 1.4;
+    const jitterScale = i === steps ? 0 : Math.sin(linearT * Math.PI) * 1.5;
     const x =
       inv * inv * inv * start.x +
       3 * inv * inv * t * cp1x +
@@ -424,17 +493,25 @@ async function humanMoveMouse(
     if (i < steps) {
       // Slightly slower near start and target, faster mid-travel
       const edgeFactor = 1 - Math.sin(linearT * Math.PI) * 0.55;
-      const stepDelay = Math.round((5 + Math.random() * 9) * edgeFactor);
+      const stepDelay = Math.round(
+        (5 + Math.random() * 9) * edgeFactor * profile.mouseSpeed
+      );
       await abortableWait(stepDelay, signal);
     }
   }
 
   // Occasional subtle human overshoot + micro-correction on longer cursor moves
-  if (distance > 180 && Math.random() < 0.35) {
-    const overX = Math.max(1, Math.min(vw - 1, targetX + (Math.random() - 0.5) * 6));
-    const overY = Math.max(1, Math.min(vh - 1, targetY + (Math.random() - 0.5) * 5));
+  if (distance > 160 && Math.random() < profile.overshootChance) {
+    const overX = Math.max(
+      1,
+      Math.min(vw - 1, targetX + (Math.random() - 0.5) * 7)
+    );
+    const overY = Math.max(
+      1,
+      Math.min(vh - 1, targetY + (Math.random() - 0.5) * 6)
+    );
     await page.mouse.move(overX, overY);
-    await humanDelay(25, 55, signal);
+    await humanDelay(28, 62, signal, page);
     await page.mouse.move(targetX, targetY);
   }
 
@@ -454,11 +531,11 @@ async function humanIdleDrift(page: Page, signal: AbortSignal): Promise<void> {
     };
     const nextX = Math.max(
       40,
-      Math.min(viewport.width - 40, cur.x + (Math.random() - 0.5) * 180)
+      Math.min(viewport.width - 40, cur.x + (Math.random() - 0.5) * 200)
     );
     const nextY = Math.max(
       60,
-      Math.min(viewport.height - 60, cur.y + (Math.random() - 0.5) * 120)
+      Math.min(viewport.height - 60, cur.y + (Math.random() - 0.5) * 140)
     );
     await humanMoveMouse(page, nextX, nextY, signal);
   } catch {
@@ -478,7 +555,9 @@ async function humanScrollWheel(
   throwIfAborted(signal);
   try {
     if (anchorLocator) {
-      const box = await anchorLocator.boundingBox({ timeout: 1500 }).catch(() => null);
+      const box = await anchorLocator
+        .boundingBox({ timeout: 1500 })
+        .catch(() => null);
       if (box && box.width > 10 && box.height > 10) {
         const hoverX = box.x + box.width * (0.3 + Math.random() * 0.4);
         const hoverY = box.y + box.height * (0.3 + Math.random() * 0.4);
@@ -492,80 +571,262 @@ async function humanScrollWheel(
       const tick = Math.min(remaining, 85 + Math.floor(Math.random() * 85));
       await page.mouse.wheel(0, direction * tick);
       remaining -= tick;
-      await humanDelay(45, 115, signal);
+      await humanDelay(45, 115, signal, page);
     }
   } catch {
     // Ignore wheel scroll errors on non-scrollable targets
   }
 }
 
+const QWERTY_NEIGHBORS: Record<string, string> = {
+  a: 'sqwz',
+  b: 'vghn',
+  c: 'xdfv',
+  d: 'serfcx',
+  e: 'wsdr',
+  f: 'drtgvc',
+  g: 'ftyhbv',
+  h: 'gyujnb',
+  i: 'ujko',
+  j: 'huikmn',
+  k: 'jiolm',
+  l: 'kop',
+  m: 'njk',
+  n: 'bhjm',
+  o: 'iklp',
+  p: 'ol',
+  q: 'wa',
+  r: 'edft',
+  s: 'awedxz',
+  t: 'rfgy',
+  u: 'yhji',
+  v: 'cfgb',
+  w: 'qase',
+  x: 'zsdc',
+  y: 'tghu',
+  z: 'asx',
+};
+
+const FAST_DIGRAPHS = new Set([
+  'an',
+  'ar',
+  'at',
+  'da',
+  'di',
+  'en',
+  'er',
+  'in',
+  'ka',
+  'ke',
+  'la',
+  'me',
+  'na',
+  'ng',
+  'ni',
+  'on',
+  'ra',
+  're',
+  'sa',
+  'se',
+  'ta',
+  'te',
+  'th',
+  'ti',
+  'ya',
+]);
+
+async function pressSingleHumanKey(
+  page: Page,
+  ch: string,
+  dwellBaseMs: number,
+  signal: AbortSignal
+): Promise<void> {
+  // Plain lowercase letters, digits, and space emit authentic keydown -> dwell -> keyup biometrics
+  if (/^[a-z0-9 ]$/.test(ch)) {
+    const keyName = ch === ' ' ? 'Space' : ch;
+    const holdMs = sampleSkewedMs(dwellBaseMs * 0.55, dwellBaseMs * 1.45, 1);
+    await page.keyboard.down(keyName);
+    await abortableWait(holdMs, signal);
+    await page.keyboard.up(keyName);
+    return;
+  }
+  await page.keyboard.type(ch);
+}
+
+interface HumanTypeOptions {
+  allowTypos?: boolean;
+}
+
 /**
- * Enters text with realistic human cadence:
- * - Short strings (<= 65 chars): character-by-character typing with variable key delays.
- * - Longer multi-line captions: paragraph-by-paragraph entry with Enter keys and pauses,
- *   typing short bursts and inserting longer lines naturally so it stays fast without
- *   looking like an instant 0ms DOM dump.
+ * Types text character-by-character across ALL social media editors (YouTube, TikTok,
+ * Facebook, Instagram) with realistic per-session keystroke biometrics:
+ * - Authentic key hold (dwell) + right-skewed log-normal inter-key (flight) latency
+ * - Faster common digraph pairs & slightly slower punctuation/uppercase transitions
+ * - Rare adjacent-QWERTY typo + Backspace self-correction in prose (never inside #hashtags, @mentions, URLs, or date/time fields)
+ * - Natural paragraph Enter breaks and brief word-boundary thinking pauses
  */
 async function humanTypeText(
   page: Page,
   text: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  options: HumanTypeOptions = {}
 ): Promise<void> {
   throwIfAborted(signal);
+  const profile = getSessionProfile(page);
+  const allowTypos = options.allowTypos ?? false;
   const normalized = text.replace(/\r\n/g, '\n');
 
-  if (normalized.length <= 65 && !normalized.includes('\n')) {
-    for (let i = 0; i < normalized.length; i += 1) {
-      throwIfAborted(signal);
-      const ch = normalized[i];
-      await page.keyboard.type(ch);
-      if (ch === ' ' || ch === '.' || ch === '?' || ch === '!') {
-        await humanDelay(55, 130, signal);
-      } else {
-        await humanDelay(28, 78, signal);
-      }
+  // Cap pure char-by-char typing at 650 chars so unusually massive captions still finish safely
+  const CHAR_TYPING_CAP = 650;
+  const charPart =
+    normalized.length > CHAR_TYPING_CAP
+      ? normalized.slice(0, CHAR_TYPING_CAP)
+      : normalized;
+  const overflowTail =
+    normalized.length > CHAR_TYPING_CAP
+      ? normalized.slice(CHAR_TYPING_CAP)
+      : '';
+
+  let typosMade = 0;
+  const maxTypos = allowTypos ? 1 + Math.floor(Math.random() * 3) : 0;
+  let inProtectedToken = false; // #hashtag, @mention, or http URL
+  let prevChar = '';
+
+  const chars = Array.from(charPart);
+  for (let i = 0; i < chars.length; i += 1) {
+    throwIfAborted(signal);
+    const ch = chars[i];
+
+    if (ch === '\n') {
+      inProtectedToken = false;
+      prevChar = '\n';
+      const enterHold = sampleSkewedMs(42, 88, 1);
+      await page.keyboard.down('Enter');
+      await abortableWait(enterHold, signal);
+      await page.keyboard.up('Enter');
+      await humanDelay(210, 490, signal, page);
+      continue;
     }
-    return;
+
+    if (ch === ' ' || ch === '\t') {
+      inProtectedToken = false;
+    } else if (
+      ch === '#' ||
+      ch === '@' ||
+      (prevChar === '' || prevChar === ' ' || prevChar === '\n') &&
+        charPart.slice(i, i + 4).toLowerCase() === 'http'
+    ) {
+      inProtectedToken = true;
+    }
+
+    // Rare natural adjacent-key typo + recognition pause + Backspace + correct char
+    const lowerCh = ch.toLowerCase();
+    const canTypoHere =
+      allowTypos &&
+      typosMade < maxTypos &&
+      !inProtectedToken &&
+      i > 3 &&
+      i < chars.length - 3 &&
+      ch === lowerCh &&
+      Boolean(QWERTY_NEIGHBORS[lowerCh]) &&
+      Math.random() < profile.typoChance;
+
+    if (canTypoHere) {
+      const neighbors = QWERTY_NEIGHBORS[lowerCh];
+      const wrongChar = neighbors[Math.floor(Math.random() * neighbors.length)];
+      typosMade += 1;
+
+      await pressSingleHumanKey(page, wrongChar, profile.dwellBaseMs, signal);
+      // Human error-detection latency before hitting Backspace
+      await abortableWait(
+        sampleSkewedMs(125, 290, profile.typingTempo),
+        signal
+      );
+      const bsHold = sampleSkewedMs(40, 82, 1);
+      await page.keyboard.down('Backspace');
+      await abortableWait(bsHold, signal);
+      await page.keyboard.up('Backspace');
+      await abortableWait(sampleSkewedMs(65, 145, profile.typingTempo), signal);
+    }
+
+    await pressSingleHumanKey(page, ch, profile.dwellBaseMs, signal);
+
+    // Compute natural flight time to next key
+    const digraph = (prevChar + ch).toLowerCase();
+    if (ch === '.' || ch === '?' || ch === '!') {
+      await abortableWait(
+        sampleSkewedMs(115, 290, profile.typingTempo),
+        signal
+      );
+    } else if (ch === ',' || ch === ':' || ch === ';') {
+      await abortableWait(sampleSkewedMs(80, 185, profile.typingTempo), signal);
+    } else if (ch === ' ') {
+      // Occasional subtle thinking pause between words
+      if (Math.random() < profile.hesitationChance) {
+        await abortableWait(
+          sampleSkewedMs(190, 440, profile.pauseScale),
+          signal
+        );
+      } else {
+        await abortableWait(
+          sampleSkewedMs(42, 115, profile.typingTempo),
+          signal
+        );
+      }
+    } else if (FAST_DIGRAPHS.has(digraph)) {
+      await abortableWait(sampleSkewedMs(16, 48, profile.typingTempo), signal);
+    } else if (/[A-Z0-9#@]/.test(ch)) {
+      await abortableWait(sampleSkewedMs(34, 92, profile.typingTempo), signal);
+    } else {
+      await abortableWait(sampleSkewedMs(20, 66, profile.typingTempo), signal);
+    }
+
+    prevChar = ch;
   }
 
-  const lines = normalized.split('\n');
-  for (let lineIdx = 0; lineIdx < lines.length; lineIdx += 1) {
-    throwIfAborted(signal);
-    const line = lines[lineIdx];
-    if (line.length > 0) {
-      // Split long lines into natural word chunks (~18-36 chars) with brief pauses
-      const words = line.split(' ');
-      let chunk = '';
-      for (let w = 0; w < words.length; w += 1) {
-        const nextWord = words[w];
-        const candidate = chunk ? `${chunk} ${nextWord}` : nextWord;
-        if (candidate.length >= 24 + Math.floor(Math.random() * 14) || w === words.length - 1) {
-          const toSend = w === words.length - 1 ? candidate : `${candidate} `;
-          if (lineIdx === 0 && w < 3 && toSend.length <= 26) {
-            for (const ch of toSend) {
-              throwIfAborted(signal);
-              await page.keyboard.type(ch);
-              await humanDelay(25, 68, signal);
-            }
-          } else {
-            await page.keyboard.insertText(toSend);
+  // Handle tail beyond 650 chars gracefully in short natural word bursts
+  if (overflowTail) {
+    const tailLines = overflowTail.split('\n');
+    for (let l = 0; l < tailLines.length; l += 1) {
+      throwIfAborted(signal);
+      const line = tailLines[l];
+      if (line) {
+        const words = line.split(' ');
+        let buf = '';
+        for (let w = 0; w < words.length; w += 1) {
+          buf = buf ? `${buf} ${words[w]}` : words[w];
+          if (buf.length >= 16 || w === words.length - 1) {
+            await page.keyboard.insertText(
+              w === words.length - 1 ? buf : `${buf} `
+            );
+            buf = '';
+            await abortableWait(
+              sampleSkewedMs(85, 210, profile.typingTempo),
+              signal
+            );
           }
-          chunk = '';
-          await humanDelay(90, 220, signal);
-        } else {
-          chunk = candidate;
         }
       }
-      if (chunk) {
-        await page.keyboard.insertText(chunk);
-        await humanDelay(80, 180, signal);
+      if (l < tailLines.length - 1) {
+        await page.keyboard.press('Enter');
+        await humanDelay(180, 380, signal, page);
       }
     }
-    if (lineIdx < lines.length - 1) {
-      await page.keyboard.press('Enter');
-      await humanDelay(140, 320, signal);
-    }
   }
+}
+
+/**
+ * Natural human pause & optional subtle cursor drift right before pressing the final
+ * Publish / Schedule / Share button so actions never happen at fixed robotic intervals.
+ */
+async function humanFinalReviewPause(
+  page: Page,
+  signal: AbortSignal
+): Promise<void> {
+  if (Math.random() < 0.55) {
+    await humanIdleDrift(page, signal);
+  }
+  await humanDelay(1100, 2300, signal, page);
 }
 
 async function raceWithAbort<T>(
@@ -864,16 +1125,16 @@ async function fillTextWithInsertFallback(
     await humanDelay(90, 180, signal);
     await page.keyboard.press('Backspace');
     await humanDelay(140, 280, signal);
-    await humanTypeText(page, text, signal);
+    await humanTypeText(page, text, signal, { allowTypos: true });
     return true;
   } catch {
     try {
       await locator.click({ timeout: 4000 });
       await page.keyboard.press(SELECT_ALL_SHORTCUT);
-      await humanDelay(100, 220, signal);
+      await humanDelay(100, 220, signal, page);
       await page.keyboard.press('Backspace');
-      await humanDelay(120, 240, signal);
-      await page.keyboard.insertText(text);
+      await humanDelay(120, 240, signal, page);
+      await humanTypeText(page, text, signal, { allowTypos: false });
       return true;
     } catch {
       return false;
@@ -890,14 +1151,14 @@ async function fillYouTubeTextbox(
   throwIfAborted(signal);
   try {
     await humanClick(page, locator, signal, { timeout: 6000 });
-    await humanDelay(160, 320, signal);
+    await humanDelay(160, 320, signal, page);
     await page.keyboard.press(SELECT_ALL_SHORTCUT);
-    await humanDelay(80, 160, signal);
+    await humanDelay(80, 160, signal, page);
     await page.keyboard.press('Delete');
-    await humanDelay(140, 280, signal);
+    await humanDelay(140, 280, signal, page);
 
     try {
-      await humanTypeText(page, text, signal);
+      await humanTypeText(page, text, signal, { allowTypos: true });
     } catch {
       await page.keyboard.insertText(text);
     }
@@ -2937,6 +3198,7 @@ export async function publishMetaBusinessSuiteViaBrowser(
     { timeout: 90_000 }
   );
 
+  await humanFinalReviewPause(page, signal);
   await humanClick(page, shareBtn, signal, { timeout: 10_000 });
   await raceWithAbort(graphqlPromise, signal);
 
@@ -3650,6 +3912,7 @@ export async function publishYouTubeViaBrowser(
     level: 'info',
   });
 
+  await humanFinalReviewPause(page, signal);
   const doneClicked = await tryClickAny(
     page,
     ['#done-button', 'ytcp-button#done-button'],
@@ -4108,6 +4371,26 @@ async function uploadTikTokCover(
     'button:has-text("Konfirmasi")',
   ];
 
+  let coverAttached = false;
+  let pendingChooserSet: Promise<void> | null = null;
+
+  // Keep a continuous filechooser interceptor active throughout the entire cover flow
+  // so Chrome/CDP NEVER pops open the native Windows File Explorer window (whether
+  // clicking "Upload cover" opens the picker immediately or a secondary button does).
+  const onFileChooser = (chooser: { setFiles: (files: string | string[]) => Promise<void> }) => {
+    if (coverAttached || signal.aborted) return;
+    pendingChooserSet = chooser
+      .setFiles([coverPath])
+      .then(() => {
+        coverAttached = true;
+      })
+      .catch(() => {
+        // Fallback to direct input if chooser was already handled
+      });
+  };
+
+  page.on('filechooser', onFileChooser);
+
   try {
     onProgress({
       step: `Memasang cover ${coverFileName} di TikTok Studio`,
@@ -4135,54 +4418,83 @@ async function uploadTikTokCover(
     }
 
     await waitForEnabledLocator(editBtn, 15_000, signal);
-    await humanDelay(650, 1250, signal);
+    await humanDelay(650, 1250, signal, page);
     await humanClick(page, editBtn, signal, { timeout: 8000 });
-    await humanDelay(1000, 1650, signal);
+    await humanDelay(1000, 1650, signal, page);
 
-    // Switch to the "Upload cover" tab inside the cover editor modal
-    const uploadTab = await findFirstVisibleLocator(
-      root,
-      UPLOAD_COVER_TAB_SELECTORS,
-      8000,
-      signal
-    );
-    if (uploadTab) {
-      await humanDelay(250, 550, signal);
-      await humanClick(page, uploadTab, signal, { timeout: 6000 });
-      await humanDelay(700, 1200, signal);
+    if (pendingChooserSet) {
+      await raceWithAbort(pendingChooserSet, signal);
     }
 
-    // Attach cover image either via scoped image file input or via filechooser trigger
-    let coverAttached = false;
-    const modalScope = root
-      .locator('[role="dialog"], .cover-edit-modal, .TUXModal-content')
-      .last();
-    const hasModal = await modalScope
-      .isVisible({ timeout: 1000 })
-      .catch(() => false);
+    // Switch to the "Upload cover" tab inside the cover editor modal (checks both root and top-level portal)
+    if (!coverAttached) {
+      const uploadTab =
+        (await findFirstVisibleLocator(
+          root,
+          UPLOAD_COVER_TAB_SELECTORS,
+          6000,
+          signal
+        )) ??
+        (root !== page
+          ? await findFirstVisibleLocator(
+              page,
+              UPLOAD_COVER_TAB_SELECTORS,
+              2500,
+              signal
+            )
+          : null);
 
-    const imageInputCandidates = [
-      ...(hasModal
-        ? [
-            modalScope.locator('input[type="file"][accept*="image"]').last(),
-            modalScope.locator('input[type="file"]').last(),
-          ]
-        : []),
-      root.locator('input[type="file"][accept*="image"]:not([accept*="video"])').last(),
-    ];
-
-    for (const inputLoc of imageInputCandidates) {
-      if ((await inputLoc.count().catch(() => 0)) > 0) {
-        try {
-          await inputLoc.setInputFiles(coverPath);
-          coverAttached = true;
-          break;
-        } catch {
-          // Try next candidate
+      if (uploadTab) {
+        await humanDelay(250, 550, signal, page);
+        await humanClick(page, uploadTab, signal, { timeout: 6000 });
+        await humanDelay(700, 1200, signal, page);
+        if (pendingChooserSet) {
+          await raceWithAbort(pendingChooserSet, signal);
         }
       }
     }
 
+    // Attach cover image directly to scoped <input type="file"> (never opens OS Explorer)
+    if (!coverAttached) {
+      const scopes: Array<Page | FrameLocator> =
+        root === page ? [page] : [root, page];
+
+      for (const scope of scopes) {
+        if (coverAttached) break;
+        const modalScope = scope
+          .locator('[role="dialog"], .cover-edit-modal, .TUXModal-content')
+          .last();
+        const hasModal = await modalScope
+          .isVisible({ timeout: 800 })
+          .catch(() => false);
+
+        const imageInputCandidates = [
+          ...(hasModal
+            ? [
+                modalScope.locator('input[type="file"][accept*="image"]').last(),
+                modalScope.locator('input[type="file"]').last(),
+              ]
+            : []),
+          scope
+            .locator('input[type="file"][accept*="image"]:not([accept*="video"])')
+            .last(),
+        ];
+
+        for (const inputLoc of imageInputCandidates) {
+          if ((await inputLoc.count().catch(() => 0)) > 0) {
+            try {
+              await inputLoc.setInputFiles(coverPath);
+              coverAttached = true;
+              break;
+            } catch {
+              // Try next candidate
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback: click upload dropzone/button while our page.on('filechooser') interceptor catches it silently
     if (!coverAttached) {
       const uploadTriggerSelectors = [
         '[role="dialog"] button:has-text("Upload")',
@@ -4191,28 +4503,34 @@ async function uploadTikTokCover(
         '[role="dialog"] button:has-text("Pilih")',
         '[role="dialog"] [class*="upload"]',
       ];
-      const dropTrigger = await findFirstVisibleLocator(
-        root,
-        uploadTriggerSelectors,
-        4000,
-        signal
-      );
+      const dropTrigger =
+        (await findFirstVisibleLocator(
+          root,
+          uploadTriggerSelectors,
+          3500,
+          signal
+        )) ??
+        (root !== page
+          ? await findFirstVisibleLocator(
+              page,
+              uploadTriggerSelectors,
+              2000,
+              signal
+            )
+          : null);
+
       if (dropTrigger) {
-        const chooserPromise = page
-          .waitForEvent('filechooser', { timeout: 6000 })
-          .catch(() => null);
         await humanClick(page, dropTrigger, signal, { timeout: 6000 });
-        const chooser = await raceWithAbort(chooserPromise, signal);
-        if (chooser) {
-          await chooser.setFiles([coverPath]);
-          coverAttached = true;
+        await humanDelay(600, 1000, signal, page);
+        if (pendingChooserSet) {
+          await raceWithAbort(pendingChooserSet, signal);
         }
       }
     }
 
     if (!coverAttached) {
       await page.keyboard.press('Escape').catch(() => {});
-      await humanDelay(400, 700, signal);
+      await humanDelay(400, 700, signal, page);
       onProgress({
         step: 'Input unggah cover TikTok tidak ditemukan',
         progressPercent: 69,
@@ -4223,20 +4541,29 @@ async function uploadTikTokCover(
     }
 
     // Allow TikTok cover crop preview to render before confirming
-    await humanDelay(1800, 2800, signal);
+    await humanDelay(1800, 2800, signal, page);
 
-    const confirmBtn = await findFirstVisibleLocator(
-      root,
-      CONFIRM_COVER_SELECTORS,
-      8000,
-      signal
-    );
+    const confirmBtn =
+      (await findFirstVisibleLocator(
+        root,
+        CONFIRM_COVER_SELECTORS,
+        7000,
+        signal
+      )) ??
+      (root !== page
+        ? await findFirstVisibleLocator(
+            page,
+            CONFIRM_COVER_SELECTORS,
+            2500,
+            signal
+          )
+        : null);
 
     if (confirmBtn) {
       await waitForEnabledLocator(confirmBtn, 8000, signal);
-      await humanDelay(300, 650, signal);
+      await humanDelay(300, 650, signal, page);
       await humanClick(page, confirmBtn, signal, { timeout: 8000 });
-      await humanDelay(1200, 2000, signal);
+      await humanDelay(1200, 2000, signal, page);
 
       onProgress({
         step: `Cover ${coverFileName} berhasil dipasang di TikTok Studio`,
@@ -4248,7 +4575,7 @@ async function uploadTikTokCover(
     }
 
     await page.keyboard.press('Escape').catch(() => {});
-    await humanDelay(400, 700, signal);
+    await humanDelay(400, 700, signal, page);
     onProgress({
       step: 'Tombol Confirm cover TikTok tidak ditemukan',
       progressPercent: 69,
@@ -4269,6 +4596,8 @@ async function uploadTikTokCover(
       level: 'warning',
     });
     return false;
+  } finally {
+    page.off('filechooser', onFileChooser);
   }
 }
 
@@ -4417,13 +4746,13 @@ export async function publishTikTokViaBrowser(
   });
 
   await humanClick(page, captionEditor, signal, { timeout: 8000 });
-  await humanDelay(250, 480, signal);
+  await humanDelay(250, 480, signal, page);
   await page.keyboard.press(SELECT_ALL_SHORTCUT);
-  await humanDelay(90, 180, signal);
+  await humanDelay(90, 180, signal, page);
   await page.keyboard.press('Delete');
-  await humanDelay(180, 340, signal);
-  await humanTypeText(page, caption, signal);
-  await humanDelay(600, 1100, signal);
+  await humanDelay(180, 340, signal, page);
+  await humanTypeText(page, caption, signal, { allowTypos: true });
+  await humanDelay(600, 1100, signal, page);
 
   // Upload custom 9:16 Cover via "Edit cover" -> "Upload cover" -> "Confirm" (both immediate & scheduled)
   const coverPath = getCoverPathForItem(item);
@@ -4526,6 +4855,7 @@ export async function publishTikTokViaBrowser(
     level: 'info',
   });
 
+  await humanFinalReviewPause(page, signal);
   await humanClick(page, postButton, signal, { timeout: 10_000 });
   await humanDelay(1200, 2000, signal);
 
@@ -4632,6 +4962,8 @@ export async function publishViaBrowser(
   throwIfAborted(signal);
 
   const page = await context.newPage();
+  const sessionProfile = createSessionHumanProfile();
+  sessionProfileByPage.set(page, sessionProfile);
   await safeBringToFront(page);
 
   let shouldClosePage = false;

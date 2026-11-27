@@ -1,7 +1,7 @@
 {
   "name": "cpgp-studio",
   "private": false,
-  "version": "2.12.3",
+  "version": "2.13.0",
   "description": "CPGP (Content Planer Gam Puko) - Multi-Workspace Local Content Planner, Watermark Studio & Auto-Post Suite",
   "type": "module",
   "bin": {
@@ -13,7 +13,7 @@
   },
   "homepage": "https://github.com/renaldyakb/CPGP-Studio#readme",
   "scripts": {
-    "dev": "vite --port 5173",
+    "dev": "vite --host 0.0.0.0 --port 5173",
     "start": "node bin/cpgp-studio.mjs",
     "server": "tsx server/index.ts",
     "build": "vite build",

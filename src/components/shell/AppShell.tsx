@@ -25,6 +25,7 @@ import {
   Settings,
   Settings2,
   Share2,
+  Smartphone,
   Sun,
   Table2,
 } from 'lucide-react';
@@ -38,6 +39,7 @@ import {
   useUpdateChecker,
 } from '@/components/shell/UpdateNotificationBanner';
 import { CommandPalette } from '@/components/shell/CommandPalette';
+import { RemoteControlModal } from '@/components/shell/RemoteControlModal';
 import { Kbd } from '@/components/ui/kbd';
 import { Button } from '@/components/ui/button';
 import {
@@ -222,7 +224,20 @@ export function AppShell({
     CONNECTION_ROUTES.has(activePath)
   );
   const [commandOpen, setCommandOpen] = useState<boolean>(false);
+  const [remoteModalOpen, setRemoteModalOpen] = useState<boolean>(false);
+  const [remoteEnabled, setRemoteEnabled] = useState<boolean>(false);
   const { updateInfo, dismissed, dismissUpdate } = useUpdateChecker();
+
+  useEffect(() => {
+    fetch('/api/remote/session')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { enabled?: boolean } | null) => {
+        if (data && typeof data.enabled === 'boolean') {
+          setRemoteEnabled(data.enabled);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (CONNECTION_ROUTES.has(activePath)) {
@@ -778,6 +793,24 @@ export function AppShell({
               </Button>
             ) : null}
 
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setRemoteModalOpen(true)}
+              aria-label="Remote Control HP (QR Code & PIN)"
+              className="h-7 gap-1.5 px-2 text-xs font-medium"
+            >
+              <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="hidden md:inline">Remote HP</span>
+              {remoteEnabled ? (
+                <span
+                  className="h-2 w-2 rounded-full bg-[#166534] dark:bg-[#86efac]"
+                  aria-label="Remote aktif"
+                />
+              ) : null}
+            </Button>
+
             {actions}
 
             {onOpenQuickGuide ? (
@@ -834,6 +867,12 @@ export function AppShell({
           </div>
         </main>
       </SidebarInset>
+
+      <RemoteControlModal
+        isOpen={remoteModalOpen}
+        onClose={() => setRemoteModalOpen(false)}
+        onStatusChanged={setRemoteEnabled}
+      />
 
       <CommandPalette
         open={commandOpen}

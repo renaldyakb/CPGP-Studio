@@ -41,6 +41,7 @@ import {
   type WatermarkOutputMode,
 } from '@/services/watermarkApi';
 import { usePlannerWorkspace } from '@/components/planner/PlannerContext';
+import { playCpgpNotifSound } from '@/lib/notifSound';
 import { IconActionButton } from '@/components/autopost/parts/IconActionButton';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -360,6 +361,7 @@ export function WatermarkPage() {
       }
       if (anyCompleted) {
         refreshRef.current();
+        void playCpgpNotifSound();
       }
     };
 

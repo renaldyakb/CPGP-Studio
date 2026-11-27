@@ -89,6 +89,16 @@ import {
   checkLatestGitHubRelease,
   getCurrentAppVersion,
 } from './core/updateChecker.ts';
+import {
+  authenticateRemoteClient,
+  getNotifSoundBuffer,
+  getRemoteControlConfig,
+  getRemoteControlPublicStatus,
+  isAuthorizedRemoteRequest,
+  isLoopbackRequest,
+  REMOTE_COOKIE_NAME,
+  updateRemoteControlConfig,
+} from './core/remoteControl.ts';
 import { WORKSPACE_ROOT } from './scanner.ts';
 import {
   ALL_PLATFORM_KEYS,
@@ -723,6 +733,14 @@ export function createApiRouter(): Express {
 
   rebindWatcherToActiveWorkspace();
 
+  const isPrivateLanHostname = (hostname: string): boolean => {
+    return (
+      /^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
+      /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
+      /^172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(hostname)
+    );
+  };
+
   app.use(
     '/api',
     cors({
@@ -733,24 +751,199 @@ export function createApiRouter(): Express {
         }
         try {
           const parsed = new URL(origin);
-          if (
-            (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-            (parsed.hostname === 'localhost' ||
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            if (
+              parsed.hostname === 'localhost' ||
               parsed.hostname === '127.0.0.1' ||
               parsed.hostname === '[::1]' ||
-              parsed.hostname === '::1')
-          ) {
-            callback(null, true);
-            return;
+              parsed.hostname === '::1'
+            ) {
+              callback(null, true);
+              return;
+            }
+            if (
+              getRemoteControlConfig().enabled &&
+              isPrivateLanHostname(parsed.hostname)
+            ) {
+              callback(null, true);
+              return;
+            }
           }
         } catch {
           // Reject malformed origin
         }
         callback(null, false);
       },
+      credentials: true,
     })
   );
   app.use('/api', express.json({ limit: '10mb' }));
+
+  // Remote Control LAN Guard for /api/* and /media/*
+  const PUBLIC_REMOTE_API_PATHS = new Set([
+    '/api/remote/session',
+    '/api/remote/auth',
+    '/api/remote/logout',
+    '/api/remote/notif-sound',
+    '/api/brand/emblem',
+  ]);
+
+  app.use((req: Request, res: Response, next) => {
+    const isApi = req.path.startsWith('/api');
+    const isMedia = req.path.startsWith('/media');
+    if (!isApi && !isMedia) {
+      next();
+      return;
+    }
+
+    if (isLoopbackRequest(req)) {
+      next();
+      return;
+    }
+
+    const remoteCfg = getRemoteControlConfig();
+    if (!remoteCfg.enabled) {
+      res.status(403).json({
+        error:
+          'Remote Control HP sedang dinonaktifkan. Aktifkan dari tombol Remote HP di aplikasi Desktop CPGP.',
+        remoteDisabled: true,
+      });
+      return;
+    }
+
+    if (isApi && PUBLIC_REMOTE_API_PATHS.has(req.path)) {
+      next();
+      return;
+    }
+
+    if (!isAuthorizedRemoteRequest(req)) {
+      res.status(401).json({
+        error:
+          'Sesi Remote Control belum terautentikasi. Scan QR Code atau masukkan PIN 6 digit.',
+        requiresAuth: true,
+      });
+      return;
+    }
+
+    next();
+  });
+
+  // ---------------------------------------------------------------------------
+  // 0. Remote Control HP (Local Wi-Fi Pairing, PIN/QR Auth & Notification Sound)
+  // ---------------------------------------------------------------------------
+
+  // GET /api/remote/config (Loopback Desktop or Authenticated Remote)
+  app.get('/api/remote/config', (req: Request, res: Response) => {
+    if (!isLoopbackRequest(req) && !isAuthorizedRemoteRequest(req)) {
+      res.status(403).json({
+        error: 'Hanya dapat diakses dari aplikasi Desktop CPGP atau perangkat terautentikasi.',
+      });
+      return;
+    }
+    res.json(getRemoteControlPublicStatus());
+  });
+
+  // PUT /api/remote/config (Loopback Desktop only for security)
+  app.put('/api/remote/config', (req: Request, res: Response) => {
+    if (!isLoopbackRequest(req)) {
+      res.status(403).json({
+        error:
+          'Pengaturan PIN & aktivasi Remote Control hanya dapat diubah langsung dari PC Desktop.',
+      });
+      return;
+    }
+    const body = req.body ?? {};
+    updateRemoteControlConfig({
+      enabled:
+        typeof body.enabled === 'boolean' ? body.enabled : undefined,
+      soundOnDesktop:
+        typeof body.soundOnDesktop === 'boolean'
+          ? body.soundOnDesktop
+          : undefined,
+      regeneratePin: body.regeneratePin === true,
+      customPin:
+        typeof body.customPin === 'string' ? body.customPin : undefined,
+    });
+    res.json(getRemoteControlPublicStatus());
+  });
+
+  // GET /api/remote/session (Public bootstrap check for /remote on mobile)
+  app.get('/api/remote/session', (req: Request, res: Response) => {
+    const cfg = getRemoteControlConfig();
+    const isLoopback = isLoopbackRequest(req);
+    const authenticated = isAuthorizedRemoteRequest(req);
+    const activeWs = hasConfiguredWorkspace() ? getActiveWorkspace() : null;
+
+    res.json({
+      enabled: cfg.enabled,
+      authenticated,
+      isLoopback,
+      soundOnDesktop: cfg.soundOnDesktop,
+      activeWorkspace: activeWs
+        ? {
+            id: activeWs.id,
+            name: activeWs.name,
+            handle: activeWs.handle,
+          }
+        : null,
+    });
+  });
+
+  // POST /api/remote/auth (Exchange 6-digit PIN or QR pairToken for session cookie + token)
+  app.post('/api/remote/auth', (req: Request, res: Response) => {
+    const pin =
+      typeof req.body?.pin === 'string' ? req.body.pin.trim() : undefined;
+    const token =
+      typeof req.body?.token === 'string' ? req.body.token.trim() : undefined;
+
+    const result = authenticateRemoteClient(req, { pin, token });
+    if (!result.ok || !result.sessionToken) {
+      res.status(result.status ?? 401).json({
+        ok: false,
+        error: result.error ?? 'Autentikasi gagal.',
+      });
+      return;
+    }
+
+    res.setHeader(
+      'Set-Cookie',
+      `${REMOTE_COOKIE_NAME}=${encodeURIComponent(result.sessionToken)}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax`
+    );
+    res.json({
+      ok: true,
+      sessionToken: result.sessionToken,
+    });
+  });
+
+  // POST /api/remote/logout
+  app.post('/api/remote/logout', (_req: Request, res: Response) => {
+    res.setHeader(
+      'Set-Cookie',
+      `${REMOTE_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`
+    );
+    res.json({ ok: true });
+  });
+
+  // GET /api/remote/notif-sound (Serves bundled cpgp-notif.mp3)
+  app.get('/api/remote/notif-sound', (req: Request, res: Response) => {
+    const buf = getNotifSoundBuffer();
+    const etag = `W/"cpgp-notif-${buf.length}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, {
+        ETag: etag,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': buf.length,
+      ETag: etag,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+    res.end(buf);
+  });
 
   // 1. GET /api/events: Server-Sent Events for real-time UI sync
   app.get('/api/events', (req: Request, res: Response) => {

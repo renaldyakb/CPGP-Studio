@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { openManagedEventSource } from '@/lib/managedEventSource';
+import { playCpgpNotifSound } from '@/lib/notifSound';
 import type {
   AiContentDisclosureMode,
   AutoPostBrowserSessionStatus,
@@ -269,6 +270,7 @@ export function useAutoPostData(
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   const syncedCompletedJobs = useRef<Set<string>>(new Set());
+  const notifiedReviewJobs = useRef<Set<string>>(new Set());
   const notifiedFailedJobs = useRef<Set<string>>(new Set());
   const prevWorkspaceIdRef = useRef<string | undefined>(workspaceId);
   const inFlightRefreshRef = useRef<Promise<void> | null>(null);
@@ -278,6 +280,7 @@ export function useAutoPostData(
     const next = workspaceId;
     if (prev && next && prev !== next) {
       syncedCompletedJobs.current.clear();
+      notifiedReviewJobs.current.clear();
       notifiedFailedJobs.current.clear();
     }
     setSessionChecks(loadStoredSessionChecks(activeWorkspaceKey));
@@ -315,6 +318,8 @@ export function useAutoPostData(
           for (const job of jobsRes.value.jobs) {
             if (job.status === 'completed') {
               syncedCompletedJobs.current.add(job.jobId);
+            } else if (job.status === 'awaiting_review') {
+              notifiedReviewJobs.current.add(job.jobId);
             } else if (job.status === 'failed') {
               notifiedFailedJobs.current.add(job.jobId);
             }
@@ -362,19 +367,32 @@ export function useAutoPostData(
           const isSnapshot = payload.type === 'jobs-snapshot';
           if (Array.isArray(payload.jobs)) {
             let completedNow = false;
+            let shouldChime = false;
             for (const job of payload.jobs) {
               if (
                 job.status === 'completed' &&
                 !syncedCompletedJobs.current.has(job.jobId)
               ) {
                 syncedCompletedJobs.current.add(job.jobId);
-                if (!isSnapshot) completedNow = true;
+                if (!isSnapshot) {
+                  completedNow = true;
+                  shouldChime = true;
+                }
+              } else if (
+                job.status === 'awaiting_review' &&
+                !notifiedReviewJobs.current.has(job.jobId)
+              ) {
+                notifiedReviewJobs.current.add(job.jobId);
+                if (!isSnapshot) {
+                  shouldChime = true;
+                }
               } else if (
                 job.status === 'failed' &&
                 !notifiedFailedJobs.current.has(job.jobId)
               ) {
                 notifiedFailedJobs.current.add(job.jobId);
                 if (!isSnapshot) {
+                  shouldChime = true;
                   onToastRef.current?.(
                     `Auto-Post ${job.platform} gagal: ${job.error || job.step}`,
                     'error'
@@ -384,6 +402,7 @@ export function useAutoPostData(
             }
             setJobs(payload.jobs);
             if (completedNow) onPlannerSyncRef.current?.();
+            if (shouldChime) void playCpgpNotifSound();
           } else if (payload.job) {
             const incoming = payload.job;
             setJobs((prev) => {
@@ -398,11 +417,19 @@ export function useAutoPostData(
             ) {
               syncedCompletedJobs.current.add(incoming.jobId);
               onPlannerSyncRef.current?.();
+              void playCpgpNotifSound();
+            } else if (
+              incoming.status === 'awaiting_review' &&
+              !notifiedReviewJobs.current.has(incoming.jobId)
+            ) {
+              notifiedReviewJobs.current.add(incoming.jobId);
+              void playCpgpNotifSound();
             } else if (
               incoming.status === 'failed' &&
               !notifiedFailedJobs.current.has(incoming.jobId)
             ) {
               notifiedFailedJobs.current.add(incoming.jobId);
+              void playCpgpNotifSound();
               onToastRef.current?.(
                 `Auto-Post ${incoming.platform} gagal: ${incoming.error || incoming.step}`,
                 'error'

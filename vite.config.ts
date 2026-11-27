@@ -3,6 +3,11 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 import { createApiRouter } from './server/api.ts';
+import {
+  getRemoteControlConfig,
+  isLoopbackAddress,
+  setActualServerPort,
+} from './server/core/remoteControl.ts';
 
 const RUNTIME_DATA_DIR = path.resolve(__dirname, 'data').toLowerCase();
 const CACHE_DIR = path.resolve(__dirname, '.cache').toLowerCase();
@@ -12,10 +17,48 @@ export function jurnalDuniaApiPlugin(): Plugin {
   return {
     name: 'jurnal-dunia-api-middleware',
     configureServer(server) {
+      server.httpServer?.once('listening', () => {
+        const addr = server.httpServer?.address();
+        if (addr && typeof addr === 'object' && typeof addr.port === 'number') {
+          setActualServerPort(addr.port);
+        }
+      });
+
+      server.middlewares.use((req, res, next) => {
+        const remoteIp = req.socket?.remoteAddress ?? '';
+        if (isLoopbackAddress(remoteIp)) {
+          next();
+          return;
+        }
+        const remoteCfg = getRemoteControlConfig();
+        if (!remoteCfg.enabled) {
+          res.statusCode = 403;
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.end(
+            'Remote Control HP sedang dinonaktifkan. Aktifkan dari tombol Remote HP di aplikasi Desktop CPGP.'
+          );
+          return;
+        }
+        if (req.url === '/' && req.method === 'GET') {
+          res.statusCode = 302;
+          res.setHeader('Location', '/remote');
+          res.end();
+          return;
+        }
+        next();
+      });
+
       const apiApp = createApiRouter();
       server.middlewares.use(apiApp);
     },
     configurePreviewServer(server) {
+      server.httpServer?.once('listening', () => {
+        const addr = server.httpServer?.address();
+        if (addr && typeof addr === 'object' && typeof addr.port === 'number') {
+          setActualServerPort(addr.port);
+        }
+      });
+
       const apiApp = createApiRouter();
       server.middlewares.use(apiApp);
     },
@@ -78,6 +121,7 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
     port: 5173,
     strictPort: false,
     watch: {

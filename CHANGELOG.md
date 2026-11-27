@@ -4,6 +4,28 @@ Seluruh perubahan besar pada proyek **CPGP** dicatat dalam dokumen ini menggunak
 
 ---
 
+## [v2.13.0] - 2026-11-27 (CPGP Remote Control HP Wi-Fi Lokal, Notifikasi Suara `cpgp-notif.mp3`, Anti-Bot v3 & Fix TikTok Cover Explorer)
+
+### Fitur Baru (Added)
+- **CPGP Remote Control HP (Wi-Fi Lokal) (`server/core/remoteControl.ts`, `server/core/qrCodeSvg.ts`, `src/components/shell/RemoteControlModal.tsx`, `src/routes/remote/*`)**:
+  - **Halaman Khusus Mobile-First `/remote`**: Navigasi 4 tab jempol bawah (`Publish`, `Watermark`, `Monitor`, `Atur`) dengan target sentuh lega (`44-48px`), Light/Dark mode, dan 0px horizontal overflow di layar HP.
+  - **Remote Auto-Post (`RemotePublishTab`)**: Filter cepat `Belum Upload` (default) / `Siap (WM)` / `Semua`, tombol geser cepat `Previous` / `Next` + posisi (`1 / N`), tampilan tanggal lengkap (`displayDate` + jam slot WIB), pilihan 4 platform + pintasan `FB + IG` & `Belum Tayang`, mode `Tinjau Dulu` / `Langsung`, jadwal `Sekarang` / `Jadwalkan` (`11:30` / `19:30` / custom), dan label AI-Generated.
+  - **Remote Watermark Studio (`RemoteWatermarkTab`)**: Filter `Perlu WM` / `Semua`, 1-tap `Pilih Semua Belum WM`, pilih preset, encoder GPU/CPU, dan output mode untuk batch render FFmpeg di PC dari HP.
+  - **Live Monitor & Notifikasi Suara `cpgp-notif.mp3` (`RemoteMonitorTab`, `src/lib/notifSound.ts`, `public/sounds/cpgp-notif.mp3`, `server/core/notifSoundData.ts`)**: Pantau progres real-time (SSE) antrean Auto-Post & Watermark beserta tombol `Publish IG / Tandai Selesai`, `Batalkan`, `Coba Lagi`, dan log live. Suara **`cpgp-notif.mp3`** (tertanam langsung di bundle sehingga 100% offline-ready) + getar HP otomatis berbunyi saat job selesai/butuh tinjau/gagal, lengkap dengan 1-tap unlock audio & Screen Wake Lock.
+  - **Pairing QR Code Offline & Keamanan PIN 6 Digit**: Tombol **Remote HP** di topbar Desktop (terkunci mati secara default; semua akses LAN ditolak `403` saat nonaktif). Saat dinyalakan, menampilkan QR Code SVG zero-dependency, PIN 6 digit dengan rate-limit anti brute-force, tombol reset PIN/QR, dan daftar perangkat HP yang terhubung.
+
+### Peningkatan Anti-Bot & Perbaikan (Improved / Fixed)
+- **Behavioral Biometrics Anti-Bot v3 di Semua Platform (`server/autopost/browserPublishers.ts`)**:
+  - Profil perilaku acak unik per sesi (`SessionHumanProfile`: tempo ketikan, durasi tahan tombol, kelengkungan kurva mouse Bézier, kecepatan pointer, dan ritme jeda) sehingga tidak ada dua sesi yang identik.
+  - Seluruh judul, deskripsi, dan caption di **YouTube, TikTok, Facebook, dan Instagram** (baik mode Terjadwal maupun Langsung, Tinjau maupun Publish) kini diketik per karakter dengan distribusi log-normal, akselerasi digraf umum, serta typo QWERTY langka + koreksi `Backspace` yang aman (tidak pernah menyentuh `#hashtag`, `@mention`, URL, atau input tanggal/jam).
+  - Jeda tinjau akhir natural (`humanFinalReviewPause`) sebelum klik tombol Publish/Schedule akhir.
+- **Mencegah Windows File Explorer Terbuka Saat Upload Cover TikTok (`server/autopost/browserPublishers.ts`)**:
+  - Memasang interceptor `page.on('filechooser', ...)` secara kontinu sepanjang alur `uploadTikTokCover()` (termasuk pada modal portal/iframe), sehingga Chrome/CDP menahan penuh dialog Explorer dan memasukkan `cover-*.jpg` secara diam-diam.
+- **Dukungan LAN Wi-Fi pada Dev & Produksi (`server/index.ts`, `server/api.ts`, `vite.config.ts`, `package.json`)**:
+  - Mengikat host ke `0.0.0.0` dengan middleware LAN Guard ketat (`403` bila Remote nonaktif, `401` bila belum autentikasi PIN/QR) dan menyinkronkan port aktual untuk QR Code.
+
+---
+
 ## [v2.12.3] - 2026-11-27 (Fix Meta Business Suite Schedule Month & Year Calendar Selection)
 
 ### Perbaikan (Fixed)

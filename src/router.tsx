@@ -73,6 +73,11 @@ const YouTubeApiPage = lazy(() =>
     default: m.YouTubeApiPage,
   }))
 );
+const RemotePage = lazy(() =>
+  import('./routes/remote/RemotePage').then((m) => ({
+    default: m.RemotePage,
+  }))
+);
 
 function RouteLoadingFallback({ fullPage = false }: { fullPage?: boolean }) {
   const content = (
@@ -357,6 +362,16 @@ const autoPostYouTubeRoute = createRoute({
   component: YouTubeApiRoute,
 });
 
+function RemoteRoute() {
+  return withRouteSuspense(<RemotePage />, { fullPage: true });
+}
+
+const remoteRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/remote',
+  component: RemoteRoute,
+});
+
 const routeTree = rootRoute.addChildren([
   plannerLayoutRoute.addChildren([
     overviewRoute,
@@ -375,6 +390,7 @@ const routeTree = rootRoute.addChildren([
     autoPostMetaRoute,
     autoPostYouTubeRoute,
   ]),
+  remoteRoute,
 ]);
 
 export const router = createRouter({
